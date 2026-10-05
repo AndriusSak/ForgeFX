@@ -18,6 +18,7 @@ import { runKnobCoverageTests, KNOB_COVERAGE_CASE_COUNT } from './drivers/knob-c
 import { runWriteRejectionTests, WRITE_REJECTION_CASE_COUNT } from './drivers/write-rejection.test.js';
 import { runEnumCoverageTests, ENUM_COVERAGE_CASE_COUNT } from './drivers/enum-coverage.test.js';
 import { runBrowserGlobalsTests, BROWSER_GLOBALS_CASE_COUNT } from './drivers/browser-globals.test.js';
+import { runGen3WritePathTests, GEN3_WRITE_PATH_CASE_COUNT } from './drivers/gen3-write-path.test.js';
 import { runTelemetryTests, TELEMETRY_CASE_COUNT } from './drivers/telemetry.test.js';
 import { runAliasParityTests, ALIAS_PARITY_CASE_COUNT } from './api/alias-parity.test.js';
 import { runCapsTests, CAPS_CASE_COUNT } from './api/caps.test.js';
@@ -47,6 +48,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/write-rejection (${WRITE_REJECTION_CASE_COUNT} 0x64 attribution cases)`, run: runWriteRejectionTests },
   { name: `drivers/enum-coverage (${ENUM_COVERAGE_CASE_COUNT} real-gen3 enum/range completeness guards)`, run: runEnumCoverageTests },
   { name: `drivers/browser-globals (${BROWSER_GLOBALS_CASE_COUNT} drivers build with no Node process global)`, run: runBrowserGlobalsTests },
+  { name: `drivers/gen3-write-path (${GEN3_WRITE_PATH_CASE_COUNT} FM3 write rejection/norm/watch/grid-bound cases)`, run: runGen3WritePathTests },
   { name: `drivers/telemetry (${TELEMETRY_CASE_COUNT} cadence/traffic/echo-guard/yield cases)`, run: runTelemetryTests },
   { name: `api/alias-parity (${ALIAS_PARITY_CASE_COUNT} alias↔unified twins, mocked AM4)`, run: runAliasParityTests },
   { name: `api/caps (${CAPS_CASE_COUNT} device capability matrices)`, run: runCapsTests },

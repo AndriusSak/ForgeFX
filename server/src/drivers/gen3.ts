@@ -1236,8 +1236,13 @@ class Gen3Driver implements DeviceDriver {
     this.#emit({ type: 'changed', scope: 'grid' });
     return r;
   }
+  // W1.1: bypass and channel are write ops named in docs/write-protocol.md's op table, so they use
+  // #write to watch a short window for a 0x64 rejection of the function they sent (the accept/reject
+  // model). Trade-off: this adds up to the #write window (120 ms) to an "instant" toggle. Other
+  // fire-and-forget paths (a continuous knob stream, tapTempo, selectCell) keep #send — the contract
+  // does not demand a watch there.
   async setBypass(eid: number, bypassed: boolean) {
-    const r = await this.#send(this.#codec.buildSetBypass(eid, bypassed)); // instant toggle
+    const r = await this.#write(this.#codec.buildSetBypass(eid, bypassed));
     this.#emit({ type: 'changed', scope: 'grid' });
     return r;
   }
@@ -1248,7 +1253,7 @@ class Gen3Driver implements DeviceDriver {
     const frame = this.#prof.sceneChannelWriteMode === 'fm3-edit-fn01'
       ? this.#codec.buildSetChannelNative(eid, wireChannel)
       : this.#codec.buildSetChannel(eid, wireChannel);
-    const r = await this.#send(frame); // instant
+    const r = await this.#write(frame); // watch for the channel write's own 0x64 rejection
     this.#emit({ type: 'blockState', effectId: eid });
     return r;
   }
