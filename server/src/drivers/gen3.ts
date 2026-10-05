@@ -132,9 +132,13 @@ const UNIT_LABEL: Record<string, string> = {
   degrees: '°', semitones: 'st', pf: 'pF', ratio: ':1'
 };
 // units that mark a musician-facing knob. 'numeric' = a plain unitless knob (Drive, Tone, Level,
-// cut freqs…) — primary controls in many families; only 'unverified'/'count'/'enum' are non-knobs.
+// cut freqs…) — primary controls in many families; only 'unverified' / 'count' / 'enum' are non-knobs.
+// NOTE: this is an ALLOWLIST, so a real display unit missing here silently deletes the control from
+// every client (blockParams never serves it). 'pf' (picofarads — UNIT_LABEL renders it 'pF') is a real
+// unit: the amp block's Bright Cap (DISTORT/16, 10..10000 pF) is a 'knob' in the device's own layout.
+// test/drivers/knob-coverage.test.ts guards the invariant that no displayable unit is left out.
 const KNOB_UNITS = new Set([
-  'numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees'
+  'numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees', 'pf'
 ]);
 
 /** Append 1/2/3… to labels that repeat within a list (e.g. the cab's four "Low Cut" mic params),
