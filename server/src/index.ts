@@ -26,7 +26,18 @@ if (typeof globalThis.WebSocket === 'undefined') {
 }
 
 const PORT = Number(process.env.PORT ?? 5056);
-const app = await buildApp(registry);
+// `--writes false` starts the server READ-ONLY (docs/write-protocol.md:39): every device-write
+// endpoint answers 403. Accepts `--writes false` (space) and `--writes=false`. Default: writes on.
+const ARGV = process.argv.slice(2);
+const writesArg = (() => {
+  const eq = ARGV.find((a) => a.startsWith('--writes='));
+  if (eq) return eq.slice('--writes='.length);
+  const i = ARGV.indexOf('--writes');
+  return i >= 0 ? ARGV[i + 1] : undefined;
+})();
+const writesEnabled = writesArg !== 'false';
+const app = await buildApp(registry, { writes: writesEnabled });
+if (!writesEnabled) app.log.warn('[forgefx] --writes false: read-only server — every device-write endpoint answers 403');
 
 // Auto port allocation: try PORT; if it's taken, let the OS assign a free one (port 0).
 // The actual bound port is logged (and the desktop app picks a free port up front anyway).

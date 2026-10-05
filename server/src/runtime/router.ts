@@ -28,6 +28,7 @@ import type { FolderAdapter } from './folderAdapter.js';
 import type { ScanCachePersistence } from './localFolder.js';
 import type { Store } from './store.js';
 import type { CloudService } from './cloud.js';
+import { isDeviceWrite, isDryRunRequest, frameHex, READ_ONLY_BODY } from './writeGate.js';
 
 export interface RouterResponse {
   status: number;
@@ -55,6 +56,8 @@ export interface TelemetryService {
 export interface RuntimeDeps {
   registry: DeviceRegistry;
   store: Store;
+  /** Read-only server (`--writes false`): every DEVICE-write endpoint answers 403. Default: writes on. */
+  writes?: boolean;
   local?: RouterLocalDeps;
   cloud?: CloudService;
   telemetry?: TelemetryService;
@@ -267,7 +270,7 @@ export function createRouter(deps: RuntimeDeps): {
   on('GET', '/preset/blocks/:eid/params', (c) => h.blockParamsH(c.reply, Number(c.params.eid)));
   on('PUT', '/preset/blocks/:eid/params/:paramId', (c) => {
     const b = c.body as { value: number; continuous?: boolean };
-    return h.setParamH(c.reply, Number(c.params.eid), Number(c.params.paramId), b.value, b.continuous ?? true);
+    return h.setParamH(c.reply, Number(c.params.eid), Number(c.params.paramId), b.value, b.continuous ?? false);
   });
   on('POST', '/preset/blocks/:eid/bypass', (c) => h.bypassH(c.reply, Number(c.params.eid), (c.body as { bypassed: boolean }).bypassed));
   on('POST', '/preset/blocks/:eid/channel', async (c) => {
@@ -589,12 +592,29 @@ export function createRouter(deps: RuntimeDeps): {
       }
 
       const ctx: Ctx = { params, query, body: json, raw, reply: new Reply() };
+      // write-safety gates (writeGate.ts) — identical to app.ts so the twins stay in parity.
+      if (deps.writes === false && isDeviceWrite(m, pathname)) return respond(403, READ_ONLY_BODY);
+      let dry: { frames: number[][]; release: () => void } | null = null;
+      if (isDryRunRequest(path) && isDeviceWrite(m, pathname)) {
+        await driver().catch(() => {}); // activate on the real transport before capturing
+        dry = await registry.acquireDryRun();
+      }
       try {
         const out = await route.handler(ctx);
-        return respond(ctx.reply.statusCode, out);
+        const status = ctx.reply.statusCode;
+        if (dry) {
+          const hex = dry.frames.map(frameHex);
+          const body = out && typeof out === 'object' && !Array.isArray(out)
+            ? { ...(out as Record<string, unknown>), dryRun: true, frames: hex }
+            : { result: out, dryRun: true, frames: hex };
+          return respond(status, body);
+        }
+        return respond(status, out);
       } catch (e) {
         // uncaught handler error → Fastify's default 500 envelope
         return respond(500, { statusCode: 500, error: 'Internal Server Error', message: (e as Error).message });
+      } finally {
+        dry?.release();
       }
     }
     // Fastify's default not-found body, verbatim

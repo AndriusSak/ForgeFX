@@ -52,6 +52,7 @@ import { createGen2Driver } from './gen2.js';
 import { createGen1Driver } from './gen1.js';
 import { createVp4Driver } from './vp4.js';
 import type { DeviceDriver, DeviceEvent, DriverCtx, DriverCapabilities } from './types.js';
+import { captureTransport } from '../runtime/writeGate.js';
 import { cadenceFor, isTelemetryMode, TELEMETRY_MODES, type TelemetryMode, type CadenceProfile } from './telemetryProfiles.js';
 
 /** Device-cache doc key for the deviceCaches store collection: `<model-hex>_<major>p<minor>`
@@ -170,6 +171,12 @@ export class DeviceRegistry {
   }
 
   #transport: Transport | null = null;
+  // Dry-run capture (docs/write-protocol.md): while a capture is active the shared transport is
+  // replaced by a recording no-op, so the active driver's frames are collected instead of sent. A
+  // single slot + a lock serialize captures — there is ONE exclusive device transport, so two dry runs
+  // must never share a sink (the second waits for the first to release). See acquireDryRun().
+  #capture: number[][] | null = null;
+  #captureLock: Promise<void> = Promise.resolve();
   #connecting: Promise<Transport> | null = null;
   #detected = false;
   #modelId = -1; // the ACTUAL attached/forced model byte (-1 = not identified yet)
@@ -331,6 +338,7 @@ export class DeviceRegistry {
   /** The ONE shared open transport — every driver reads/writes through this, so AM4 + gen-3 never
    *  double-open the single exclusive MIDI/serial connection. */
   async transport(): Promise<Transport> {
+    if (this.#capture) return captureTransport(this.#capture); // dry run: capture the frames, send nothing
     if (this.#transport?.isOpen) return this.#transport;
     // share a single open across concurrent callers — the UI fires many requests on load, and
     // opening the same port twice fails the exclusive lock ("Cannot lock port").
@@ -349,6 +357,34 @@ export class DeviceRegistry {
       });
     }
     return this.#connecting;
+  }
+
+  /**
+   * Enter the dry-run capture scope (`?dryRun=true`): until `release()` is called the shared transport
+   * is replaced by a recording no-op, so every frame the active driver would emit is collected into
+   * `frames` and NOTHING reaches the device. The caller MUST resolve/activate the driver FIRST (on the
+   * real transport) — a capture transport can't detect a device. Releases are serialized and safe to
+   * call once; nested/concurrent dry runs wait for the current one to finish (one exclusive transport).
+   */
+  async acquireDryRun(): Promise<{ frames: number[][]; release: () => void }> {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const prior = this.#captureLock;
+    this.#captureLock = prior.then(() => gate);
+    await prior;
+    const frames: number[][] = [];
+    const prev = this.#capture;
+    this.#capture = frames;
+    let released = false;
+    return {
+      frames,
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#capture = prev;
+        release();
+      }
+    };
   }
 
   async health() {
