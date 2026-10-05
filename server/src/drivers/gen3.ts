@@ -237,11 +237,18 @@ class Gen3Driver implements DeviceDriver {
     return { ok: true };
   }
 
-  /** Write + watch a short window for a 0x64 rejection. For structural ops where a reject matters. */
+  /** Write + watch a short window for a 0x64 rejection. For structural ops where a reject matters.
+   *  A 0x64 echoes the FUNCTION it rejected (`[echoedFn, resultCode]` — see write-protocol.md +
+   *  parseMultipurposeResponse), so only count one that echoes THIS write's function: otherwise a
+   *  stray/late rejection for another op (a refused read, a queued write, an earlier error) is
+   *  misattributed to this write and surfaces as a rejected user action. A 0x64 too short to carry an
+   *  echoed function is treated conservatively as ours. */
   async #write(bytes: number[]): Promise<{ ok: boolean }> {
     const dev = await this.#conn();
+    const fn = bytes[5];
     const frames = await dev.request(bytes, { timeoutMs: 120, quietMs: 60, match: (fs) => fs.some((f) => f[5] === 0x64) });
-    return { ok: !frames.some((f) => f[5] === 0x64) };
+    const rejected = frames.some((f) => f[5] === 0x64 && (f[6] === undefined || f[6] === fn));
+    return { ok: !rejected };
   }
 
   /** Current preset number + name (one query). */
