@@ -1149,9 +1149,11 @@ export class DeviceRegistry {
     this.#resetBurst();
     const d = this.#active;
     if (!frames || frames.length === 0 || !d?.decodeEditBurst) return;
-    let res: { events: { effectId: number; paramId: number; norm: number }[]; reload: boolean };
+    let res: { events: { effectId: number; paramId: number; norm: number }[]; reload: boolean; structural?: boolean };
     try { res = d.decodeEditBurst(frames); } catch { return; }
-    if (res.reload) { this.#emit({ type: 'changed', scope: 'grid' }); return; } // first sight → full reload
+    // A first sight (reload) or a model/type-selector move (structural) needs a fresh read — the tile's
+    // model name and the block's control set come from the preset/params read, not from a param diff.
+    if (res.reload || res.structural) { this.#emit({ type: 'changed', scope: 'grid' }); return; }
     for (const e of res.events) this.#emit({ type: 'param', effectId: e.effectId, paramId: e.paramId, norm: e.norm });
   }
 }

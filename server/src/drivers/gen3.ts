@@ -456,6 +456,9 @@ class Gen3Driver implements DeviceDriver {
     const status = await this.#statusByEffectId();
     const out = new Map<number, number>();
     for (const [eid, st] of status) out.set(eid, st.channel);
+    // W2.3: the status dump enumerates the PLACED blocks, so record it as the sweep's target list — the
+    // registry's channel watch calls this every Nth meter tick, which makes the sweep's enumeration free.
+    if (out.size > 0) this.#placedCache = { eids: [...out.keys()], at: Date.now() };
     return out;
   }
 
@@ -1174,35 +1177,90 @@ class Gen3Driver implements DeviceDriver {
   #watchedEid: number | null = null; // FM3 poll target: the block Axis last opened (set in blockParams)
   #watchedChannel = 0; // active channel (0-3) of the watched block — the burst slice the poll diffs against
   #lastLocalEditAt = 0; // ms of the last local param write — the FM3 poll pauses briefly after (no self-echo)
+  // W2.3 (option B): round-robin sweep of the OTHER placed blocks, so a front-panel edit is reflected even
+  // when no block is open in Axis (or the edit is on a block the user is not looking at). The FM3 pushes
+  // nothing, so polling is the only mechanism; one block per tick keeps the marginal cost at a single
+  // fn-0x1F read — the same read the open-block path already makes.
+  #sweepCursor = 0;
+  #placedCache: { eids: number[]; at: number } | null = null;
+  static PLACED_TTL_MS = 10_000; // how long the placed-block list may be reused before a fresh status read
 
   /** FM3 device-edit POLL (capability deviceEditWatch — FM3 doesn't push, unlike FM9/III). The registry
-   *  supervisor calls this on a timer; we re-read the currently-open block via the fn-0x1F bulk read and
-   *  reuse decodeEditBurst's diff to emit per-param `param` events for any knob moved on the front panel.
-   *  Returns {changed:true} only for a first-sight reload (registry emits `changed`); per-param events are
-   *  emitted directly here. Paused for ~2s after a local write so it never echoes our own edit mid-drag. */
+   *  supervisor calls this on a timer; we re-read the open block (if any) via the fn-0x1F bulk read and
+   *  reuse decodeEditBurst's diff to emit per-param `param` events for any knob moved on the front panel,
+   *  then sweep ONE other placed block round-robin so an edit the user is not looking at is not lost.
+   *  Returns {changed:true} when the caller should emit a structural `changed` (first sight on the
+   *  open-block path, or a type-selector move anywhere); per-param events are emitted directly here.
+   *  Paused for ~2s after a local write so it never echoes our own edit mid-drag. */
   async readDeviceEditState(): Promise<{ changed: boolean }> {
-    const eid = this.#watchedEid;
-    if (eid == null) return { changed: false }; // no block opened yet — nothing to watch
     if (Date.now() - this.#lastLocalEditAt < 2000) return { changed: false }; // mid local edit → skip (avoid echo)
+    let changed = false;
+    const open = this.#watchedEid;
+    if (open != null) changed = await this.#readEditBlock(open, false);
+    // W2.3: sweep one OTHER placed block per tick (round-robin). Cheap by construction — the placed list
+    // is reused from the channel watch's own status dump for up to PLACED_TTL_MS, and the sweep itself is
+    // one fn-0x1F read, so a tick costs at most the same as the open-block read.
+    const targets = (await this.#sweepTargets()).filter((e) => e !== open);
+    if (targets.length > 0) {
+      const eid = targets[this.#sweepCursor % targets.length]!;
+      this.#sweepCursor++;
+      if (await this.#readEditBlock(eid, true)) changed = true;
+    }
+    return { changed };
+  }
+
+  /** Read one block's fn-0x1F body and diff it against its baseline. `primeQuietly` marks a SWEEP visit:
+   *  the first sight of a block records the baseline without asking for a full reload (otherwise the
+   *  first cycle would request one preset reload per placed block). Returns true when the caller should
+   *  emit a structural `changed` — i.e. the family's model/type selector moved, which a param diff alone
+   *  cannot express (the tile's model name comes from a fresh read). */
+  async #readEditBlock(eid: number, primeQuietly: boolean): Promise<boolean> {
     const dev = await this.#conn();
     let frames: number[][];
     try {
       frames = await dev.request(this.#codec.buildBlockBulkReadPoll(eid), { timeoutMs: dev.slow ? 4000 : 1500, quietMs: dev.slow ? 300 : 100, match: (fs) => fs.some((f) => f[5] === 0x76) });
-    } catch { return { changed: false }; } // no reply / timeout — keep last baseline
+    } catch { return false; } // no reply / timeout — keep last baseline
+    if (primeQuietly && !this.#editSnapshot.has(eid)) {
+      try {
+        const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
+        const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
+        if (family && bulk.values.length > 0) {
+          const { stride, base } = this.#channelSlice(family, bulk, 0);
+          this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
+        }
+      } catch { /* head-only / unreadable → stay unprimed, retry next cycle */ }
+      return false;
+    }
     const res = this.decodeEditBurst(frames);
-    if (res.reload) return { changed: true }; // first sight of this block → let the registry emit a reload
+    if (res.reload) return true; // first sight (open-block path) → let the registry emit a reload
     for (const e of res.events) this.#emit({ type: 'param', effectId: e.effectId, paramId: e.paramId, norm: e.norm });
-    return { changed: false }; // per-param events already emitted
+    return res.structural;
   }
 
-  decodeEditBurst(frames: number[][]): { events: { effectId: number; paramId: number; norm: number }[]; reload: boolean } {
+  /** Placed effect ids the sweep may target, cheapest source first: the list the registry's channel watch
+   *  already produced (fn-0x13 status dump — opportunistic, no extra traffic), else one status read.
+   *  Shunts and unmapped ids are filtered out: they have no param family to diff. */
+  async #sweepTargets(): Promise<number[]> {
+    let eids: number[] | null = null;
+    if (this.#placedCache && Date.now() - this.#placedCache.at < Gen3Driver.PLACED_TTL_MS) eids = this.#placedCache.eids;
+    if (!eids) {
+      const chans = await this.getActiveChannels().catch(() => new Map<number, number>());
+      eids = [...chans.keys()];
+      this.#placedCache = { eids, at: Date.now() };
+    }
+    return eids
+      .filter((e) => !!(SLUG_FAMILY[(slugForEffectId(e) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(e)))
+      .sort((a, b) => a - b);
+  }
+
+  decodeEditBurst(frames: number[][]): { events: { effectId: number; paramId: number; norm: number }[]; reload: boolean; structural: boolean } {
     let bulk: ReturnType<ModernFractalCodec['assembleGen3BlockBulkRead']>;
-    try { bulk = this.#codec.assembleGen3BlockBulkRead(frames); } catch { return { events: [], reload: false }; }
+    try { bulk = this.#codec.assembleGen3BlockBulkRead(frames); } catch { return { events: [], reload: false, structural: false }; }
     const eid = bulk.blockId;
-    if (bulk.values.length === 0) return { events: [], reload: false }; // head-only / empty — nothing to read
+    if (bulk.values.length === 0) return { events: [], reload: false, structural: false }; // head-only / empty — nothing to read
     const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
     const defs = family ? (this.#prof.params[family] ?? []) : [];
-    if (!family || defs.length === 0) return { events: [], reload: false }; // no param family mapped
+    if (!family || defs.length === 0) return { events: [], reload: false, structural: false }; // no param family mapped
     // Slice the block's ACTIVE channel (the one blockParams surfaced) — the body is channel-blocked, so
     // diffing against channel A while the user has B-D open would flag every A/B-different param as "moved".
     const { stride, base } = this.#channelSlice(family, bulk, eid === this.#watchedEid ? this.#watchedChannel : 0);
@@ -1211,16 +1269,19 @@ class Gen3Driver implements DeviceDriver {
     this.#editSnapshot.set(eid, cur);
     // First sight of this block (never opened) → we can't diff. Ask the registry for a full reload so the
     // edit isn't lost; subsequent edits on this block then diff per-param.
-    if (!prev) return { events: [], reload: true };
+    if (!prev) return { events: [], reload: true, structural: false };
+    const typeId = this.#paramId(family, 'type'); // the family's model/type selector, if it has one
     const events: { effectId: number; paramId: number; norm: number }[] = [];
+    let structural = false;
     for (const p of defs) {
       const id = p.paramId;
       if (id >= stride) continue;
       if (cur[id] === undefined || cur[id] === prev[id]) continue; // unchanged / truncated → skip
       if (!this.#prof.ranges[family]?.[id]) continue; // only real controls (skip internal/bypass churn)
+      if (typeId != null && id === typeId) structural = true; // a model change is not just a knob nudge
       events.push({ effectId: eid, paramId: id, norm: clamp01((cur[id] ?? 0) / 65534) });
     }
-    return { events, reload: false };
+    return { events, reload: false, structural };
   }
 
   // ── writes (all address the exact placed instance by effect id) ──
