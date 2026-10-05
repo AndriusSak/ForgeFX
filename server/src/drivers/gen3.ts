@@ -1224,7 +1224,12 @@ class Gen3Driver implements DeviceDriver {
     // a discrete write (enum) is rarer + worth confirming, so reject-watch it.
     const r = continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
     this.#lastLocalEditAt = Date.now(); // pause the FM3 device-edit poll briefly so it doesn't echo our own write mid-drag
-    this.#emit({ type: 'param', effectId: eid, paramId, norm: value }); // live: other UIs move the knob
+    // W1.2: the `param` event's `norm` is the 0..1 NORMALIZED value (drivers/types.ts). A discrete
+    // write's `value` is the enum/model ORDINAL, so broadcasting it as a norm handed every other
+    // window a value far outside 0..1 (Axis applies `p.norm = e.norm` verbatim). The event has no
+    // field for an ordinal, so a discrete write emits nothing — the reader surfaces the new ordinal
+    // on the next reload. Continuous keeps the (clamped) knob position.
+    if (continuous) this.#emit({ type: 'param', effectId: eid, paramId, norm: clamp01(value) });
     return r;
   }
   /** Change a block's model/type (the family TYPE selector ordinal). */

@@ -9,12 +9,12 @@ import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { PROFILES } from '../../src/devices.js';
 import { effectRoster } from 'forgefx-midi/devices/gen3';
 import type { DeviceEvent } from '../../src/drivers/types.js';
-import { MockTransport, assert } from '../helpers/mock.js';
+import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
 const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // DISTORT family, instance 1
 
-export const GEN3_WRITE_PATH_CASE_COUNT = 5;
+export const GEN3_WRITE_PATH_CASE_COUNT = 7;
 
 function sysex(fn: number, payload: readonly number[]): number[] {
   const body = [0xf0, 0x00, 0x01, 0x74, MODEL, fn, ...payload];
@@ -70,5 +70,22 @@ export async function runGen3WritePathTests(): Promise<void> {
     mock.reply = () => [];
     const r = await driver.setChannel(AMP_EID, 'B');
     assert(r.ok, 'setChannel: no 0x64 reply ⇒ accepted');
+  }
+
+  // ── W1.2: discrete writes must not carry an ordinal in `norm` ───────────────────────────────────
+  // `norm` is the 0..1 normalized value; a discrete write's `value` is the enum/model ordinal, so it
+  // must NOT be broadcast as a norm (Axis applies `p.norm = e.norm` verbatim → a norm of 16 everywhere).
+  {
+    const { driver, events } = makeGen3();
+    await driver.setParam(AMP_EID, 16, 16, false); // discrete ordinal 16
+    const paramEvents = events.filter((e) => e.type === 'param');
+    assert(paramEvents.length === 0, 'a discrete setParam emits NO param (norm) event');
+  }
+  {
+    const { driver, events } = makeGen3();
+    await driver.setParam(AMP_EID, 1, 0.5, true); // continuous knob position
+    const paramEvents = events.filter((e) => e.type === 'param');
+    assertEqual(paramEvents.length, 1, 'a continuous setParam still broadcasts one param event');
+    assert(paramEvents[0]!.norm >= 0 && paramEvents[0]!.norm <= 1, 'continuous param event norm ∈ [0,1]');
   }
 }
