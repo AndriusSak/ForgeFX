@@ -28,6 +28,7 @@ import {
   type DecodedBlock
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
+import { ENV } from './env.js';
 import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
   PresetGridDTO, PresetBlockDTO, PresetSummary, NamedParam, EnumParam, MeterVal,
@@ -136,6 +137,10 @@ const UNIT_LABEL: Record<string, string> = {
 const KNOB_UNITS = new Set([
   'numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees'
 ]);
+// Ceiling for an enum dropdown's option list — a guard against a bogus catalog row only. Real gen-3
+// lists top out at 336 ordinals (Axe-Fx III amp type); the list is otherwise bounded by the param's
+// device-true ordinal count, and a hard 128-cap used to silently truncate every longer list.
+const MAX_ENUM_OPTIONS = 4096;
 
 /** Append 1/2/3… to labels that repeat within a list (e.g. the cab's four "Low Cut" mic params),
  * so the UI can tell otherwise-identical controls apart. Mutates the items' `name`. */
@@ -196,7 +201,7 @@ class Gen3Driver implements DeviceDriver {
       //    frames) → registry POLLS the open block instead (deviceEditWatch → readDeviceEditState below),
       //    the same poll-fallback shape as the AM4. Disable in the field via FORGEFX_FM3_EDITSYNC=0.
       deviceEditPush: profile.model !== 0x11,
-      deviceEditWatch: profile.model === 0x11 && process.env.FORGEFX_FM3_EDITSYNC !== '0'
+      deviceEditWatch: profile.model === 0x11 && ENV.FORGEFX_FM3_EDITSYNC !== '0'
     };
   }
 
@@ -576,7 +581,11 @@ class Gen3Driver implements DeviceDriver {
           const raw = bulk.values[base + p.paramId] ?? 0;
           // discrete params store the ordinal; if the wire value looks 16-bit-scaled, unscale it
           const value = raw > max ? Math.round((raw / 65534) * (max - min)) + min : raw;
-          enums.push({ id: p.paramId, name: paramLabel(p), value, options: this.#enumOptions(family, p.paramId, p.name, min, max) });
+          // The OPTION LIST is bounded by ordinals, not by display values. A scaled enum carries its
+          // display range (PHASER_ORDER: scale 2, displayMin/Max 0..10) but only `enumCount` ordinals
+          // (6), so listing min..displayMax offered 6..10 as phantom selectable ordinals with no label.
+          const ordMax = range.enumCount != null ? min + range.enumCount - 1 : max;
+          enums.push({ id: p.paramId, name: paramLabel(p), value, options: this.#enumOptions(family, p.paramId, p.name, min, ordMax) });
         }
         // current model/type (for EQ band layout etc.)
         if (typeId != null) {
@@ -644,7 +653,7 @@ class Gen3Driver implements DeviceDriver {
         });
         const f = frames.find((fr) => fr[5] === 0x01 && fr[6] === 0x01 && fr[7] === 0x00 && (fr[8]! | (fr[9]! << 7)) === eid && (fr[10]! | (fr[11]! << 7)) === pid);
         if (f) {
-          if (process.env.FORGEFX_GETDUMP) console.log(`GETDUMP eid=${eid} pid=${pid} raw=${f.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+          if (ENV.FORGEFX_GETDUMP) console.log(`GETDUMP eid=${eid} pid=${pid} raw=${f.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
           out[pid] = unpackF32(f.slice(12, 17));
         }
       } catch {
@@ -678,7 +687,7 @@ class Gen3Driver implements DeviceDriver {
         const frames = await dev.request(buildGet(eid, pid), { timeoutMs: 800, quietMs: 50, match: (fs) => fs.some(match) });
         const f = frames.find(match);
         if (f) {
-          if (process.env.FORGEFX_GETDUMP) console.log(`RANGEDUMP eid=${eid} pid=${pid} raw=${f.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+          if (ENV.FORGEFX_GETDUMP) console.log(`RANGEDUMP eid=${eid} pid=${pid} raw=${f.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
           out[pid] = unpackF32(f.slice(12, 17));
         }
       } catch {
@@ -745,7 +754,7 @@ class Gen3Driver implements DeviceDriver {
         const f = frames.find(match);
         if (!f) return { present: false, raw: [] };
         const body = f.slice(7, -2);
-        if (process.env.FORGEFX_GETDUMP) console.log(`FCDUMP sel=${sel} body=${body.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+        if (ENV.FORGEFX_GETDUMP) console.log(`FCDUMP sel=${sel} body=${body.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
         // validate the config/side echo (body[14]=config, body[15] bit 0x40 = HOLD)
         const echoCfg = body[14] ?? -1;
         const echoSide = (body[15] ?? 0) & 0x40 ? 1 : 0;
@@ -1069,12 +1078,17 @@ class Gen3Driver implements DeviceDriver {
   }
 
   /** Build dropdown options for an enum param. Labels come from fractal-midi's enum overlay
-   * (matched by device param name) where known; otherwise the bare ordinal. */
+   * (matched by device param name) where known; otherwise the bare ordinal.
+   *
+   * The list is bounded by the ORDINAL count the caller passes (from the catalog row's enumCount), never
+   * by an arbitrary cap: a hard 128 silently dropped every ordinal past it, leaving the tail of long
+   * dropdowns unselectable. MAX_ENUM_OPTIONS only guards against a bogus catalog row;
+   * test/drivers/enum-coverage.test.ts asserts every served list matches its ordinal count. */
   #enumOptions(family: string, paramId: number, name: string, min: number, max: number): { value: number; label: string }[] {
     const cache = this.#prof.enumLabelsFor(family, paramId); // device-true labels from the editor cache
     const ov = resolveEnumValues(name); // III overlay fallback
     const out: { value: number; label: string }[] = [];
-    for (let v = min; v <= max && out.length < 128; v++) {
+    for (let v = min; v <= max && out.length < MAX_ENUM_OPTIONS; v++) {
       out.push({ value: v, label: cache?.[v] ?? ov?.values?.[v] ?? String(v) });
     }
     return out;

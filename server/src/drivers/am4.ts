@@ -65,6 +65,7 @@ import type { DispatchCtx, PresetSnapshot } from 'forgefx-midi/core';
 import type { Transport } from '../transport/types.js';
 import type { DeviceDriver, DriverCapabilities, DriverCtx, PresetGridDTO, PresetBlockDTO, NamedParam, EnumParam, Am4Slot } from './types.js';
 import { am4LayoutFor, type TypeModel, type DeviceLayout } from '../devices.js';
+import { ENV } from './env.js';
 
 /** Split a raw byte stream into its complete F0..F7 SysEx messages. */
 function splitSysex(bytes: number[]): number[][] {
@@ -348,7 +349,7 @@ class Am4Driver implements DeviceDriver {
       const f = frames.find(isStructResponse);
       if (!f) return null;
       const b = unpackMsb(f.slice(16, f.length - 2), STRUCT_BYTES); // 16-byte header … <septets> cksum F7
-      if (process.env.AM4_DEBUG !== '0') {
+      if (ENV.AM4_DEBUG !== '0') {
         // DEBUG: dump the unpacked structure + auto-locate block-type codes at every offset, so we can
         // confirm/fix the slot offset against a real preset. Remove once the slot layout is pinned.
         this.#log(`struct[192]: ${[...b].map((x) => x.toString(16).padStart(2, '0')).join('')}`);

@@ -360,7 +360,7 @@ type ParamDef = { paramId: number; name: string; displayLabel?: string; unit?: s
 // from EITHER source `ranges` resolves to — a static-catalog row (which carries them today) or a
 // walk-built RangeDef (which gains `taper` in a parallel work package). Optional → both read cleanly,
 // no rework when the walk builder starts populating it. `custom` also carries `taperPoints`.
-type RangeDef = { kind: string; displayMin: number; displayMax: number; typecode: number; scale?: number; step?: number; unit?: string; taper?: 'linear' | 'log' | 'flat' | 'custom'; taperPoints?: ReadonlyArray<readonly [number, number]> };
+type RangeDef = { kind: string; displayMin: number; displayMax: number; typecode: number; scale?: number; step?: number; unit?: string; taper?: 'linear' | 'log' | 'flat' | 'custom'; taperPoints?: ReadonlyArray<readonly [number, number]>; enumCount?: number };
 type ParamsByFamily = Record<string, ParamDef[]>;
 type Ranges = Record<string, Record<number, RangeDef>>;
 type RangeSections = Record<string, { stride: number; recordCount: number }>;
