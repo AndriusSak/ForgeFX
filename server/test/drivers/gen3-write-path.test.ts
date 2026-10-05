@@ -15,7 +15,7 @@ import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 const MODEL = 0x11; // FM3
 const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // DISTORT family, instance 1
 
-export const GEN3_WRITE_PATH_CASE_COUNT = 8;
+export const GEN3_WRITE_PATH_CASE_COUNT = 9;
 
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
 
@@ -143,5 +143,27 @@ export async function runGen3WritePathTests(): Promise<void> {
       res.events.some((e) => e.paramId === moved!.paramId),
       `decodeEditBurst diffs the channel the user switched to (paramId ${moved!.paramId})`
     );
+  }
+
+  // ── W1.4: setType suppresses the self-echo (local-edit window) ──────────────────────────────────
+  // A local setType must pause the edit poll for ~2 s, exactly like setParam. Otherwise the very next
+  // poll re-reads the type we just wrote and emits it back as a spurious param event.
+  {
+    const { driver, mock, events } = makeGen3();
+    const family = familyForEid(AMP_EID);
+    const stride = PROFILES[MODEL]!.rangeSections[family]?.stride ?? 1;
+    let bulkVals = new Array(stride * 4).fill(0); // primed zeros
+    mock.reply = (req) => {
+      if (req[5] === 0x13) return [statusFrame(AMP_EID, 0)];
+      if (req[5] === 0x1f) return blockBulkFrames(AMP_EID, bulkVals);
+      return []; // the fn-0x01 type write: accepted (silence)
+    };
+    await driver.blockParams(AMP_EID);
+    await driver.setType(AMP_EID, 5);
+    bulkVals = new Array(stride * 4).fill(65534); // the device now reflects the type we wrote
+    const before = events.length;
+    await driver.readDeviceEditState!();
+    const emitted = events.slice(before).filter((e) => e.type === 'param');
+    assertEqual(emitted.length, 0, 'setType pauses the edit poll — no self-echo param event');
   }
 }

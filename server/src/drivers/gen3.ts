@@ -1238,6 +1238,9 @@ class Gen3Driver implements DeviceDriver {
     const tid = family ? this.#paramId(family, 'type') : undefined;
     if (tid == null) return { ok: false };
     const r = await this.#write(this.#codec.buildSetParameter(eid, tid, value));
+    // W1.4: stamp the local-edit window like setParam/setChannel so the FM3 device-edit poll pauses
+    // ~2 s and does not re-read the type we just wrote and emit it back as a spurious param event.
+    this.#lastLocalEditAt = Date.now();
     this.#emit({ type: 'changed', scope: 'grid' });
     return r;
   }
