@@ -36,8 +36,9 @@ import { putStoreDoc } from './runtime/services.js';
 import { registerLocalRoutes } from './localStore.js';
 import { registerHelpRoutes } from './help.js';
 import { telemetryStatus, uploadDebugReport, type DebugReport } from './telemetry.js';
+import { isDeviceWrite, isDryRunRequest, frameHex, READ_ONLY_BODY } from './runtime/writeGate.js';
 
-export async function buildApp(registry: DeviceRegistry): Promise<FastifyInstance> {
+export async function buildApp(registry: DeviceRegistry, opts?: { writes?: boolean }): Promise<FastifyInstance> {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
   await app.register(cors, { origin: true });
   // tolerate an empty JSON body (no-body POSTs like /cloud/sync, /cloud/logout, /tempo/tap send
@@ -59,6 +60,43 @@ export async function buildApp(registry: DeviceRegistry): Promise<FastifyInstanc
     telemetryConfigH, telemetrySetH,
     decodeH, decodeBytes
   } = createUnifiedHandlers(registry);
+
+  // ── write-safety gates (docs/write-protocol.md:37-39, ROADMAP.md) ─────────────────────────────
+  //  • `--writes false` → read-only: every DEVICE-write endpoint answers 403; reads and the LOCAL
+  //    config store (/store, /local) are untouched because they never touch the unit. The same
+  //    predicate gates the browser runtime router, so the two surfaces stay in parity.
+  //  • `?dryRun=true` on a device write → the handler runs against a RECORDING transport, so the exact
+  //    frames it would send are captured and nothing reaches the device. The real handler still runs,
+  //    so validation still happens (a rejected request stays rejected); the hex is spliced into the
+  //    JSON response additively as { dryRun:true, frames:[hex,…] }.
+  const writesEnabled = opts?.writes !== false;
+  const barePath = (url: string) => url.split('?')[0] || url;
+  app.addHook('onRequest', async (req, reply) => {
+    if (!writesEnabled && isDeviceWrite(req.method, barePath(req.url))) return reply.code(403).send(READ_ONLY_BODY);
+  });
+  const dryRuns = new WeakMap<FastifyRequest, { frames: number[][]; release: () => void }>();
+  app.addHook('onRequest', async (req) => {
+    if (!writesEnabled) return;
+    if (!isDryRunRequest(req.url) || !isDeviceWrite(req.method, barePath(req.url))) return;
+    await driver().catch(() => {}); // activate the driver on the REAL transport before capturing
+    dryRuns.set(req, await registry.acquireDryRun());
+  });
+  app.addHook('onSend', async (req, _reply, payload) => {
+    const dry = dryRuns.get(req);
+    if (!dry) return payload;
+    try {
+      const parsed = typeof payload === 'string' && payload.length ? (JSON.parse(payload) as unknown) : {};
+      const out = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : { result: parsed };
+      out.dryRun = true;
+      out.frames = dry.frames.map(frameHex);
+      return JSON.stringify(out);
+    } catch { return payload; }
+  });
+  app.addHook('onResponse', (req, _reply, done) => {
+    const dry = dryRuns.get(req);
+    if (dry) { dryRuns.delete(req); dry.release(); }
+    done();
+  });
 
   // ── deprecated-alias plumbing (the folded /am4/* routes) ──
   // Every alias hit gets `Deprecation: true` + a `Sunset` date (≈ one release after Axis migrates to
@@ -374,7 +412,7 @@ export async function buildApp(registry: DeviceRegistry): Promise<FastifyInstanc
   app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/params', async (req, reply) => blockParamsH(reply, Number(req.params.eid)));
   app.put<{ Params: { eid: string; paramId: string }; Body: { value: number; continuous?: boolean } }>(
     '/preset/blocks/:eid/params/:paramId',
-    async (req, reply) => setParamH(reply, Number(req.params.eid), Number(req.params.paramId), req.body.value, req.body.continuous ?? true)
+    async (req, reply) => setParamH(reply, Number(req.params.eid), Number(req.params.paramId), req.body.value, req.body.continuous ?? false)
   );
   app.post<{ Params: { eid: string }; Body: { bypassed: boolean } }>('/preset/blocks/:eid/bypass', async (req, reply) => bypassH(reply, Number(req.params.eid), req.body.bypassed));
   app.post<{ Params: { eid: string }; Body: { channel: string } }>('/preset/blocks/:eid/channel', async (req, reply) => {
