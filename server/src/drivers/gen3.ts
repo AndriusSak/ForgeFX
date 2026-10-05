@@ -1259,6 +1259,11 @@ class Gen3Driver implements DeviceDriver {
       ? this.#codec.buildSetChannelNative(eid, wireChannel)
       : this.#codec.buildSetChannel(eid, wireChannel);
     const r = await this.#write(frame); // watch for the channel write's own 0x64 rejection
+    // W1.3: if this is the block the FM3 edit poll is watching, move the watch to the new channel so
+    // decodeEditBurst diffs the channel the user is now on (else a front-panel knob move on the new
+    // channel is diffed against the old channel's slice and dropped). Only the watched eid matters —
+    // decodeEditBurst uses #watchedChannel only when its eid === #watchedEid.
+    if (r.ok && eid === this.#watchedEid) this.#watchedChannel = wireChannel;
     this.#emit({ type: 'blockState', effectId: eid });
     return r;
   }

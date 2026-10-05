@@ -6,21 +6,46 @@
 //      nothing on accept; on rejection it returns a 0x64 whose body is [echoedFn, resultCode]").
 import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
-import { PROFILES } from '../../src/devices.js';
+import { PROFILES, SLUG_FAMILY } from '../../src/devices.js';
 import { effectRoster } from 'forgefx-midi/devices/gen3';
+import { packValue16 } from 'forgefx-midi/gen3/axe-fx-iii';
 import type { DeviceEvent } from '../../src/drivers/types.js';
 import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
 const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // DISTORT family, instance 1
 
-export const GEN3_WRITE_PATH_CASE_COUNT = 7;
+export const GEN3_WRITE_PATH_CASE_COUNT = 8;
+
+const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
 
 function sysex(fn: number, payload: readonly number[]): number[] {
   const body = [0xf0, 0x00, 0x01, 0x74, MODEL, fn, ...payload];
   let cs = 0;
   for (const b of body) cs ^= b;
   return [...body, cs & 0x7f, 0xf7];
+}
+
+/** fn=0x74/0x75/0x76 block-bulk-read reply carrying `values` (same shape as knob-coverage). */
+function blockBulkFrames(effectId: number, values: readonly number[]): number[][] {
+  const body: number[] = [0x00, 0x02];
+  for (const v of values) body.push(...packValue16(v));
+  return [
+    sysex(0x74, [...enc14(effectId), ...enc14(values.length), 0x07]),
+    sysex(0x75, body),
+    sysex(0x76, [])
+  ];
+}
+
+/** fn=0x13 status dump: one (eid, dd) triple per placed block (dd bit0=bypass, bits1-3=channel). */
+function statusFrame(effectId: number, channel: number, bypassed = false): number[] {
+  const dd = (channel << 1) | (bypassed ? 1 : 0);
+  return sysex(0x13, [...enc14(effectId), dd]);
+}
+
+function familyForEid(eid: number): string {
+  const slug = effectRoster().find((e) => e.page === eid)?.slug;
+  return (slug && (SLUG_FAMILY as Record<string, string>)[slug]) || '';
 }
 
 function makeGen3(): { driver: ReturnType<typeof createGen3Driver>; mock: MockTransport; events: DeviceEvent[] } {
@@ -87,5 +112,36 @@ export async function runGen3WritePathTests(): Promise<void> {
     const paramEvents = events.filter((e) => e.type === 'param');
     assertEqual(paramEvents.length, 1, 'a continuous setParam still broadcasts one param event');
     assert(paramEvents[0]!.norm >= 0 && paramEvents[0]!.norm <= 1, 'continuous param event norm ∈ [0,1]');
+  }
+
+  // ── W1.3: setChannel moves the edit-watch channel ───────────────────────────────────────────────
+  // Open the block on channel A (primes the diff baseline), switch to B, then feed a burst whose
+  // channel-B slice moved. The diff must look at channel B — before the fix #watchedChannel stayed A
+  // so the moved B param was never seen.
+  {
+    const { driver, mock } = makeGen3();
+    const family = familyForEid(AMP_EID);
+    const stride = PROFILES[MODEL]!.rangeSections[family]?.stride ?? 1;
+    const primed = new Array(stride * 4).fill(0); // all channels zero → baseline = zero A slice
+    mock.reply = (req) => {
+      if (req[5] === 0x13) return [statusFrame(AMP_EID, 0)];
+      if (req[5] === 0x1f) return blockBulkFrames(AMP_EID, primed); // fn-0x1F poll → 0x74/0x75/0x76 reply
+      return [];
+    };
+    await driver.blockParams(AMP_EID); // primes #editSnapshot[eid] with the channel-A slice (zeros)
+    await driver.setChannel(AMP_EID, 'B'); // must set #watchedChannel = 1
+
+    // A param that exists in the family with a range, inside the channel slice.
+    const defs = PROFILES[MODEL]!.params[family] ?? [];
+    const moved = defs.find((p) => p.paramId < stride && PROFILES[MODEL]!.ranges[family]?.[p.paramId]);
+    assert(!!moved, 'found a ranged param inside the channel slice to move');
+
+    const burst = new Array(stride * 4).fill(0);
+    burst[stride + moved!.paramId] = 5000; // move it on channel B only
+    const res = driver.decodeEditBurst!(blockBulkFrames(AMP_EID, burst));
+    assert(
+      res.events.some((e) => e.paramId === moved!.paramId),
+      `decodeEditBurst diffs the channel the user switched to (paramId ${moved!.paramId})`
+    );
   }
 }
