@@ -15,7 +15,7 @@ import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 const MODEL = 0x11; // FM3
 const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // DISTORT family, instance 1
 
-export const GEN3_WRITE_PATH_CASE_COUNT = 9;
+export const GEN3_WRITE_PATH_CASE_COUNT = 11;
 
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
 
@@ -165,5 +165,24 @@ export async function runGen3WritePathTests(): Promise<void> {
     await driver.readDeviceEditState!();
     const emitted = events.slice(before).filter((e) => e.type === 'param');
     assertEqual(emitted.length, 0, 'setType pauses the edit poll — no self-echo param event');
+  }
+
+  // ── W1.5: placeCell bounds against the FM3's own grid shape ─────────────────────────────────────
+  // The codec's buildSetGridCell backstop is the III's 14 columns; an FM3 col of 13/14 must be
+  // refused server-side rather than encoded past the 4x12 grid.
+  {
+    const { driver } = makeGen3();
+    let threw = false;
+    try {
+      await driver.placeCell(1, 13, AMP_EID);
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'placeCell: col 13 is outside the FM3 4x12 grid → refused');
+  }
+  {
+    const { driver } = makeGen3();
+    const r = await driver.placeCell(1, 12, AMP_EID); // the last valid FM3 column
+    assert(r.ok, 'placeCell: col 12 (FM3 boundary) still accepted');
   }
 }

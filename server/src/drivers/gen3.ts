@@ -1352,6 +1352,15 @@ class Gen3Driver implements DeviceDriver {
     return this.#write(this.#codec.buildRenamePreset(clean));
   }
   async placeCell(row: number, col: number, blockId: number) {
+    // W1.5: the codec's buildSetGridCell backstop is the III's 14 columns, so bound to THIS device's
+    // own grid shape first — an FM3 (4x12) col of 13/14 would otherwise encode a gridPos past the
+    // device's grid with no rejection. 1-indexed, matching the /preset/grid/cell contract.
+    const { rows, cols } = this.#prof;
+    if (!Number.isInteger(row) || row < 1 || row > rows || !Number.isInteger(col) || col < 1 || col > cols) {
+      const err = new Error(`${this.#prof.name} grid is ${rows}x${cols}; row/col must be 1..${rows}/1..${cols} (got ${row}/${col})`);
+      (err as Error & { statusCode?: number }).statusCode = 400; // client error, not a server fault
+      throw err;
+    }
     // Guard against placing an instance the unit doesn't have (e.g. Amp 2 on an FM3, which has one
     // amp). The protocol reserves an ID range per family but each unit allows fewer — reject here so
     // the rule is authoritative server-side, not just a UI hint, and we don't waste a doomed write.
