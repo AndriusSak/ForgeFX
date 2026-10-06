@@ -15,6 +15,7 @@ import { runDefinitionCompletenessTests, DEFINITION_COMPLETENESS_CASE_COUNT } fr
 import { runTablesTests, TABLES_CASE_COUNT } from './drivers/tables.test.js';
 import { runLayoutsTests, LAYOUTS_CASE_COUNT } from './drivers/layouts.test.js';
 import { runKnobCoverageTests, KNOB_COVERAGE_CASE_COUNT } from './drivers/knob-coverage.test.js';
+import { runCabLayoutVariantTests, CAB_LAYOUT_VARIANT_CASE_COUNT } from './drivers/cab-layout-variant.test.js';
 import { runWriteRejectionTests, WRITE_REJECTION_CASE_COUNT } from './drivers/write-rejection.test.js';
 import { runEnumCoverageTests, ENUM_COVERAGE_CASE_COUNT } from './drivers/enum-coverage.test.js';
 import { runBrowserGlobalsTests, BROWSER_GLOBALS_CASE_COUNT } from './drivers/browser-globals.test.js';
@@ -49,6 +50,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/tables (${TABLES_CASE_COUNT} identity checks, paramId cross-contamination guard)`, run: runTablesTests },
   { name: `drivers/layouts (${LAYOUTS_CASE_COUNT} editor-layout v2 variant-selection + passthrough)`, run: runLayoutsTests },
   { name: `drivers/knob-coverage (${KNOB_COVERAGE_CASE_COUNT} real-FM3 knob/unit coverage guards)`, run: runKnobCoverageTests },
+  { name: `drivers/cab-layout-variant (${CAB_LAYOUT_VARIANT_CASE_COUNT} Cab page follows the cab MODE, not the preamp type)`, run: runCabLayoutVariantTests },
   { name: `drivers/write-rejection (${WRITE_REJECTION_CASE_COUNT} 0x64 attribution cases)`, run: runWriteRejectionTests },
   { name: `drivers/enum-coverage (${ENUM_COVERAGE_CASE_COUNT} real-gen3 enum/range completeness guards)`, run: runEnumCoverageTests },
   { name: `drivers/browser-globals (${BROWSER_GLOBALS_CASE_COUNT} drivers build with no Node process global)`, run: runBrowserGlobalsTests },

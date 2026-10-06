@@ -1162,8 +1162,14 @@ class Gen3Driver implements DeviceDriver {
   #paramId(family: string, name: string): number | undefined {
     const defs = this.#prof.params[family] ?? [];
     if (name.toLowerCase() === 'type') {
+      // The family's layout-variant selector. MODEL / TYPE come first (amps, drives, chorus…); MODE
+      // covers families whose layout switches on a mode flag rather than a model — CABINET (0=Legacy
+      // IR page, 1=DynaCab page) and RESONATOR (Manual/Chordal). Without MODE the loose /TYPE$/ match
+      // below fell through to CABINET_PRETYPE, so the cab's page (and the DynaCab mic graph) flipped
+      // with the unrelated PREAMP type, and the Preamp Type dropdown was hidden from the client.
       return (defs.find((p) => p.name === `${family}_MODEL`)
         ?? defs.find((p) => p.name === `${family}_TYPE`)
+        ?? defs.find((p) => p.name === `${family}_MODE`)
         ?? defs.find((p) => p.unit === 'enum' && /TYPE$/i.test(p.name)))?.paramId;
     }
     return defs.find((p) => p.displayLabel === name || p.name === name)?.paramId;
