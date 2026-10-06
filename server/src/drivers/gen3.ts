@@ -27,7 +27,7 @@ import {
   retargetPresetDumpToEditBuffer,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
-import { SLUG_FAMILY, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
+import { SLUG_FAMILY, resolvePseudoParamControls, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
 import { ENV } from './env.js';
 import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
@@ -729,6 +729,16 @@ class Gen3Driver implements DeviceDriver {
     // so identical names get a 1/2/3 suffix the UI can tell apart.
     dedupeLabels(named);
     dedupeLabels(enums);
+    // Bridge the device's `_BTN_` pseudo-param controls (the cab page's per-cab M / S buttons, whose
+    // ids 65286… are never served) onto the REAL served params they drive (the `MUTE<n>` enum), so the
+    // SERVED layout binds live ids and no client has to re-resolve by name (parity audit §3.6 item 4).
+    // The served names are read AFTER dedupeLabels so the rewrite keys on exactly what the client sees.
+    const defNameById = new Map(defs.map((d) => [d.paramId, d.name]));
+    const served: ServedParamRef[] = [
+      ...enums.map((e) => ({ id: e.id, servedName: e.name, paramName: defNameById.get(e.id) ?? e.name })),
+      ...named.map((n) => ({ id: n.id, servedName: n.name, paramName: defNameById.get(n.id) ?? n.name })),
+    ];
+    layout = layout ? resolvePseudoParamControls(layout, served) : layout;
     return { block: blockName, slug, page, named, enums, type, layout };
   }
 
