@@ -212,6 +212,14 @@ export function createRouter(deps: RuntimeDeps): {
       return { blocks: await d.presetParams(Number(c.params.n)) };
     } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
   });
+  // Decoded modifier assignments for the CURRENT edit buffer (source → target block+param + slot).
+  on('GET', '/preset/modifiers', async (c) => {
+    try {
+      const d = await driver();
+      if (!d.presetModifiers) return unsupported(c.reply, 'presetModifiers');
+      return await d.presetModifiers();
+    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
+  });
   on('GET', '/presets/:n/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/blocks', (c) => h.blocksH(c.reply));

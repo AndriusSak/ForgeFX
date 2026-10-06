@@ -244,6 +244,15 @@ export async function buildApp(registry: DeviceRegistry, opts?: { writes?: boole
       return { blocks: await d.presetParams(Number(req.params.n)) };
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   });
+  // Decoded modifier assignments for the CURRENT edit buffer (source → target block+param + slot).
+  // The modifier editor's read-back source; curve values come from the slot's /raw block.
+  app.get('/preset/modifiers', async (_req, reply) => {
+    try {
+      const d = await driver();
+      if (!d.presetModifiers) return unsupported(reply, 'presetModifiers');
+      return await d.presetModifiers();
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  });
   // ── persistent store: documents (Axis config · library metadata · layouts) ──
   app.get<{ Params: { c: string } }>('/store/:c', (req) => ({ docs: store.listDocs(req.params.c) }));
   app.get<{ Params: { c: string; id: string } }>('/store/:c/:id', (req, reply) => {

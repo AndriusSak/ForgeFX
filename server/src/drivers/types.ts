@@ -7,6 +7,29 @@ import type { TypeModel, DeviceLayout, DeviceProfile } from '../devices.js';
 import type { Transport } from '../transport/types.js';
 import type { TelemetryMode, CadenceProfile } from './telemetryProfiles.js';
 
+/** One decoded modifier assignment from a gen-3 preset body: a modulation SOURCE routed onto a
+ *  target block parameter. `targetEffectId` is resolved from the preset's placed grid (null when the
+ *  decoded target name isn't a placed block — e.g. a stale/empty pre-chain entry); `slot` is the
+ *  1-based modifier slot when the assignment lives in the body's pre-chain modifier table (null for a
+ *  chain-embedded modifier, whose slot the codec doesn't expose). Curve VALUES are intentionally NOT
+ *  decoded here — read them live from the slot's raw block (GET /preset/blocks/<slotEid>/raw, slotEid
+ *  = modModel.effectId + slot - 1). The FM3-specific slot indexing is inferred from the body table
+ *  order (see the gen-3 driver's decodeModifiers) and is hardware-unverified. */
+export interface PresetModifier {
+  /** Decoded source display name (e.g. "LFO 1A", "External 1", "ADSR 1"). */
+  source: string;
+  /** Decoded target block display name (e.g. "Filter 1"). */
+  target: string;
+  /** Resolved target block effectId (from the preset grid), or null when the target isn't placed. */
+  targetEffectId: number | null;
+  /** Target parameter id on that block. */
+  param: number;
+  /** Where the modifier record was found in the body. */
+  origin: 'pre-chain' | 'chain';
+  /** 1-based modifier slot (pre-chain entries only), else null. */
+  slot: number | null;
+}
+
 /** Library-friendly decoded preset: name, scenes, and the unique effect blocks it contains. */
 export type PresetSummary = {
   number: number;
@@ -27,6 +50,9 @@ export type PresetSummary = {
    *  Populated for offline file decode + the on-demand /params endpoint; omitted from the bulk device
    *  scan to keep summaries light (use `models` for type search there, fetch /params for deep queries). */
   params?: DecodedBlock[];
+  /** Decoded modifier assignments (source → target block+param) from the preset body. Gen-3 only;
+   *  present when the decoder found any. Curve values are read live from the slot's raw block. */
+  modifiers?: PresetModifier[];
 };
 
 export interface GridCellDTO {
@@ -209,6 +235,9 @@ export interface DeviceDriver {
   /** Raw .syx bytes (the backup blob) + decoded summary for one slot — the backups service's source. */
   dumpRaw?(n: number): Promise<{ bytes: Uint8Array; summary: PresetSummary }>;
   decodePresetBytes?(bytes: Uint8Array): PresetSummary;
+  /** Decoded modifier assignments for the CURRENT edit buffer (source → target block+param, plus the
+   *  pre-chain slot when known) — the modifier editor's read-back source. Gen-3 only. */
+  presetModifiers?(): Promise<{ modifiers: PresetModifier[] }>;
   presetBodyHex?(): Promise<{ len: number; hex: string }>;
   placedBlocks?(): Promise<PresetBlockDTO[]>;
 
