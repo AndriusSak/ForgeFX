@@ -25,14 +25,14 @@ import {
   readBlockParamsForModel, modelsFromBlocks,
   effectRoster, blockRefForEid, slugForEffectId, blockInstances,
   retargetPresetDumpToEditBuffer,
-  type DecodedBlock
+  type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
 import { ENV } from './env.js';
 import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
   PresetGridDTO, PresetBlockDTO, PresetSummary, NamedParam, EnumParam, MeterVal,
-  FcSwitchState, FcReadState
+  FcSwitchState, FcReadState, PresetModifier
 } from './types.js';
 
 // slug → { name, page=base effect id } from the authoritative codec base table (replaces the old
@@ -69,6 +69,8 @@ interface DecodedDump {
   dump: DecodedDumpDTO;
   body: Uint8Array;
   decompSize: number;
+  /** Modifier assignments the codec decoded from the body (source/target name/param/origin). */
+  modifiers: Gen3Modifier[];
 }
 
 /** Keep only the dump frames (0x77 header / 0x78 chunks / 0x79 footer) and flatten to the byte
@@ -83,6 +85,19 @@ function dumpBytesFromFrames(frames: readonly (readonly number[])[]): Uint8Array
     if (fn === 0x77 || fn === 0x78 || fn === 0x79) keep.push(...f);
   }
   return Uint8Array.from(keep);
+}
+
+// Pre-chain modifier table geometry — MUST mirror forgefx-midi/src/devices/gen3/presetBody.ts
+// (extractPreChainModifiers). Used only to recover each decoded modifier's 1-based slot; if the codec's
+// offsets ever move, the modifier-readback suite's cross-check fails loudly.
+const MODIFIER_PRE_CHAIN_START = 0x240;
+const MODIFIER_FIRST_WORD = 502;
+const MODIFIER_ENTRY_SIZE = 48;
+const MODIFIER_MAX_ENTRIES = 12;
+
+/** Little-endian u16 read at a byte offset (0 when past the end). */
+function u16(data: Uint8Array, off: number): number {
+  return ((data[off] ?? 0) | ((data[off + 1] ?? 0) << 8)) & 0xffff;
 }
 
 /** Full dump decode via the package pipeline (parse → raw_patch/CRC/Huffman → structured body),
@@ -121,7 +136,8 @@ function decodeDump(frames: readonly (readonly number[])[], prof: DeviceProfile)
       sceneNames: body3.scene_names ?? []
     },
     body: raw.body,
-    decompSize: raw.decompSize
+    decompSize: raw.decompSize,
+    modifiers: body3.modifiers ?? []
   };
 }
 
@@ -341,7 +357,7 @@ class Gen3Driver implements DeviceDriver {
     const blocks = this.#decodeBlocks(decoded);
     const summary = this.#summarizeDump(decoded.dump, modelsFromBlocks(blocks), presetNumber);
     if (withParams) summary.params = blocks; // cache build: summary + full params in one dump
-    return summary;
+    return this.#withModifiers(decoded, summary);
   }
 
   /** Full per-block params (every family/param) for one device preset — the deep-search / detail source. */
@@ -354,7 +370,7 @@ class Gen3Driver implements DeviceDriver {
   async dumpRaw(n: number): Promise<{ bytes: Uint8Array; summary: PresetSummary }> {
     const frames = await this.#dumpFrames(n);
     const decoded = decodeDump(frames, this.#prof);
-    const summary = this.#summarizeDump(decoded.dump, modelsFromBlocks(this.#decodeBlocks(decoded)), n);
+    const summary = this.#withModifiers(decoded, this.#summarizeDump(decoded.dump, modelsFromBlocks(this.#decodeBlocks(decoded)), n));
     return { bytes: Uint8Array.from(frames.flat()), summary };
   }
 
@@ -386,7 +402,66 @@ class Gen3Driver implements DeviceDriver {
     const blocks = this.#decodeBlocks(decoded);
     const summary = this.#summarizeDump(decoded.dump, modelsFromBlocks(blocks), -1);
     summary.params = blocks; // offline files embed full params (few files → fine for search/storage)
+    return this.#withModifiers(decoded, summary);
+  }
+
+  /** Attach decoded modifier assignments to a summary — gen-3 only, and only when the codec found
+   *  any. `targetEffectId` is resolved from the placed grid (modifier targets name blocks through the
+   *  same effectName table the grid uses); `slot` comes from the body's pre-chain modifier table. */
+  #withModifiers(decoded: DecodedDump, summary: PresetSummary): PresetSummary {
+    const modifiers = this.#decodeModifiers(decoded);
+    if (modifiers.length) summary.modifiers = modifiers;
     return summary;
+  }
+
+  /** Decode the modifier assignments from the preset body into the driver DTO. Mirrors the codec's
+   *  `decodeGen3Body().modifiers` for the source/target/param/origin, then enriches each with the
+   *  resolved target effectId (from the grid) and — for pre-chain entries — the 1-based slot.
+   *
+   *  SLOT INFERENCE: the codec's extractPreChainModifiers walks a fixed 12-entry table at body offset
+   *  0x240 (entry i at word 502 + i*48) and returns non-empty entries in table order, but drops the
+   *  absolute index. We re-walk the SAME table (same constants + skip rule as
+   *  forgefx-midi/src/devices/gen3/presetBody.ts) to recover each entry's index, and map index i → slot
+   *  i+1 (the table is slot-indexed — factory presets leave gaps, e.g. slots 2/3/6 populated, 1/4/5
+   *  empty). decodeGen3Body emits all pre-chain entries first, in the same order, so the k-th pre-chain
+   *  modifier pairs with the k-th non-empty table index. This indexing is inferred, NOT
+   *  hardware-verified; the modifier-readback suite cross-checks it against the codec on real dumps. */
+  #decodeModifiers(decoded: DecodedDump): PresetModifier[] {
+    const list = decoded.modifiers;
+    if (!list.length) return [];
+    const nameToEid = new Map<string, number>();
+    for (const c of decoded.dump.grid) if (!c.isShunt && c.effectId) nameToEid.set(c.name, c.effectId);
+
+    const slots: number[] = [];
+    const body = decoded.body;
+    for (let i = 0; i < MODIFIER_MAX_ENTRIES; i++) {
+      const abs = MODIFIER_PRE_CHAIN_START + (MODIFIER_FIRST_WORD + i * MODIFIER_ENTRY_SIZE) * 2;
+      if (abs + 12 * 2 > body.length) break;
+      if (u16(body, abs) !== 25) break; // marker, same as the codec
+      const sourceId = u16(body, abs + 2 * 2);
+      const targetEid = u16(body, abs + 10 * 2);
+      const paramNum = u16(body, abs + 11 * 2);
+      if (targetEid === 0 && paramNum === 0 && sourceId === 0) continue; // empty entry
+      slots.push(i + 1);
+    }
+
+    let pre = 0;
+    return list.map((m) => ({
+      source: m.source,
+      target: m.target,
+      targetEffectId: nameToEid.get(m.target) ?? null,
+      param: m.param,
+      origin: m.origin,
+      slot: m.origin === 'pre-chain' ? (slots[pre++] ?? null) : null
+    }));
+  }
+
+  /** Decoded modifier assignments for the CURRENT edit buffer — the modifier editor's read-back
+   *  source (GET /preset/modifiers). One preset dump; no extra wire. */
+  async presetModifiers(): Promise<{ modifiers: PresetModifier[] }> {
+    const frames = await this.#dumpFrames(EDIT_BUFFER);
+    const decoded = decodeDump(frames, this.#prof);
+    return { modifiers: this.#decodeModifiers(decoded) };
   }
 
   /** Decode every placed block's full params from the preset body, table-driven via the universal
