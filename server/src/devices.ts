@@ -381,6 +381,10 @@ export interface DeviceProfile {
   instanceLimits: Record<string, number>; // slug → device-true instance count (≥2 only; rest = 1)
   params: ParamsByFamily;
   ranges: Ranges;
+  /** The CATALOGUE (editor-mined) rows, kept alongside the merged `ranges` so a device-cache row that
+   *  cannot be served on its own terms can fall back to the catalogue description instead of deleting
+   *  the param. Set only on runtime profiles (see `runtimeProfileFrom`). */
+  staticRanges?: Ranges;
   /** Device-true fn=0x1F channel-block wire stride by family. Do not derive this from max(paramId); tables include special high ids. */
   rangeSections: RangeSections;
   rosterFor(slug: string): TypeModel[];
@@ -621,6 +625,7 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   return {
     ...staticProfile,
     ranges: mergedRanges,
+    staticRanges: staticProfile.ranges, // catalogue rows, for the servability fallback in the driver
     rangeSections: mergedSections,
     rosterFor(slug: string): TypeModel[] {
       const fam = SLUG_FAMILY[slug.toLowerCase()];

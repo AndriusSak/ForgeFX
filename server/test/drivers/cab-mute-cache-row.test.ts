@@ -54,7 +54,7 @@ async function serveCabEnums(profile: (typeof PROFILES)[number]) {
   return (await driver.blockParams(CAB_EID)).enums;
 }
 
-export const CAB_MUTE_CACHE_ROW_CASE_COUNT = 3;
+export const CAB_MUTE_CACHE_ROW_CASE_COUNT = 4;
 
 export async function runCabMuteCacheRowTests() {
   const staticProfile = PROFILES[MODEL]!;
@@ -96,5 +96,22 @@ export async function runCabMuteCacheRowTests() {
     const m2 = enums.find((e) => e.id === 25);
     assert(m2, 'a usable cached row keeps pid 25 served');
     assertEqual(m2!.options.length, 2, 'and its narrower device-true range wins over the catalogue');
+  }
+
+  // 4. THE REPORTED CASE, refined: the cache row for pid 25 is a FLOAT. Such a row cannot be served
+  //    at all here — the knob filter needs a real display unit and this def's unit is the marker
+  //    'unverified', while the enum filter needs kind 'enum' — so both drop it and the param vanishes
+  //    (the device framed it as usable, so the degenerate-row guard above does not apply). The
+  //    catalogue says it is a discrete selector, which is what the device's own M/S button draws.
+  {
+    const asFloat = runtimeProfileFrom(
+      { ranges: { CABINET: { 25: { kind: 'float', displayMin: 0, displayMax: 1, typecode: 32 } } } } as never,
+      staticProfile
+    );
+    const enums = await serveCabEnums(asFloat as never);
+    const m2 = enums.find((e) => e.id === 25);
+    assert(m2, `a float cache row on a marker-unit def must not delete MUTE2 — served ids: ${enums.map((e) => e.id).join(',')}`);
+    assertEqual(m2!.name, 'MUTE2', 'the catalogue row serves it');
+    assertEqual(m2!.options.length, 3, 'with the catalogue -- / MUTE / SOLO options');
   }
 }
