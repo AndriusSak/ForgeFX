@@ -547,13 +547,27 @@ class Gen3Driver implements DeviceDriver {
       return { block: blockName, slug, page, named: [], enums: [], type: null, layout }; // no device-true param family mapped
     }
     const defs = this.#prof.params[family] ?? [];
+    // Which range row actually SERVES a param. A device-cache row wins only when it can be served on
+    // its own terms: an enum row always can, a float row only with a real display unit (KNOB_UNITS)
+    // and a non-zero width. A cache row that fails that test would silently DELETE the param — both
+    // filters drop it — so when the catalogue says the param IS a discrete selector, prefer the
+    // catalogue: the device's own page still draws the control (e.g. the FM3 Cab's per-cab MUTE, pid
+    // 25, which the cache describes as a float on a marker-unit def, making cab 2's Mute/Solo vanish).
+    const catalogue = this.#prof.staticRanges ?? this.#prof.ranges;
+    const rangeFor = (p: { paramId: number; unit?: string }) => {
+      const merged = this.#prof.ranges[family]?.[p.paramId];
+      if (merged?.kind !== 'float') return merged;
+      if (KNOB_UNITS.has(p.unit ?? '')) return merged;
+      const stat = catalogue[family]?.[p.paramId];
+      return stat?.kind === 'enum' ? stat : merged;
+    };
     // knob params = continuous, musician-facing: a float range + a real display unit
     // (drops enum selectors, internal 'numeric'/'unverified' params, and bypass flags).
     // knobs = every continuous param with a usable range. We expose ALL real controls (the UI
     // organizes them); only genuinely-dead params are dropped: no range (min===max) or the bypass flag.
     const seenIds = new Set<number>();
     const knobs = defs.filter((p) => {
-      const range = this.#prof.ranges[family]?.[p.paramId];
+      const range = rangeFor(p);
       if (range?.kind !== 'float') return false;
       if (!KNOB_UNITS.has(p.unit ?? '')) return false;
       if (/bypass/i.test(p.displayLabel ?? p.name)) return false;
@@ -566,7 +580,7 @@ class Gen3Driver implements DeviceDriver {
     // plus the raw bypass flag; everything else (modes, slopes, mics, mic/cab pickers…) is shown.
     const typeId = this.#paramId(family, 'type');
     const enumDefs = defs.filter((p) => {
-      const range = this.#prof.ranges[family]?.[p.paramId];
+      const range = rangeFor(p);
       if (range?.kind !== 'enum' || p.paramId === typeId) return false;
       if (range.displayMax <= range.displayMin) return false;
       if (/^bypass$/i.test(p.displayLabel ?? p.name)) return false;
@@ -594,7 +608,7 @@ class Gen3Driver implements DeviceDriver {
           named.push({ id: p.paramId, name: paramLabel(p), ...this.#display(family, p.paramId, raw) });
         }
         for (const p of enumDefs) {
-          const range = this.#prof.ranges[family]![p.paramId]!;
+          const range = rangeFor(p)!; // the SERVING row (see rangeFor), not the raw merged one
           const max = Math.round(range.displayMax);
           const min = Math.round(range.displayMin);
           const raw = bulk.values[base + p.paramId] ?? 0;
@@ -1162,8 +1176,14 @@ class Gen3Driver implements DeviceDriver {
   #paramId(family: string, name: string): number | undefined {
     const defs = this.#prof.params[family] ?? [];
     if (name.toLowerCase() === 'type') {
+      // The family's layout-variant selector. MODEL / TYPE come first (amps, drives, chorus…); MODE
+      // covers families whose layout switches on a mode flag rather than a model — CABINET (0=Legacy
+      // IR page, 1=DynaCab page) and RESONATOR (Manual/Chordal). Without MODE the loose /TYPE$/ match
+      // below fell through to CABINET_PRETYPE, so the cab's page (and the DynaCab mic graph) flipped
+      // with the unrelated PREAMP type, and the Preamp Type dropdown was hidden from the client.
       return (defs.find((p) => p.name === `${family}_MODEL`)
         ?? defs.find((p) => p.name === `${family}_TYPE`)
+        ?? defs.find((p) => p.name === `${family}_MODE`)
         ?? defs.find((p) => p.unit === 'enum' && /TYPE$/i.test(p.name)))?.paramId;
     }
     return defs.find((p) => p.displayLabel === name || p.name === name)?.paramId;

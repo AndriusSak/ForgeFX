@@ -381,6 +381,10 @@ export interface DeviceProfile {
   instanceLimits: Record<string, number>; // slug → device-true instance count (≥2 only; rest = 1)
   params: ParamsByFamily;
   ranges: Ranges;
+  /** The CATALOGUE (editor-mined) rows, kept alongside the merged `ranges` so a device-cache row that
+   *  cannot be served on its own terms can fall back to the catalogue description instead of deleting
+   *  the param. Set only on runtime profiles (see `runtimeProfileFrom`). */
+  staticRanges?: Ranges;
   /** Device-true fn=0x1F channel-block wire stride by family. Do not derive this from max(paramId); tables include special high ids. */
   rangeSections: RangeSections;
   rosterFor(slug: string): TypeModel[];
@@ -594,9 +598,25 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   const builtCabIrs = built.cabIrs ?? {};
 
   // ranges: static per-family maps, then the cache's rows merged over them (device-true wins).
+  //
+  // …but a cache row may only REFINE a param, never DELETE it. A degenerate row (zero-width display
+  // range) carries no information and, if it wins, silently removes a param the device's own editor
+  // layout still references — a control on the device page that binds to nothing. Real case: the FM3
+  // Cab block's per-cab MUTE (pid 25) — the layout serves a M/S button for cab 2, but a degenerate
+  // cached row for 25 dropped the enum, so the second cab's Mute/Solo vanished from the UI entirely.
+  const usable = (r?: RangeDef): boolean =>
+    !!r && Number.isFinite(r.displayMin) && Number.isFinite(r.displayMax) && r.displayMax > r.displayMin;
   const mergedRanges: Ranges = {};
   for (const [fam, rows] of Object.entries(staticProfile.ranges)) mergedRanges[fam] = { ...rows };
-  for (const [fam, rows] of Object.entries(built.ranges ?? {})) mergedRanges[fam] = { ...(mergedRanges[fam] ?? {}), ...(rows as Record<number, RangeDef>) };
+  for (const [fam, rows] of Object.entries(built.ranges ?? {})) {
+    const merged: Record<number, RangeDef> = { ...(mergedRanges[fam] ?? {}) };
+    for (const [pid, row] of Object.entries(rows as Record<string, RangeDef>)) {
+      const stat = merged[Number(pid)];
+      const keepStatic = !usable(row) && usable(stat);
+      merged[Number(pid)] = keepStatic && stat ? stat : row;
+    }
+    mergedRanges[fam] = merged;
+  }
 
   // rangeSections: same static-then-cache merge (per family).
   const mergedSections: RangeSections = { ...staticProfile.rangeSections };
@@ -605,6 +625,7 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   return {
     ...staticProfile,
     ranges: mergedRanges,
+    staticRanges: staticProfile.ranges, // catalogue rows, for the servability fallback in the driver
     rangeSections: mergedSections,
     rosterFor(slug: string): TypeModel[] {
       const fam = SLUG_FAMILY[slug.toLowerCase()];

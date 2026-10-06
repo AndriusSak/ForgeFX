@@ -133,6 +133,34 @@ export async function buildApp(registry: DeviceRegistry, opts?: { writes?: boole
   });
   // full connection diagnostic for the desktop debug log, plus the deprecated-alias hit counters
   app.get('/diag', async () => ({ ...(await registry.diagnostics()), deprecatedAliasHits: { ...aliasHits } }));
+  // Diagnostic (READ-ONLY): which RANGE row serves a family's param. Merged rows come from the device's
+  // on-connect self-describe cache where it has them (see runtimeProfileFrom) and can differ in KIND
+  // from the catalogue, so a param missing from /preset/blocks/:eid/params can be traced to the row
+  // that dropped it. `?family=CABINET&pid=25` for one param, else the whole family.
+  app.get<{ Querystring: { family?: string; pid?: string } }>('/diag/ranges', async (req) => {
+    const profile = registry.profile;
+    const family = (req.query.family ?? 'CABINET').toUpperCase();
+    const merged = profile.ranges[family] ?? {};
+    const catalogue = (profile.staticRanges ?? profile.ranges)[family] ?? {};
+    const defs = new Map((profile.params[family] ?? []).map((p) => [p.paramId, p]));
+    const pid = req.query.pid != null ? Number(req.query.pid) : null;
+    const ids = pid != null ? [pid] : Object.keys(merged).map(Number).sort((a, b) => a - b);
+    const row = (r?: { kind: string; displayMin: number; displayMax: number }) =>
+      r ? { kind: r.kind, min: r.displayMin, max: r.displayMax } : null;
+    return {
+      profile: profile.key,
+      model: `0x${profile.model.toString(16)}`,
+      family,
+      count: ids.length,
+      rows: ids.map((id) => ({
+        pid: id,
+        name: defs.get(id)?.name ?? null,
+        unit: defs.get(id)?.unit ?? null,
+        serving: row(merged[id]),
+        catalogue: row(catalogue[id])
+      }))
+    };
+  });
   app.get('/device', () => registry.deviceInfo());
   app.get('/ports', () => registry.connections()); // serial + MIDI connections (Fractal flagged) + chosen + override
   app.post<{ Body: { transport?: 'serial' | 'midi'; id?: string | null; inId?: string | null; outId?: string | null; model?: string | null } }>('/ports/select', (req) => {
