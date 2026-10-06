@@ -27,7 +27,7 @@ const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // DISTORT f
  *  knob), 'enum' (a selector). Every other unit on a float range is a musician-facing knob. */
 const NON_KNOB_UNITS = new Set(['unverified', 'count', 'enum']);
 
-export const KNOB_COVERAGE_CASE_COUNT = 3;
+export const KNOB_COVERAGE_CASE_COUNT = 4;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -126,4 +126,18 @@ export async function runKnobCoverageTests(): Promise<void> {
     }
   }
   assertEqual(offenders.length, 0, `no displayable unit is missing from KNOB_UNITS (offenders: ${offenders.join(', ') || 'none'})`);
+
+  // 4. The Cab block's DynaCab mic Position reaches the client. The FM3 layout binds BOTH its
+  //    'Position' knob AND its dynaCabControl mic graph (CAP->EDGE) to CABINET/93, and the Axis
+  //    Cab page renders Distance 1/2 but no Position and no graph when the param is absent.
+  //    Case 3 does NOT protect this: while the unit reads a non-knob marker the param is skipped,
+  //    so reverting the unit would fail nothing. Pin the two ids explicitly.
+  const CAB_EID = effectRoster().find((e) => e.slug === 'cab')!.page;
+  const cab = await servedKnobs(profile, CAB_EID);
+  for (const id of [93, 94]) {
+    const pos = cab.get(id);
+    assert(!!pos, `cab block serves DynaCab Position (CABINET/${id}) as a knob`);
+    assertEqual(pos!.min, 0, `DynaCab Position ${id} device-true min`);
+    assertEqual(pos!.max, 10, `DynaCab Position ${id} device-true max`);
+  }
 }
