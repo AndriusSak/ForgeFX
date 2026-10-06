@@ -208,6 +208,63 @@ const layoutFrom = (layouts: DeviceEditorLayouts) =>
     };
   };
 
+// A param the block actually SERVES on the wire: its id, the served display name the client keys on
+// (`named`/`enums` `.name`, i.e. the family-prefix-stripped label), and the raw editor param symbol
+// (the codec's `<FAMILY>_<SYM>`, written back into the layout when a pseudo control is rewritten).
+export type ServedParamRef = { id: number; servedName: string; paramName: string };
+
+/**
+ * Rewrite layout controls that carry a `_BTN_` pseudo-param id into the REAL served param they drive,
+ * so the SERVED layout carries live ids and no client has to bridge the gap by matching a name.
+ *
+ * WHY (parity audit §3.6 item 4): the cab page's per-cab M / S buttons are addressed with ids
+ * (`CABINET_BTN_MUTE<n>` / `CABINET_BTN_SOLO<n>`, 65286…) the device never serves as parameters, while
+ * the state they drive lives in the served `MUTE<n>` enum (options `-- / MUTE / SOLO`). Historically
+ * every client re-resolved such a control by matching the served NAME after the `_BTN_` infix —
+ * fragile: a device rename (or a differently-named family) silently DELETED the control, with no error.
+ * Resolving it here means the served layout already binds the real param.
+ *
+ * Rules (mirror the old client resolution, now server-authoritative):
+ *   • only controls whose paramName carries `_BTN_` are candidates;
+ *   • a control whose CURRENT paramId is itself a served param is left alone (it is already live);
+ *   • the `_BTN_` suffix must equal a served param's name — that param's id + raw symbol are written;
+ *   • a sibling with no served param of its own (e.g. `..._BTN_SOLO<n>` — SOLO is an OPTION of the
+ *     MUTE enum, not a param) is left as a pseudo id, so the M/S pair collapses onto the one state
+ *     control the device really has (the board de-dupes by key / gaps the unresolvable one).
+ * Returns the SAME layout object unchanged when nothing is rewritten (cheap no-op path).
+ */
+export function resolvePseudoParamControls(
+  layout: DeviceLayout,
+  served: readonly ServedParamRef[],
+): DeviceLayout {
+  const byServedName = new Map<string, ServedParamRef>();
+  const servedIds = new Set<number>();
+  for (const s of served) {
+    servedIds.add(s.id);
+    if (s.servedName) byServedName.set(s.servedName, s);
+  }
+  let any = false;
+  const pages: EditorLayoutPage[] = layout.pages.map((page) => {
+    let pageChanged = false;
+    const rows: EditorLayoutRow[] = page.rows.map((row) => {
+      let rowChanged = false;
+      const controls = row.controls.map((c) => {
+        const suffix = (c.paramName ?? '').split('_BTN_')[1];
+        if (!suffix) return c; // not a pseudo-button control
+        if (c.paramId != null && servedIds.has(c.paramId)) return c; // already bound to a live param
+        const real = byServedName.get(suffix);
+        if (!real) return c; // no served param of that name — leave the pseudo id for the client fallback
+        if (c.paramId === real.id && c.paramName === real.paramName) return c;
+        rowChanged = pageChanged = any = true;
+        return { ...c, paramId: real.id, paramName: real.paramName };
+      });
+      return rowChanged ? { ...row, controls } : row;
+    });
+    return pageChanged ? { ...page, rows } : page;
+  });
+  return any ? { ...layout, pages } : layout;
+}
+
 // AM4 block-name → catalog family symbol (the AM4_LAYOUTS key). Most AM4 blocks match SLUG_FAMILY, but
 // the AM4 catalog names its compressor `compressor` (not `comp`) and its volume/pan block `volpan`
 // (not `volume`), so this map is explicit rather than piggy-backing the gen-3 SLUG_FAMILY table.

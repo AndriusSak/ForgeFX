@@ -17,6 +17,7 @@ import { runLayoutsTests, LAYOUTS_CASE_COUNT } from './drivers/layouts.test.js';
 import { runKnobCoverageTests, KNOB_COVERAGE_CASE_COUNT } from './drivers/knob-coverage.test.js';
 import { runCabLayoutVariantTests, CAB_LAYOUT_VARIANT_CASE_COUNT } from './drivers/cab-layout-variant.test.js';
 import { runCabMuteCacheRowTests, CAB_MUTE_CACHE_ROW_CASE_COUNT } from './drivers/cab-mute-cache-row.test.js';
+import { runCabBtnPseudoParamTests, CAB_BTN_PSEUDO_PARAM_CASE_COUNT } from './drivers/cab-btn-pseudo-param.test.js';
 import { runWriteRejectionTests, WRITE_REJECTION_CASE_COUNT } from './drivers/write-rejection.test.js';
 import { runEnumCoverageTests, ENUM_COVERAGE_CASE_COUNT } from './drivers/enum-coverage.test.js';
 import { runBrowserGlobalsTests, BROWSER_GLOBALS_CASE_COUNT } from './drivers/browser-globals.test.js';
@@ -54,6 +55,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/knob-coverage (${KNOB_COVERAGE_CASE_COUNT} real-FM3 knob/unit coverage guards)`, run: runKnobCoverageTests },
   { name: `drivers/cab-layout-variant (${CAB_LAYOUT_VARIANT_CASE_COUNT} Cab page follows the cab MODE, not the preamp type)`, run: runCabLayoutVariantTests },
   { name: `drivers/cab-mute-cache-row (${CAB_MUTE_CACHE_ROW_CASE_COUNT} a degenerate cached range must not delete a layout-referenced param)`, run: runCabMuteCacheRowTests },
+  { name: `drivers/cab-btn-pseudo-param (${CAB_BTN_PSEUDO_PARAM_CASE_COUNT} cases, server-side _BTN_ pseudo-param layout rewrite)`, run: runCabBtnPseudoParamTests },
   { name: `drivers/write-rejection (${WRITE_REJECTION_CASE_COUNT} 0x64 attribution cases)`, run: runWriteRejectionTests },
   { name: `drivers/enum-coverage (${ENUM_COVERAGE_CASE_COUNT} real-gen3 enum/range completeness guards)`, run: runEnumCoverageTests },
   { name: `drivers/browser-globals (${BROWSER_GLOBALS_CASE_COUNT} drivers build with no Node process global)`, run: runBrowserGlobalsTests },
