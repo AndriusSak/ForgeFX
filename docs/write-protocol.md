@@ -32,6 +32,46 @@ short window for a `0x64` rejection of the function it sent; no rejection ⇒ ac
 codes (`DescribeResultCode`) include `0x05` invalid effect id, `0x06` invalid param id, `0x0b`
 bad grid position, `0x0c` DSP overload, etc.
 
+### Residual: silently-ignored writes (P8)
+
+The accept/reject model above assumes the device *refuses* a bad write with a `0x64`. Measured
+against a real FM3 (`scripts/probe-device.ts --writes`, Q5): a write to an unknown eid
+(`0x3ffe` = 16382) draws **no reply at all** — the FM3 silently IGNORES it rather than refusing
+it. Since an accepted write is ALSO silent, an accepted write and a silently-ignored write are
+**byte-identical on the wire** and `#write` (`src/drivers/gen3.ts`) maps both to `{ok:true}`:
+
+| wire seen by the driver | returned `{ok}` | HTTP (`src/runtime/handlers.ts`) |
+|---|---|---|
+| `0x64` echoing our fn | `{ok:false}` | `200 {ok:false}` (explicit reject) |
+| silence (accept **or** silent-ignore) | `{ok:true}` | `200 {ok:true}` (reported accepted) |
+
+The client (Axis `paramWriteOutcome.ts`) reads `{ok:true}` as accepted and keeps the optimistic
+value on screen. So a write the device silently ignored is surfaced to the user as applied.
+
+**There is no distinct signal that separates accept from silent-ignore** — both are silence, on
+both directions of the wire. Mapping silence → `{ok:false}` would therefore break EVERY write
+(every accepted write would be reported as rejected). The current mapping is left UNCHANGED, and
+`server/test/drivers/silent-write.test.ts` PINS it so it cannot drift silently.
+
+The honest remediation is **read-back verification scoped to the writes that matter**, not a
+blanket verdict change — this needs a genuine independent read, since a value read back
+immediately after a write can reflect our own write rather than the device's persisted state:
+
+- **Verify (independent read-back).** Parameter writes that change PERSISTED global state —
+  the `GLOBAL` block params (e.g. `GLOBAL_FS_BRIGHTNESS` 7115, `GLOBAL_FS_LCD_CONTRAST`,
+  the `GLOBAL_FC_DEFAULT_LAYOUT_*` set) — and other structural/persisted writes where a silent
+  no-op is harmful and low-frequency: `store`, `placeCell`/`cable`, `setPresetName`/`setSceneName`.
+  Cost: one extra GET per write (the probe's Q1/Q2 read-back pattern). Scope it to these; the
+  server write path currently does NO verification for ANY write (`setParamH` → `d.setParam`
+  returns the driver verdict directly; see `src/runtime/handlers.ts`).
+- **Leave fire-and-forget.** High-frequency continuous knob streams (`setParam(..., continuous)`
+  → `#send`), `tapTempo`, `selectCell`, `setTempo` — a read-back per frame would double the traffic
+  on the hot path for no benefit.
+
+A continuous write is the worst case for this residual: `#send` collects no reply at all, so its
+verdict is `{ok:true}` unconditionally — a `GLOBAL_FS_BRIGHTNESS` write sent with
+`continuous:true` (as the Axis client sends float globals) has no confirmation whatsoever.
+
 ## Safety
 
 - **`?dryRun=true`** on any write endpoint returns the exact frame hex **without sending** —
