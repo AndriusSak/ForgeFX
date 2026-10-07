@@ -82,12 +82,31 @@ AM4-only alias paths have been removed).
 The five FM3 questions that prose scattered across the review docs (cached read-back of a
 GLOBAL write, a Cab 2 Mute/Solo write, whether a 16-bit-scaled enum wire value like
 `PHASER_ORDER` ever arrives, whether a complete bulk read ever pads past the `0x74` itemCount,
-and the real wire latency of a `0x64` rejection) are now a single command:
+and how the device answers a write to an *unknown* effect id) are now a single command:
 `npx tsx scripts/probe-device.ts` — **read-only by default**; add `--writes` for the three
-mutating probes, which capture the original value, verify the write, then restore it and verify
-the restore (a failed restore prints a `FAILED-RESTORE` block). `--mock` runs the whole runbook
-against a built-in scripted FM3 with no hardware, which is also what
-`test/drivers/device-probe-runbook.test.ts` drives. Exit 0 = every *eligible* probe gave a
-definite verdict; non-zero = a probe could not be attempted (no device → 3) or was
-inconclusive → 2 (a silent pass is impossible). The script itself is the runbook; this is only a
-pointer.
+mutating probes. `--mock` runs the whole runbook against a built-in scripted FM3 with no
+hardware, which is also what `test/drivers/device-probe-runbook.test.ts` drives.
+
+Mutating probes are safe and *honest* about what they can and cannot prove:
+
+- Q1 (GLOBAL write) and Q2 (Cab 2 Mute) capture the original, write, read back, then restore and
+  read back again. The restore's read-back uses the **same** path that read the original, so it
+  cannot catch an original that was misread — the report prints an `UNPROVEN-RESTORE` block and
+  never a bare "verified"; it also lists, per mutating probe, the on-unit check a human should
+  perform. If the captured original sits on an off/disabled boundary (0 on a `0..100`
+  brightness/level param), Q1 **refuses to write** and flags the hazard loudly rather than
+  "restoring" a possible misread 0.
+- Q5 sends a deliberately invalid write (unknown eid, changes nothing) and reports one of three
+  mutually-exclusive outcomes: **refused** (a `0x64` arrived — with the latency measured to that
+  frame), **accepted** (a non-`0x64` reply arrived), or **silent** (nothing arrived — the real
+  FM3 behaviour; no latency is fabricated).
+- `--writes --dry-run` runs only the READ half of the mutating probes, prints exactly what it
+  WOULD write/restore (param + eid/pid + original + boundary flag) and writes **nothing**.
+
+A connection that cannot yield a usable device is named precisely — which of three classes
+(`no ports enumerated` / `port present but not openable`, with the errno / `openable but
+unresponsive`) plus the port and errno — so a permission error on `/dev/ttyACM0` is never
+confused with an absent device. Exit 0 = every *eligible* probe gave a definite verdict; 2 = a
+probe could not determine; 3 = nothing was attempted (no device); 4 = `--dry-run` (a plan was
+printed, nothing was written). A silent pass is impossible. The script itself is the runbook;
+this is only a pointer.
