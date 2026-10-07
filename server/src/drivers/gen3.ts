@@ -742,9 +742,6 @@ class Gen3Driver implements DeviceDriver {
           throw new Error(`torn block bulk read for eid ${eid}: got ${bulk.values.length} of ${bulk.itemCount} values`);
         }
         const { stride, base } = this.#channelSlice(family, bulk, activeCh);
-        // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
-        // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).
-        this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
         // The bulk body is POSITIONAL (record i == the param whose catalog paramId is i) — an identity
         // that holds ONLY for a DENSE family. A SPARSE family (GLOBAL: pids to 65522, 91 of them >= its
         // stride 186) has device WIRE ADDRESSES as pids, not positions, and the catalog ships NO
@@ -755,6 +752,11 @@ class Gen3Driver implements DeviceDriver {
         // prove is positional: serve its values as UNRESOLVED (null + reason), never a guessed number.
         // Same spirit as the torn-read throw above — an unread value must stay visibly unread.
         const familyUnresolved = this.#bulkUnresolvedReason(family);
+        // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
+        // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).
+        // Only a family the positional body CAN resolve may seed it: for an unresolved family this
+        // slice holds UNRELATED records, and priming it would feed decodeEditBurst a bogus baseline.
+        if (familyUnresolved === null) this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
         const readRaw = (pid: number): number | null => {
           if (familyUnresolved !== null) return null;
           const v = bulk.values[base + pid];
@@ -1122,15 +1124,22 @@ class Gen3Driver implements DeviceDriver {
     if (family !== 'CABINET') return { error: 'not a cab block' };
     let values: number[] = [];
     let base = 0;
-    try {
+    // A failed or torn cab bulk read must NOT be served as a zeroed cab state (mode 0 / bank 0 /
+    // IR 0). Every consumer reads those zeros as "the cab is on Legacy, factory bank 0, IR 1" — a
+    // FABRICATED state, and the same silent-failure class the P1.3 torn block read closed. Let it
+    // throw: the route surfaces the failure and Axis's `.catch` clears the picker/summary rather than
+    // showing a false state. (cabStateH has no catch of its own; the router's dispatch catch maps the
+    // throw to a non-200, and the driver-level throw is the honest signal the read produced nothing.)
+    {
       const dev = await this.#conn();
       const frames = await dev.request(this.#codec.buildBlockBulkReadPoll(eid), { timeoutMs: 2500, quietMs: 120, match: (fs) => fs.some((f) => f[5] === 0x76) });
       const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
+      if (bulk.values.length === 0 || bulk.values.length < bulk.itemCount) {
+        throw new Error(`torn cab bulk read for eid ${eid}: got ${bulk.values.length} of ${bulk.itemCount} values`);
+      }
       values = bulk.values;
       const activeCh = (await this.#statusByEffectId()).get(eid)?.channel ?? 0;
       base = this.#channelSlice(family, bulk, activeCh).base;
-    } catch {
-      /* device unreachable — return option lists with zeroed current state */
     }
     // discrete params store the ordinal; if it looks 16-bit-scaled, unscale against the known max
     // (base = this channel's slice of the bulk read — cab mode/bank/IR/dyna are per-channel, like everything else on the block)
@@ -1191,18 +1200,27 @@ class Gen3Driver implements DeviceDriver {
       try {
         const frames = await dev.request(this.#codec.buildBlockBulkReadPoll(c.effectId), { timeoutMs: 2000, quietMs: 100, match: (fs) => fs.some((f) => f[5] === 0x76) });
         const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
+        // A short/torn burst carries fewer records than the 0x74 head advertised; indexing past it
+        // would FABRICATE a 0 level (a meter pinned to its minimum) or a bogus type name. Reject so the
+        // catch below leaves this block's vals EMPTY — an honest "no reading" — instead of a zero fill.
+        if (bulk.values.length < bulk.itemCount) {
+          throw new Error(`torn meter bulk read for eid ${c.effectId}: got ${bulk.values.length} of ${bulk.itemCount} values`);
+        }
         const activeCh = status.get(c.effectId)?.channel ?? 0;
         const { base } = this.#channelSlice(family, bulk, activeCh);
         for (const id of wantIds) {
-          const d = this.#display(family, id, bulk.values[base + id] ?? 0);
+          // No record at that ordinal (e.g. a client-requested id past the body) is UNKNOWN, never 0.
+          const raw = bulk.values[base + id];
+          if (typeof raw !== 'number') continue;
+          const d = this.#display(family, id, raw);
           vals[id] = { norm: d.norm, value: d.value, unit: d.unit, min: d.min, max: d.max, log: d.log };
         }
         const typeId = this.#paramId(family, 'type');
         if (typeId != null) {
           const roster = this.#prof.rosterFor(slug);
           const tmax = Math.max(0, roster.length - 1);
-          const rawT = bulk.values[base + typeId] ?? 0;
-          typeName = roster[rawT > tmax ? Math.round((rawT / 65534) * tmax) : rawT]?.name ?? '';
+          const rawT = bulk.values[base + typeId];
+          if (typeof rawT === 'number') typeName = roster[rawT > tmax ? Math.round((rawT / 65534) * tmax) : rawT]?.name ?? '';
         }
       } catch {
         /* leave vals empty for this block */
@@ -1451,7 +1469,9 @@ class Gen3Driver implements DeviceDriver {
       try {
         const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
         const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
-        if (family && bulk.values.length > 0) {
+        // Never seed the diff baseline from a family the positional body cannot resolve — the slice
+        // would be unrelated records, and a later decodeEditBurst diff would emit them as a move.
+        if (family && this.#bulkUnresolvedReason(family) === null && bulk.values.length > 0) {
           const { stride, base } = this.#channelSlice(family, bulk, 0);
           this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
         }
@@ -1488,6 +1508,12 @@ class Gen3Driver implements DeviceDriver {
     const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
     const defs = family ? (this.#prof.params[family] ?? []) : [];
     if (!family || defs.length === 0) return { events: [], reload: false, structural: false }; // no param family mapped
+    // A family whose catalog pids are NOT record ordinals cannot be decoded from the positional body
+    // (see #bulkUnresolvedReason). Emitting `cur[id]` here would hand Axis a fabricated `norm` for a
+    // pid < stride (whatever UNRELATED record shares its ordinal) or a fabricated 0 past the block —
+    // and Axis applies that norm verbatim (a live, writable knob showing a value the device never
+    // reported). The honest reflection of a move we cannot read is NO event at all: emit nothing.
+    if (this.#bulkUnresolvedReason(family) !== null) return { events: [], reload: false, structural: false };
     // Slice the block's ACTIVE channel (the one blockParams surfaced) — the body is channel-blocked, so
     // diffing against channel A while the user has B-D open would flag every A/B-different param as "moved".
     const { stride, base } = this.#channelSlice(family, bulk, eid === this.#watchedEid ? this.#watchedChannel : 0);
