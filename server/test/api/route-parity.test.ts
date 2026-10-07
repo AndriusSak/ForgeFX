@@ -73,7 +73,21 @@ function makeFakeFm3(): FakeFm3 {
     bindModifier: async (slot: number, targetEffectId: number, targetParam: number, source: number) => {
       rec('bindModifier', slot, targetEffectId, targetParam, source);
       return { ok: true };
-    }
+    },
+    // ── READ methods the P8 read-validation rows exercise — each records so a 400 row can prove the
+    //    guard fired BEFORE the driver, and a valid boundary twin proves it still DID reach the driver. ──
+    rawBlock: async (eid: number) => { rec('rawBlock', eid); return { eid, values: {} }; },
+    cabState: async (eid: number) => { rec('cabState', eid); return { eid, mode: 'legacy' }; },
+    readParams: async (eid: number, pids: number[]) => { rec('readParams', eid, pids); return {}; },
+    readRange: async (eid: number, pids: number[]) => { rec('readRange', eid, pids); return {}; },
+    presetSummary: async (n: number, full?: boolean) => {
+      rec('presetSummary', n, full);
+      return { number: n, name: `P${n}`, model: 'FM3', crcValid: true, scenes: [], blocks: [], models: {} } as never;
+    },
+    presetParams: async (n: number) => { rec('presetParams', n); return [] as never; },
+    storedPresetName: async (n: number) => { rec('storedPresetName', n); return { number: n, name: `P${n}` }; },
+    liveMonitors: async (onlyEid?: number) => { rec('liveMonitors', onlyEid); return []; },
+    looperTelemetry: async (eid: number) => { rec('looperTelemetry', eid); return { wave: [], position: null, level: null }; }
   } as DeviceDriver as FakeFm3;
 }
 
@@ -167,7 +181,41 @@ const VALIDATION_ROWS: ValRow[] = [
   { name: 'device param non-numeric value', method: 'PUT', url: '/device/param', body: { key: 'amp.gain', value: 'x' }, expect: 400, callsDriver: false },
   { name: 'device param valid', method: 'PUT', url: '/device/param', body: { key: 'amp.gain', value: 7.5 }, expect: 200, callsDriver: true },
   // modifier bind: a non-integer slot flowed into Math.floor()→NaN and the encoder.
-  { name: 'mod bind non-integer slot', method: 'POST', url: '/mod/bind', body: { slot: 'a', targetEffectId: 1, targetParam: 2, source: 3 }, expect: 400, callsDriver: false }
+  { name: 'mod bind non-integer slot', method: 'POST', url: '/mod/bind', body: { slot: 'a', targetEffectId: 1, targetParam: 2, source: 3 }, expect: 400, callsDriver: false },
+
+  // ── P8 — the READ seam. A malformed address (non-integer / outside the 14-bit codec space) is
+  //    400 on BOTH surfaces; a WELL-FORMED address that names no present block/slot is deliberately
+  //    LEFT to the driver (the twin reaches it). Each garbage row is paired with a boundary twin. ──
+  // raw: the driver's enc14 would mask a garbage eid to a wrong address and read the wrong block (200).
+  { name: 'raw non-integer eid', method: 'GET', url: '/preset/blocks/abc/raw', body: undefined, expect: 400, callsDriver: false },
+  { name: 'raw out-of-14-bit eid', method: 'GET', url: '/preset/blocks/20000/raw', body: undefined, expect: 400, callsDriver: false },
+  { name: 'raw valid boundary twin (eid 16383)', method: 'GET', url: '/preset/blocks/16383/raw', body: undefined, expect: 200, callsDriver: true },
+  // cab: garbage eid → `slugForEffectId(NaN)` fell through to a 200 {error:'not a cab block'} (silent).
+  { name: 'cab non-integer eid', method: 'GET', url: '/preset/blocks/xyz/cab', body: undefined, expect: 400, callsDriver: false },
+  { name: 'cab valid', method: 'GET', url: '/preset/blocks/58/cab', body: undefined, expect: 200, callsDriver: true },
+  // read / readrange: the eid AND the pids[] ride the enc14 field; both are validated at the seam.
+  { name: 'read non-integer eid', method: 'POST', url: '/preset/blocks/abc/read', body: { pids: [1] }, expect: 400, callsDriver: false },
+  { name: 'read non-integer pid', method: 'POST', url: '/preset/blocks/58/read', body: { pids: ['x'] }, expect: 400, callsDriver: false },
+  { name: 'read out-of-14-bit pid', method: 'POST', url: '/preset/blocks/58/read', body: { pids: [20000] }, expect: 400, callsDriver: false },
+  { name: 'read valid', method: 'POST', url: '/preset/blocks/58/read', body: { pids: [1, 2] }, expect: 200, callsDriver: true },
+  { name: 'readrange non-integer eid', method: 'POST', url: '/preset/blocks/abc/readrange', body: { pids: [1] }, expect: 400, callsDriver: false },
+  { name: 'readrange valid boundary twin (eid 16383)', method: 'POST', url: '/preset/blocks/16383/readrange', body: { pids: [1] }, expect: 200, callsDriver: true },
+  // preset reads: a malformed :n was a silent {number:NaN,name:''} stub (name) or a 503 (summary/params).
+  { name: 'preset name non-integer n', method: 'GET', url: '/presets/abc', body: undefined, expect: 400, callsDriver: false },
+  { name: 'preset name out-of-14-bit n', method: 'GET', url: '/presets/20000', body: undefined, expect: 400, callsDriver: false },
+  { name: 'preset name valid boundary twin (n 16383)', method: 'GET', url: '/presets/16383', body: undefined, expect: 200, callsDriver: true },
+  { name: 'preset summary non-integer n', method: 'GET', url: '/presets/abc/summary', body: undefined, expect: 400, callsDriver: false },
+  { name: 'preset summary valid', method: 'GET', url: '/presets/5/summary', body: undefined, expect: 200, callsDriver: true },
+  { name: 'preset params non-integer n', method: 'GET', url: '/presets/abc/params', body: undefined, expect: 400, callsDriver: false },
+  { name: 'preset params valid', method: 'GET', url: '/presets/5/params', body: undefined, expect: 200, callsDriver: true },
+  // query eid reads: a present-but-malformed ?eid= used to silently widen (monitors: all blocks) or
+  // the driver already 400'd (looper: 'eid required' only for non-numbers — a fraction slipped through).
+  { name: 'monitors live malformed eid query', method: 'GET', url: '/preset/monitors/live?eid=abc', body: undefined, expect: 400, callsDriver: false },
+  { name: 'monitors live valid eid query', method: 'GET', url: '/preset/monitors/live?eid=58', body: undefined, expect: 200, callsDriver: true },
+  { name: 'monitors live absent eid (all blocks)', method: 'GET', url: '/preset/monitors/live', body: undefined, expect: 200, callsDriver: true },
+  { name: 'looper missing eid', method: 'GET', url: '/preset/looper', body: undefined, expect: 400, callsDriver: false },
+  { name: 'looper fractional eid', method: 'GET', url: '/preset/looper?eid=1.5', body: undefined, expect: 400, callsDriver: false },
+  { name: 'looper valid eid query', method: 'GET', url: '/preset/looper?eid=58', body: undefined, expect: 200, callsDriver: true }
 ];
 
 // drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row,

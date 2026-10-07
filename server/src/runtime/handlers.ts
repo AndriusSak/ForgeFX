@@ -26,6 +26,12 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
    *  codec's 14-wide / 6-row ceiling. Used to bound row/col BEFORE the codec (which would 500 on them). */
   const gridShape = (caps: { grid?: { rows: number; cols: number }; slotModel?: string; slotCount?: number }) =>
     caps.grid ?? (caps.slotModel === 'linear' ? { rows: 1, cols: caps.slotCount ?? 4 } : { rows: 6, cols: 14 });
+  /** A preset slot number: the SAME 14-bit 0..16383 space as an eid. The codec's buildRequestPresetDump
+   *  / buildStorePreset carries the slot in an enc14 field, so a :n outside it is unrepresentable —
+   *  a WRITE's codec guard throws (→ the seam's 400) and a READ's driver-side enc14 silently wraps it to
+   *  the wrong slot (a silent mis-read). Either way `:n` is MALFORMED outside 0..16383, exactly as the
+   *  write routes (presetSelectH/presetStoreH) already treat it. */
+  const isPresetNumber = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= EID_MAX;
 
   /** Capability-gate reply: the active driver doesn't implement this optional method. */
   const unsupported = (reply: StatusSink, capability: string) => {
@@ -68,6 +74,97 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       if (!d.blockParams) return unsupported(reply, 'blockParams');
       return await d.blockParams(addr);
     } catch (e) { reply.code(404); return { error: (e as Error).message }; }
+  };
+  // ── read-input seam guards (shared by BOTH surfaces) ─────────────────────────────────────────
+  // Same class as the write guards below, one step milder: a READ never mutates the unit, but a
+  // MALFORMED address still mis-fires on the wire — the driver's own `enc14` (readParams/readRange/
+  // rawBlock) masks a non-integer/garbage eid to `[n & 0x7f, (n >> 7) & 0x7f]` and requests the WRONG
+  // block with a 200 and no throw (silent mis-read). So a non-integer / out-of-14-bit address is
+  // MALFORMED → 400. A WELL-FORMED address (integer 0..16383) that names no present block/slot is a
+  // different case entirely and is deliberately LEFT to the driver — it already answers it (an empty
+  // read, `{error:'not a cab block'}`, or a 503), and blanket-400ing it would hide that distinction.
+  /** pids[] guard: the param ids a read addresses ride the SAME 14-bit enc14 field as the eid, so a
+   *  non-integer/out-of-range pid reads a wrong pid silently. Omitted/null → [] (a no-op read). */
+  const isPidList = (v: unknown): v is number[] => Array.isArray(v) && (v as unknown[]).every((p) => isEid(p));
+  /** GET /preset/blocks/:eid/raw — raw bulk param values (FC eid 199 / Modifier eid 3). */
+  const rawBlockH = async (reply: StatusSink, eid: number) => {
+    if (!isEid(eid)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
+    try {
+      const d = await driver();
+      if (!d.rawBlock) return unsupported(reply, 'rawBlock');
+      return await d.rawBlock(eid);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+  /** GET /preset/blocks/:eid/cab — cab state for the IR picker. A well-formed eid that is not a cab
+   *  block is left to the driver's `{error:'not a cab block'}` (absent-as-a-cab, not malformed). */
+  const cabStateH = async (reply: StatusSink, eid: number) => {
+    if (!isEid(eid)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
+    const d = await driver();
+    if (!d.cabState) return unsupported(reply, 'cabState');
+    return d.cabState(eid);
+  };
+  /** POST /preset/blocks/:eid/read — per-pid fn 0x01 GET (FC current state). */
+  const readParamsH = async (reply: StatusSink, eid: number, pids?: number[] | null) => {
+    if (!isEid(eid)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
+    if (pids != null && !isPidList(pids)) { reply.code(400); return { error: 'pids must be an array of integers 0..16383' }; }
+    try {
+      const d = await driver();
+      if (!d.readParams) return unsupported(reply, 'readParams');
+      return await d.readParams(eid, pids ?? []);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+  /** POST /preset/blocks/:eid/readrange — sub 0x1a range-read returning the normalized value per pid. */
+  const readRangeH = async (reply: StatusSink, eid: number, pids?: number[] | null) => {
+    if (!isEid(eid)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
+    if (pids != null && !isPidList(pids)) { reply.code(400); return { error: 'pids must be an array of integers 0..16383' }; }
+    try {
+      const d = await driver();
+      if (!d.readRange) return unsupported(reply, 'readRange');
+      return await d.readRange(eid, pids ?? []);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+  /** GET /presets/:n/summary — non-disruptive decode of one stored slot. A malformed :n is 400; a
+   *  well-formed-but-empty slot is left to the driver's own dump failure (503). */
+  const presetSummaryH = async (reply: StatusSink, n: number, full: boolean) => {
+    if (!isPresetNumber(n)) { reply.code(400); return { error: 'preset number must be an integer 0..16383' }; }
+    try {
+      const d = await driver();
+      if (!d.presetSummary) return unsupported(reply, 'presetDump');
+      return await d.presetSummary(n, full);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+  /** GET /presets/:n/params — full per-block decoded params for one slot. */
+  const presetParamsH = async (reply: StatusSink, n: number) => {
+    if (!isPresetNumber(n)) { reply.code(400); return { error: 'preset number must be an integer 0..16383' }; }
+    try {
+      const d = await driver();
+      if (!d.presetParams) return unsupported(reply, 'presetDump');
+      return { blocks: await d.presetParams(n) };
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+  // Query-string reads: an ADDRESSED eid query (integer 0..16383) — garbage → 400 rather than silently
+  // widening/altering the read. An ABSENT/empty eid keeps its documented "no filter" meaning.
+  const liveMonitorsH = async (reply: StatusSink, rawEid?: string) => {
+    let eid: number | undefined;
+    if (rawEid != null && rawEid !== '') {
+      const n = Number(rawEid);
+      if (!isEid(n)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
+      eid = n;
+    }
+    try {
+      const d = await driver();
+      if (!d.liveMonitors) return unsupported(reply, 'liveMonitors');
+      return await d.liveMonitors(eid);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+  const looperTelemetryH = async (reply: StatusSink, rawEid?: string) => {
+    const eid = rawEid != null && rawEid !== '' ? Number(rawEid) : NaN;
+    if (!isEid(eid)) { reply.code(400); return { error: 'eid required (integer 0..16383)' }; }
+    try {
+      const d = await driver();
+      if (!d.looperTelemetry) return unsupported(reply, 'looperTelemetry');
+      return await d.looperTelemetry(eid);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   };
   // Unified param write: {value, continuous}. continuous:true → the driver's normalized write
   // (gen-3 continuous SET; AM4 SET_NORM with value as 0..1), continuous:false → discrete ordinal.
@@ -143,7 +240,10 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   };
   // Stored preset name: driver-backed where supported (AM4 → {number, name, code}); the gen-3
   // drivers don't implement it, so they keep the pre-Phase-6 {number, name:''} stub byte-identically.
-  const presetNameH = async (n: number) => {
+  // A malformed :n (non-integer / out of the 14-bit slot space) is 400 — previously `Number('abc')`
+  // became NaN and the gen-3 stub answered `{number:NaN,name:''}` with a 200 (a silent accept).
+  const presetNameH = async (reply: StatusSink, n: number) => {
+    if (!isPresetNumber(n)) { reply.code(400); return { error: 'preset number must be an integer 0..16383' }; }
     const d = await driver();
     if (d.storedPresetName) {
       try { return await d.storedPresetName(n); } catch { /* device unreachable → stub below */ }
@@ -339,6 +439,8 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   return {
     driver, unsupported, decodeFail,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
+    rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetParamsH,
+    liveMonitorsH, looperTelemetryH,
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,

@@ -71,6 +71,8 @@ export async function buildApp(
   const {
     driver, unsupported,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
+    rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetParamsH,
+    liveMonitorsH, looperTelemetryH,
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
@@ -226,23 +228,12 @@ export async function buildApp(
     return d.presetRef();
   });
   // Stored preset name (driver-backed since Phase 6; gen-3 keeps the {number, name:''} stub).
-  app.get<{ Params: { n: string } }>('/presets/:n', (req) => presetNameH(Number(req.params.n)));
+  app.get<{ Params: { n: string } }>('/presets/:n', (req, reply) => presetNameH(reply, Number(req.params.n)));
   // Decode any preset by number (non-disruptive) → library summary: name, scenes, unique blocks.
-  app.get<{ Params: { n: string }; Querystring: { full?: string } }>('/presets/:n/summary', async (req, reply) => {
-    try {
-      const d = await driver();
-      if (!d.presetSummary) return unsupported(reply, 'presetDump');
-      return await d.presetSummary(Number(req.params.n), req.query.full === '1');
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  app.get<{ Params: { n: string }; Querystring: { full?: string } }>('/presets/:n/summary', (req, reply) =>
+    presetSummaryH(reply, Number(req.params.n), req.query.full === '1'));
   // Full per-block decoded params for one preset (every family/param) — deep-search + browser detail.
-  app.get<{ Params: { n: string } }>('/presets/:n/params', async (req, reply) => {
-    try {
-      const d = await driver();
-      if (!d.presetParams) return unsupported(reply, 'presetDump');
-      return { blocks: await d.presetParams(Number(req.params.n)) };
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  app.get<{ Params: { n: string } }>('/presets/:n/params', (req, reply) => presetParamsH(reply, Number(req.params.n)));
   // Decoded modifier assignments for the CURRENT edit buffer (source → target block+param + slot).
   // The modifier editor's read-back source; curve values come from the slot's /raw block.
   app.get('/preset/modifiers', async (_req, reply) => {
@@ -516,26 +507,10 @@ export async function buildApp(
   // that ride the normal per-block read; Axis renders a meter per placed block from these. {} if none.
   app.get('/preset/monitors', () => registry.profile.monitorParams ?? {});
   // Live per-block audio meters: reads each placed monitored block's level (normalized 0..1) + dB.
-  app.get('/preset/monitors/live', async (req, reply) => {
-    const q = (req.query as { eid?: string }).eid;
-    const eid = q != null && q !== '' ? Number(q) : undefined;
-    try {
-      const d = await driver();
-      if (!d.liveMonitors) return unsupported(reply, 'liveMonitors');
-      return await d.liveMonitors(Number.isFinite(eid as number) ? eid : undefined);
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  // ?eid= (optional) narrows to one block; an ADDRESSED but malformed eid is 400 (see liveMonitorsH).
+  app.get('/preset/monitors/live', (req, reply) => liveMonitorsH(reply, (req.query as { eid?: string }).eid));
   // Looper page telemetry (waveform envelope + playhead position + level). Empty for non-looper blocks.
-  app.get('/preset/looper', async (req, reply) => {
-    const q = (req.query as { eid?: string }).eid;
-    const eid = q != null && q !== '' ? Number(q) : NaN;
-    try {
-      const d = await driver();
-      if (!d.looperTelemetry) return unsupported(reply, 'looperTelemetry');
-      if (!Number.isFinite(eid)) { reply.code(400); return { error: 'eid required' }; }
-      return await d.looperTelemetry(eid);
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  app.get('/preset/looper', (req, reply) => looperTelemetryH(reply, (req.query as { eid?: string }).eid));
   // Toggle a looper transport control (record/play/stop/overdub/undo/once/reverse/half).
   app.post<{ Body: { eid?: number; action?: string; on?: boolean } }>('/preset/looper/control', async (req, reply) => {
     const { eid, action, on } = req.body ?? {};
@@ -578,35 +553,15 @@ export async function buildApp(
   app.post<{ Body: { slot: number; targetEffectId: number; targetParam: number; source: number } }>('/mod/bind', async (req, reply) =>
     modBindH(reply, req.body));
   // raw param values for an effect (for FC eid 199 / Modifier eid 3, whose params have no display range)
-  app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/raw', async (req, reply) => {
-    try {
-      const d = await driver();
-      if (!d.rawBlock) return unsupported(reply, 'rawBlock');
-      return await d.rawBlock(Number(req.params.eid));
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/raw', (req, reply) => rawBlockH(reply, Number(req.params.eid)));
   // read specific paramIds via per-pid fn 0x01 GET (FC current state — the 0x1F bulk path doesn't cover FC)
-  app.post<{ Params: { eid: string }; Body: { pids: number[] } }>('/preset/blocks/:eid/read', async (req, reply) => {
-    try {
-      const d = await driver();
-      if (!d.readParams) return unsupported(reply, 'readParams');
-      return await d.readParams(Number(req.params.eid), req.body?.pids ?? []);
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  app.post<{ Params: { eid: string }; Body: { pids: number[] } }>('/preset/blocks/:eid/read', (req, reply) =>
+    readParamsH(reply, Number(req.params.eid), req.body?.pids));
   // FC read path: sub 0x1a range-read returning the normalized (0..1) value per pid
-  app.post<{ Params: { eid: string }; Body: { pids: number[] } }>('/preset/blocks/:eid/readrange', async (req, reply) => {
-    try {
-      const d = await driver();
-      if (!d.readRange) return unsupported(reply, 'readRange');
-      return await d.readRange(Number(req.params.eid), req.body?.pids ?? []);
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  app.post<{ Params: { eid: string }; Body: { pids: number[] } }>('/preset/blocks/:eid/readrange', (req, reply) =>
+    readRangeH(reply, Number(req.params.eid), req.body?.pids));
   // current state of a cab block (mode / per-slot bank + IR + dyna type) for the picker
-  app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/cab', async (req, reply) => {
-    const d = await driver();
-    if (!d.cabState) return unsupported(reply, 'cabState');
-    return d.cabState(Number(req.params.eid));
-  });
+  app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/cab', (req, reply) => cabStateH(reply, Number(req.params.eid)));
 
   // per-block meter + swipe-control values for the always-on grid level fill
   app.post<{ Body: { wants?: Record<string, number[]> } }>('/preset/meters', async (req, reply) => {
