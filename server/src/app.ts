@@ -78,7 +78,8 @@ export async function buildApp(
     decodeH, decodeBytes
   } = createUnifiedHandlers(registry);
 
-  // ── write-safety gates (docs/write-protocol.md:37-39, ROADMAP.md) ─────────────────────────────
+  // ── write-safety gates (docs/write-protocol.md:37-39 is the authority; Axis/docs/ROADMAP.md is
+  //    banner-stale — see the parity audit instead) ─────────────────────────────────────────────
   //  • `--writes false` → read-only: every DEVICE-write endpoint answers 403; reads and the LOCAL
   //    config store (/store, /local) are untouched because they never touch the unit. The same
   //    predicate gates the browser runtime router, so the two surfaces stay in parity.

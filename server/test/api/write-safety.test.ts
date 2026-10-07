@@ -1,4 +1,5 @@
-// W3.1 — the documented write-safety contract (docs/write-protocol.md:37-39, ROADMAP.md):
+// W3.1 — the documented write-safety contract (docs/write-protocol.md:37-39 is the authority; the
+// Axis ROADMAP.md these files once cited is banner-stale — use the parity audit):
 //   • `?dryRun=true` on any write endpoint returns the exact frame hex WITHOUT sending.
 //   • `--writes false` starts the server read-only; every device-write endpoint returns 403.
 // Route-level (app.inject) over a REAL gen-3 FM3 driver on a MockTransport:

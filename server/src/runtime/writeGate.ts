@@ -1,4 +1,5 @@
-// The documented write-safety contract (ForgeFX/docs/write-protocol.md:37-39 + ROADMAP.md), shared by
+// The documented write-safety contract (ForgeFX/docs/write-protocol.md:37-39 is the authority; the
+// Axis ROADMAP.md it used to cite is banner-stale — use the parity audit), shared by
 // BOTH HTTP surfaces (the Node Fastify app in app.ts and the browser-facing runtime router in
 // runtime/router.ts) so they stay in parity:
 //
