@@ -262,7 +262,9 @@ class Gen3Driver implements DeviceDriver {
    *  A SPARSE family breaks it: the FM3 GLOBAL family declares `stride 186` yet carries 173 pids up to
    *  65522 (91 of them >= 186) — those are device WIRE ADDRESSES, not positions. For such a family the
    *  positional index is meaningless: `pid >= stride` runs past the block (where the old `?? 0` served
-   *  a fabricated 0 — the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident), and `pid < stride`
+   *  a fabricated 0 — a CANDIDATE cause of the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident, but
+   *  UNCONFIRMED: the probe that observed that 0 reads through the per-pid GET, not through this path),
+   *  and `pid < stride`
    *  lands on whatever record shares that ordinal (silently WRONG, not zero). The catalog ships no
    *  pid→ordinal map to fix this (ranges.generated.ts keys its GLOBAL table by paramId, not position),
    *  so blockParams must refuse to guess. We detect the case structurally: if ANY ordinary (< 0xff00)
@@ -747,7 +749,8 @@ class Gen3Driver implements DeviceDriver {
         // stride 186) has device WIRE ADDRESSES as pids, not positions, and the catalog ships NO
         // pid→record-ordinal map for it (ranges.generated.ts keys its GLOBAL table by paramId, not by
         // position). Indexing `bulk.values[base + pid]` then lands past the block — where the old `?? 0`
-        // fabricated a 0 (the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident) — or, for pid <
+        // fabricated a 0 (a CANDIDATE cause of the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident —
+        // UNCONFIRMED, since the probe reads that value through the per-pid GET, not this path) — or, for pid <
         // stride, on an UNRELATED record (silently wrong, not zero). So never index a family we cannot
         // prove is positional: serve its values as UNRESOLVED (null + reason), never a guessed number.
         // Same spirit as the torn-read throw above — an unread value must stay visibly unread.

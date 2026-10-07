@@ -22,7 +22,10 @@ The read coerced the miss with `?? 0`. Consequences, both real:
 
 - `pid >= stride` ran past the block → `undefined` → **a fabricated 0**. On record: a probe read
   `GLOBAL_FS_BRIGHTNESS` (pid 7115) as `0.0000` on a unit whose footswitch LED rings were visibly ON,
-  and a later restore wrote that 0 over the real value.
+  and a later restore wrote that 0 over the real value. **Attribution caveat:** that probe reads through
+  the per-pid GET (`readParams`), not through this bulk path — so this path is the leading SUSPECT, not a
+  confirmed cause, and the per-pid GET is itself unverified for GLOBAL pids. The defect above stands on
+  its own evidence (the fabricated zero is proven by the fixture and the coverage test).
 - `pid < stride` resolved to *whatever record shared that ordinal* → a silently **WRONG** value, not
   zero. E.g. `GLOBAL_REVERBMIX` (pid 1) read the record at ordinal 1, which need not be that param.
 
