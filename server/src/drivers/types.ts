@@ -64,8 +64,12 @@ export interface GridCellDTO {
 }
 export interface PresetGridDTO { model: string; name: string; crcValid: boolean; rows: number; cols: number; scenes: string[]; cells: GridCellDTO[]; source: 'dump'; }
 export interface PresetBlockDTO { slug: string; name: string; effectId: number; row: number; col: number; fromRows: number[]; bypassed: boolean | null; channel: string | null; }
-export interface NamedParam { id: number; name: string; value: number; norm: number; unit?: string; min?: number; max?: number; log?: boolean; }
-export interface EnumParam { id: number; name: string; value: number; options: { value: number; label: string }[]; }
+/** A served param. `value`/`norm` are `null` when the value could NOT be resolved from the device —
+ *  a genuinely-unknown reading, NEVER a fabricated 0 (which is indistinguishable from a real zero).
+ *  `unresolved` carries the reason and is present exactly when the value is null. (Same vocabulary as
+ *  FcReadState.fields, which already uses `number | null` for an unread field.) */
+export interface NamedParam { id: number; name: string; value: number | null; norm: number | null; unit?: string; min?: number; max?: number; log?: boolean; unresolved?: string; }
+export interface EnumParam { id: number; name: string; value: number | null; options: { value: number; label: string }[]; unresolved?: string; }
 export interface MeterVal { norm: number; value: number; unit?: string; min?: number; max?: number; log?: boolean; }
 /** One side (tap/hold) of an FC switch as read by the sub-0x01 structured read. `present` = the
  *  device returned a record whose config/side echo matched the request; `raw` = the 78-byte response

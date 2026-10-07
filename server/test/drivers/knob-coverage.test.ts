@@ -55,7 +55,7 @@ function blockBulkFrames(model: number, effectId: number, values: readonly numbe
 /** Drive blockParams() for one effect id over a mocked transport, returning the served knob ids. */
 async function servedKnobs(profile: DeviceProfile, eid: number): Promise<Map<number, { id: number; unit?: string; min?: number; max?: number }>> {
   const codec = createModernFractalCodec(profile.model);
-  const stride = profile.rangeSections[SLUG_FAMILY[familyForEid(eid)] ?? '']?.stride ?? 1;
+  const stride = profile.rangeSections[familyForEid(eid)]?.stride ?? 1; // familyForEid already returns the FAMILY
   const values = new Array(Math.max(stride, 1) * 4).fill(0);
   const bulk = blockBulkFrames(profile.model, eid, values);
   const mock = new MockTransport('serial', `mock-knob-${eid}`);

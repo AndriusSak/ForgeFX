@@ -41,7 +41,7 @@ const PARAM_WIDGETS = new Set(['knob', 'dropdown']);
  *  slug, so they are absent from the effectRoster join below. */
 const VIRTUAL_EID_FAMILY: Record<number, string> = { 1: 'GLOBAL', 2: 'CONTROLLERS', 3: 'MOD', 190: 'MIDIBLOCK', 199: 'FC' };
 
-export const LAYOUT_PARAM_COVERAGE_CASE_COUNT = 3;
+export const LAYOUT_PARAM_COVERAGE_CASE_COUNT = 4;
 
 // A layout knob/dropdown the serve layer provably CANNOT (or intentionally does NOT) serve. Each is
 // documented with its unmount reason; the guard fails if any OTHER layout param is unserved, and fails
@@ -97,12 +97,17 @@ function blockBulkFrames(effectId: number, values: readonly number[]): number[][
   ];
 }
 
-/** Serve blockParams for one eid over a mocked transport → the set of paramIds the client receives. */
-async function servedIds(profile: DeviceProfile, eid: number): Promise<Set<number>> {
+/** A deliberately NON-ZERO bulk body: index i → (i % 250) + 1. A decoder that reads a value out of
+ *  position or past the end can no longer hide behind an all-zero fixture (which made every miss
+ *  indistinguishable from a real zero). */
+const NONZERO_BODY = (n: number) => Array.from({ length: n }, (_, i) => (i % 250) + 1);
+
+/** Serve blockParams for one eid over a mocked transport (non-zero bulk body) → the full result. */
+async function servedBlock(profile: DeviceProfile, eid: number) {
   const codec = createModernFractalCodec(profile.model);
   const fam = profile.familyForEffectId(eid) ?? '';
   const stride = profile.rangeSections[fam]?.stride ?? 1;
-  const bulk = blockBulkFrames(eid, new Array(Math.max(stride, 1) * 4).fill(0));
+  const bulk = blockBulkFrames(eid, NONZERO_BODY(Math.max(stride, 1) * 4));
   const mock = new MockTransport('serial', `mock-layoutcov-${eid}`);
   mock.isOpen = true;
   mock.reply = (req) => (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(eid)) ? bulk : []);
@@ -111,7 +116,12 @@ async function servedIds(profile: DeviceProfile, eid: number): Promise<Set<numbe
     emit: () => {},
     getCadence: () => cadenceFor(profile.model, 'balanced')
   });
-  const r = await driver.blockParams(eid);
+  return driver.blockParams(eid);
+}
+
+/** Serve blockParams for one eid → the set of paramIds the client receives. */
+async function servedIds(profile: DeviceProfile, eid: number): Promise<Set<number>> {
+  const r = await servedBlock(profile, eid);
   return new Set<number>([...r.named.map((n) => n.id), ...r.enums.map((e) => e.id)]);
 }
 
@@ -164,10 +174,25 @@ export async function runLayoutParamCoverageTests(): Promise<void> {
 
   // 1. THE DEFECT, pinned (so a filter regression fails loudly and precisely): the FM3's FC page
   //    GLOBAL params are served in their owning family. Brightness/Contrast are knobs; the PFC1-3
-  //    default-layout selectors are enums. (Served-set membership only — no invented values asserted.)
+  //    default-layout selectors are enums. (Membership only here; 1b below asserts the VALUES, so the
+  //    guard can no longer pass vacuously on a zero fixture.)
   const global = await servedIds(profile, famToEid.get('GLOBAL')!);
   for (const id of [7115, 7116]) assert(global.has(id), `FM3 GLOBAL ${id} (FC page Brightness/Contrast) is served`);
   for (const id of [3602, 3603, 3604]) assert(global.has(id), `FM3 GLOBAL FC_DEFAULT_LAYOUT_PFC${id - 3601} (${id}) is served`);
+
+  // 1b. STRENGTHENED (P9): with a deliberately NON-ZERO bulk fixture, a GLOBAL value must be an explicit
+  //     UNKNOWN — `null` + a stated reason — and NEVER a number derived from the fixture. The old code
+  //     indexed by pid and coerced the miss with `?? 0`, so it served a fixture value (pid < stride, the
+  //     WRONG record) or a fabricated 0 (pid >= stride); this assertion fails on it. The fixture being
+  //     non-zero is what makes the check non-vacuous: an all-zero body is indistinguishable from "correct".
+  const gBlock = await servedBlock(profile, famToEid.get('GLOBAL')!);
+  const gParams = [...gBlock.named, ...gBlock.enums];
+  const fabricated = gParams.filter((p) => typeof p.value === 'number');
+  assertEqual(fabricated.length, 0,
+    `GLOBAL values are UNKNOWN, never fabricated from the bulk body (numbers: ${fabricated.map((p) => p.id).join(', ') || 'none'})`);
+  const gBright = gParams.find((p) => p.id === 7115);
+  assert(!!gBright && gBright.value === null && typeof gBright.unresolved === 'string' && gBright.unresolved.length > 0,
+    'FM3 GLOBAL_FS_BRIGHTNESS (7115) is served UNKNOWN (null + reason), not a number, under a non-zero fixture');
 
   // 2. INVARIANT: every FM3 layout knob/dropdown is served in its owning family, or is on the
   //    documented allowlist. Families with no blockParams address are not served layouts → skipped.
