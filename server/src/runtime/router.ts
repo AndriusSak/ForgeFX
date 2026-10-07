@@ -280,11 +280,8 @@ export function createRouter(deps: RuntimeDeps): {
   // Verbatim re-emit of a preset dump to its stored location. Capability restoreDump.
   on('POST', '/preset/restore', (c) => h.restoreH(c.reply, (c.body as { bytes?: number[] } | undefined)?.bytes));
   // Rename the working-buffer preset. Visible immediately; persist is a separate store.
-  on('POST', '/preset/name', async (c) => {
-    const d = await driver();
-    if (!d.setPresetName) return unsupported(c.reply, 'setPresetName');
-    return d.setPresetName((c.body as { name: string }).name);
-  });
+  on('POST', '/preset/name', async (c) =>
+    h.presetRenameH(c.reply, (c.body as { name: string }).name));
 
   // Decode an uploaded preset .syx → library summary. Offline (decode touches no transport).
   // Bodies: raw bytes (Uint8Array — the octet-stream shape) OR JSON {bytes:number[]}.
@@ -394,16 +391,10 @@ export function createRouter(deps: RuntimeDeps): {
     return h.setParamH(c.reply, Number(c.params.eid), Number(c.params.paramId), b.value, b.continuous ?? false);
   });
   on('POST', '/preset/blocks/:eid/bypass', (c) => h.bypassH(c.reply, Number(c.params.eid), (c.body as { bypassed: boolean }).bypassed));
-  on('POST', '/preset/blocks/:eid/channel', async (c) => {
-    const d = await driver();
-    if (!d.setChannel) return unsupported(c.reply, 'channels');
-    return d.setChannel(Number(c.params.eid), (c.body as { channel: string }).channel);
-  });
-  on('POST', '/preset/blocks/:eid/type', async (c) => {
-    const d = await driver();
-    if (!d.setType) return unsupported(c.reply, 'setType');
-    return d.setType(Number(c.params.eid), (c.body as { value: number }).value);
-  });
+  on('POST', '/preset/blocks/:eid/channel', (c) =>
+    h.channelH(c.reply, Number(c.params.eid), (c.body as { channel: string }).channel));
+  on('POST', '/preset/blocks/:eid/type', (c) =>
+    h.typeH(c.reply, Number(c.params.eid), (c.body as { value: number }).value));
   // raw param values for an effect (for FC eid 199 / Modifier eid 3, whose params have no display range)
   on('GET', '/preset/blocks/:eid/raw', async (c) => {
     try {
@@ -446,22 +437,16 @@ export function createRouter(deps: RuntimeDeps): {
 
   // ── grid editing (1-indexed row/col, matching FM-Edit) ──
   on('PUT', '/preset/grid/cell', async (c) => {
-    const d = await driver();
-    if (!d.placeCell) return unsupported(c.reply, 'gridEdit');
     const b = c.body as { row: number; col: number; blockId: number };
-    return d.placeCell(b.row, b.col, b.blockId);
+    return h.gridCellH(c.reply, b.row, b.col, b.blockId);
   });
   on('POST', '/preset/grid/cable', async (c) => {
-    const d = await driver();
-    if (!d.cable) return unsupported(c.reply, 'gridEdit');
     const b = c.body as { srcRow: number; srcCol: number; destRow: number; connect?: boolean };
-    return d.cable(b.srcRow, b.srcCol, b.destRow, b.connect ?? true);
+    return h.gridCableH(c.reply, b.srcRow, b.srcCol, b.destRow, b.connect ?? true);
   });
   on('POST', '/preset/grid/select', async (c) => {
-    const d = await driver();
-    if (!d.selectCell) return unsupported(c.reply, 'gridEdit');
     const b = c.body as { row: number; col: number };
-    return d.selectCell(b.row, b.col);
+    return h.gridSelectH(c.reply, b.row, b.col);
   });
 
   // ── telemetry cadence-mode control (GET/PUT /telemetry/config) ──
@@ -475,11 +460,7 @@ export function createRouter(deps: RuntimeDeps): {
     if (!d.getTempo) return unsupported(c.reply, 'getTempo');
     return d.getTempo();
   });
-  on('POST', '/tempo', async (c) => {
-    const d = await driver();
-    if (!d.setTempo) return unsupported(c.reply, 'setTempo');
-    return d.setTempo((c.body as { bpm: number }).bpm);
-  });
+  on('POST', '/tempo', async (c) => h.tempoH(c.reply, (c.body as { bpm: number }).bpm));
   on('POST', '/tempo/tap', async (c) => {
     const d = await driver();
     if (!d.tapTempo) return unsupported(c.reply, 'tapTempo');
@@ -493,10 +474,8 @@ export function createRouter(deps: RuntimeDeps): {
   on('POST', '/scene', (c) => h.sceneSetH(c.reply, (c.body as { index: number }).index));
   // Rename a scene (0-based index) in the working buffer. Visible immediately; persist is a separate store.
   on('POST', '/scene/name', async (c) => {
-    const d = await driver();
-    if (!d.setSceneName) return unsupported(c.reply, 'scenes');
     const b = c.body as { index: number; name: string };
-    return d.setSceneName(b.index, b.name);
+    return h.sceneNameH(c.reply, b.index, b.name);
   });
 
   // ── FC / Modifier / monitors ──
@@ -548,15 +527,7 @@ export function createRouter(deps: RuntimeDeps): {
   // bind a modifier slot to a target parameter (writes targetEffectId + targetParam + source on the slot eid)
   on('POST', '/mod/bind', async (c) => {
     const b = c.body as { slot?: number; targetEffectId?: number; targetParam?: number; source?: number } | undefined;
-    if (b?.slot == null || b.targetEffectId == null || b.targetParam == null || b.source == null) {
-      c.reply.code(400);
-      return { ok: false, error: 'slot, targetEffectId, targetParam, source required' };
-    }
-    try {
-      const d = await driver();
-      if (!d.bindModifier) return unsupported(c.reply, 'modifiers.bind');
-      return await d.bindModifier(b.slot, b.targetEffectId, b.targetParam, b.source);
-    } catch (e) { c.reply.code(503); return { ok: false, error: (e as Error).message }; }
+    return h.modBindH(c.reply, b);
   });
 
   // Validate a firmware .syx (integrity check only, NOT a flasher). Capability firmwareValidate.

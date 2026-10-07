@@ -54,6 +54,25 @@ function makeFakeFm3(): FakeFm3 {
     setParam: async (addr: number, pid: number, value: number, continuous: boolean) => {
       rec('setParam', addr, pid, value, continuous);
       return { ok: true };
+    },
+    // The write methods the P6 validation rows exercise — each records so the row can prove the guard
+    // fired BEFORE the driver (400 rows must NOT reach it) or that a valid input DID reach it.
+    setBypass: async (addr: number, bypassed: boolean) => { rec('setBypass', addr, bypassed); return { ok: true }; },
+    setChannel: async (eid: number, channel: string) => { rec('setChannel', eid, channel); return { ok: true }; },
+    setType: async (eid: number, value: number) => { rec('setType', eid, value); return { ok: true }; },
+    setScene: async (index: number) => { rec('setScene', index); return { ok: true }; },
+    setSceneName: async (index: number, name: string) => { rec('setSceneName', index, name); return { ok: true }; },
+    setPresetName: async (name: string) => { rec('setPresetName', name); return { ok: true }; },
+    setTempo: async (bpm: number) => { rec('setTempo', bpm); return { ok: true }; },
+    placeCell: async (row: number, col: number, blockId: number) => { rec('placeCell', row, col, blockId); return { ok: true }; },
+    cable: async (srcRow: number, srcCol: number, destRow: number, connect: boolean) => { rec('cable', srcRow, srcCol, destRow, connect); return { ok: true }; },
+    selectCell: async (row: number, col: number) => { rec('selectCell', row, col); return { ok: true }; },
+    store: async (n: number) => { rec('store', n); return { ok: true }; },
+    restorePreset: async (bytes: number[]) => { rec('restorePreset', bytes.length); return { ok: true }; },
+    setParamByKey: async (key: string, value: number) => { rec('setParamByKey', key, value); return { ok: true }; },
+    bindModifier: async (slot: number, targetEffectId: number, targetParam: number, source: number) => {
+      rec('bindModifier', slot, targetEffectId, targetParam, source);
+      return { ok: true };
     }
   } as DeviceDriver as FakeFm3;
 }
@@ -106,11 +125,59 @@ const VALIDATION_ROWS: ValRow[] = [
   { name: 'set param discrete non-integer value', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 1.5 }, expect: 400, callsDriver: false },
   { name: 'set param discrete out-of-range ordinal', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 20000 }, expect: 400, callsDriver: false },
   { name: 'set param discrete valid ordinal (boundary twin)', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 12, continuous: false }, expect: 200, callsDriver: true },
-  { name: 'set param valid', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 0.5, continuous: true }, expect: 200, callsDriver: true }
+  { name: 'set param valid', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 0.5, continuous: true }, expect: 200, callsDriver: true },
+
+  // ── P6 — the rest of the write seam. Every write route must answer 400 on garbage. Each garbage row
+  //    is paired with a valid boundary twin that proves the guard is not over-broad. ──
+  // bypass: eid out of range (codec encode14 throws → was 500) and a NON-BOOLEAN bypassed (the codec's
+  // `bypassed ? 1 : 0` coerced "false" to BYPASSED with a 200 — the silent accept).
+  { name: 'bypass eid out of range', method: 'POST', url: '/preset/blocks/20000/bypass', body: { bypassed: true }, expect: 400, callsDriver: false },
+  { name: 'bypass non-integer eid', method: 'POST', url: '/preset/blocks/xyz/bypass', body: { bypassed: true }, expect: 400, callsDriver: false },
+  { name: 'bypass non-boolean bypassed', method: 'POST', url: '/preset/blocks/58/bypass', body: { bypassed: 'false' }, expect: 400, callsDriver: false },
+  { name: 'bypass valid', method: 'POST', url: '/preset/blocks/58/bypass', body: { bypassed: true }, expect: 200, callsDriver: true },
+  // channel: a non-string channel crashed the driver's `channel.toUpperCase()` (500); an unknown letter
+  // was silently ignored; a bad eid made encode14 throw (500).
+  { name: 'channel non-string', method: 'POST', url: '/preset/blocks/58/channel', body: { channel: 5 }, expect: 400, callsDriver: false },
+  { name: 'channel unknown letter', method: 'POST', url: '/preset/blocks/58/channel', body: { channel: 'Z' }, expect: 400, callsDriver: false },
+  { name: 'channel valid', method: 'POST', url: '/preset/blocks/58/channel', body: { channel: 'B' }, expect: 200, callsDriver: true },
+  // type: the ordinal rides a float-valued SET the codec encodes WITHOUT throwing → a fraction/NaN used
+  // to reach the device as a bad frame with a 200 (the P5 lesson).
+  { name: 'type non-numeric value', method: 'POST', url: '/preset/blocks/58/type', body: { value: 'abc' }, expect: 400, callsDriver: false },
+  { name: 'type fractional value', method: 'POST', url: '/preset/blocks/58/type', body: { value: 1.5 }, expect: 400, callsDriver: false },
+  { name: 'type valid', method: 'POST', url: '/preset/blocks/58/type', body: { value: 3 }, expect: 200, callsDriver: true },
+  // grid edit: a col PAST the FM3's 4×12 grid (13) is inside the codec's 6×14 backstop, so it would
+  // encode a gridPos outside the unit's own grid — now bounded to the device's capabilities.
+  { name: 'grid cell col past the FM3 grid', method: 'PUT', url: '/preset/grid/cell', body: { row: 1, col: 13, blockId: 1 }, expect: 400, callsDriver: false },
+  { name: 'grid cell valid', method: 'PUT', url: '/preset/grid/cell', body: { row: 1, col: 1, blockId: 1 }, expect: 200, callsDriver: true },
+  { name: 'grid cable srcCol past the FM3 grid', method: 'POST', url: '/preset/grid/cable', body: { srcRow: 1, srcCol: 12, destRow: 2 }, expect: 400, callsDriver: false },
+  { name: 'grid cable valid', method: 'POST', url: '/preset/grid/cable', body: { srcRow: 1, srcCol: 2, destRow: 2 }, expect: 200, callsDriver: true },
+  { name: 'grid select non-integer col', method: 'POST', url: '/preset/grid/select', body: { row: 1, col: 'x' }, expect: 400, callsDriver: false },
+  { name: 'grid select valid', method: 'POST', url: '/preset/grid/select', body: { row: 1, col: 2 }, expect: 200, callsDriver: true },
+  // tempo: bpm packs as a float32 the codec encodes silently → a non-numeric bpm reached the device.
+  { name: 'tempo non-numeric bpm', method: 'POST', url: '/tempo', body: { bpm: 'abc' }, expect: 400, callsDriver: false },
+  { name: 'tempo valid', method: 'POST', url: '/tempo', body: { bpm: 121 }, expect: 200, callsDriver: true },
+  // scene: a non-integer index made the codec's buildSetScene throw (500). (An in-range integer the
+  // device lacks is the driver's EXPLICIT {ok:false} at 200 — unchanged, see api/write-safety.)
+  { name: 'scene non-integer index', method: 'POST', url: '/scene', body: { index: 1.5 }, expect: 400, callsDriver: false },
+  { name: 'scene valid', method: 'POST', url: '/scene', body: { index: 2 }, expect: 200, callsDriver: true },
+  { name: 'scene name non-string', method: 'POST', url: '/scene/name', body: { index: 1, name: 5 }, expect: 400, callsDriver: false },
+  { name: 'preset name non-string', method: 'POST', url: '/preset/name', body: { name: 5 }, expect: 400, callsDriver: false },
+  // preset store: a fraction / out-of-range slot makes the codec's buildStorePreset throw (500).
+  { name: 'preset store fractional number', method: 'POST', url: '/preset/store', body: { number: 1.5 }, expect: 400, callsDriver: false },
+  { name: 'preset store out-of-range number', method: 'POST', url: '/preset/store', body: { number: 20000 }, expect: 400, callsDriver: false },
+  // restore: Uint8Array.from SILENTLY wraps/clamps non-byte elements — reject them at the seam.
+  { name: 'restore non-byte element', method: 'POST', url: '/preset/restore', body: { bytes: [1, 2, 300] }, expect: 400, callsDriver: false },
+  { name: 'restore valid', method: 'POST', url: '/preset/restore', body: { bytes: [0xf0, 0x11, 0xf7] }, expect: 200, callsDriver: true },
+  // device param: a non-finite value was passed straight to the encoder (silent accept).
+  { name: 'device param non-numeric value', method: 'PUT', url: '/device/param', body: { key: 'amp.gain', value: 'x' }, expect: 400, callsDriver: false },
+  { name: 'device param valid', method: 'PUT', url: '/device/param', body: { key: 'amp.gain', value: 7.5 }, expect: 200, callsDriver: true },
+  // modifier bind: a non-integer slot flowed into Math.floor()→NaN and the encoder.
+  { name: 'mod bind non-integer slot', method: 'POST', url: '/mod/bind', body: { slot: 'a', targetEffectId: 1, targetParam: 2, source: 3 }, expect: 400, callsDriver: false }
 ];
 
-// drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row
-export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 3;
+// drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row,
+// plus the P6 silent-accept proof (case 5, against the REAL gen-3 codec).
+export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 4;
 
 export async function runRouteParityTests(): Promise<void> {
   // Hermetic: no cloud (so app.ts's AXIS_CLOUD branch is off and both tables are compared in the
@@ -177,5 +244,33 @@ export async function runRouteParityTests(): Promise<void> {
     }
   } finally {
     await app.close();
+  }
+
+  // ── 5. P6 — the P5 SILENT-ACCEPT lesson, proven against the REAL gen-3 codec ──
+  // The failure mode was a write route answering 200 {ok:true} while a garbage value reached the
+  // device: the gen-3 codec encodes ANY number as a float32 and does NOT throw, so POST /tempo used
+  // to encode a NaN bpm into a tempo frame. Prove (a) the DRIVER still accepts garbage silently — so
+  // validation MUST live at the seam, it can't be assumed from the driver — and (b) the seam now
+  // answers 400 and puts NOTHING on the wire.
+  {
+    const { app, registry, mock } = await buildTestApp(0x11); // REAL FM3 driver over MockTransport
+    const real = await registry.driver();
+    try {
+      const beforeProbe = mock.sent.length;
+      const r = (await real.setTempo!(NaN)) as { ok?: boolean };
+      assertEqual(r.ok, true, 'the gen-3 driver SILENTLY accepts a NaN bpm (ok:true) — this IS the silent accept the class closes');
+      assertEqual(mock.sent.length, beforeProbe + 1, 'and the driver put a (garbage) tempo frame on the wire');
+
+      const afterProbe = mock.sent.length;
+      const res = await app.inject({ method: 'POST', url: '/tempo', payload: { bpm: 'abc' } });
+      assertEqual(res.statusCode, 400, 'POST /tempo with a non-numeric bpm → 400 (silent accept closed)');
+      assertEqual(mock.sent.length, afterProbe, 'the rejected request sent NOTHING to the device');
+
+      const ok = await app.inject({ method: 'POST', url: '/tempo', payload: { bpm: 121 } });
+      assertEqual(ok.statusCode, 200, 'a valid bpm still → 200');
+      assertEqual(mock.sent.length, afterProbe + 1, 'and it does reach the device');
+    } finally {
+      await app.close();
+    }
   }
 }
