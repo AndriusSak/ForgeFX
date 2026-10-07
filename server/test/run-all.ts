@@ -47,6 +47,7 @@ import { runLayoutParamCoverageTests, LAYOUT_PARAM_COVERAGE_CASE_COUNT } from '.
 import { runGlobalBulkReadTests, GLOBAL_BULK_READ_CASE_COUNT } from './drivers/global-bulk-read.test.js';
 import { runRouteParityTests, ROUTE_PARITY_CASE_COUNT } from './api/route-parity.test.js';
 import { runDeviceProbeRunbookTests, DEVICE_PROBE_RUNBOOK_CASE_COUNT } from './drivers/device-probe-runbook.test.js';
+import { runEditBurstUnresolvedTests, EDIT_BURST_UNRESOLVED_CASE_COUNT } from './drivers/edit-burst-unresolved.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -91,7 +92,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/layout-param-coverage (${LAYOUT_PARAM_COVERAGE_CASE_COUNT} guards, every FM3 layout knob/dropdown served in its owning family)`, run: runLayoutParamCoverageTests },
   { name: `drivers/global-bulk-read (${GLOBAL_BULK_READ_CASE_COUNT} cases, a non-positional family must never serve a fabricated value)`, run: runGlobalBulkReadTests },
   { name: `api/route-parity (${ROUTE_PARITY_CASE_COUNT} cases, app↔runtime route-table drift guard + bad-param 400s)`, run: runRouteParityTests },
-  { name: `drivers/device-probe-runbook (${DEVICE_PROBE_RUNBOOK_CASE_COUNT} cases, one-command device probe: read-only default, --writes restore, no-device non-zero, mocked)`, run: runDeviceProbeRunbookTests }
+  { name: `drivers/device-probe-runbook (${DEVICE_PROBE_RUNBOOK_CASE_COUNT} cases, one-command device probe: read-only default, --writes restore, no-device non-zero, mocked)`, run: runDeviceProbeRunbookTests },
+  { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a non-positional family emits no fabricated edit-burst norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests }
 ];
 
 let failures = 0;
