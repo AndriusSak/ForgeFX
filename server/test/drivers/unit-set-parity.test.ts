@@ -8,6 +8,8 @@
 // knob. There is now a single exported KNOB_UNITS (devices.ts), imported by the driver.
 //
 // Mocked transport + the REAL static III profile: no hardware.
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { PROFILES, SLUG_FAMILY, KNOB_UNITS, type DeviceProfile } from '../../src/devices.js';
@@ -20,7 +22,7 @@ const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page;
 /** Axe-Fx III amp block Bright Cap: unit 'pf', device-true 10..10000 pF. */
 const III_BRIGHTCAP_PID = 10;
 
-export const UNIT_SET_PARITY_CASE_COUNT = 3;
+export const UNIT_SET_PARITY_CASE_COUNT = 5;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -79,6 +81,21 @@ function inlineDecidedIII(): { family: string; paramId: number; unit: string }[]
   return out;
 }
 
+/** Source-guard for the FIX itself (the unification): gen3.ts must CONSUME devices.ts's exported
+ *  KNOB_UNITS, not declare a second allowlist. Exported so a red-green probe can drive it with a
+ *  perturbed source string without touching src/. Throws (fails) on a re-introduced local copy. */
+export function assertSharedUnitSource(gen3Src: string, devicesSrc: string): void {
+  assert(
+    /KNOB_UNITS[\s\S]*?from '\.\.\/devices\.js'/.test(gen3Src),
+    "gen3.ts must import KNOB_UNITS from '../devices.js' (the single shared set)"
+  );
+  assert(
+    !/\b(?:const|let|var)\s+KNOB_UNITS\b/.test(gen3Src),
+    'gen3.ts must NOT re-declare its own KNOB_UNITS allowlist (the two-copies drift this fix removed)'
+  );
+  assert(/export const KNOB_UNITS\b/.test(devicesSrc), 'devices.ts must EXPORT KNOB_UNITS as the single source of truth');
+}
+
 export async function runUnitSetParityTests(): Promise<void> {
   // 1. ONE exported source of truth: the shared set carries all 13 musician-facing units, 'pf'
   //    included. (Guards the drift: a shrink that drops 'pf' fails here.)
@@ -102,7 +119,29 @@ export async function runUnitSetParityTests(): Promise<void> {
   // 3. Adding 'pf' to the classifier is provably behavior-preserving on the CURRENT III catalog: no
   //    inline-decided row carries unit 'pf' (every pf row — there is one — is a mined float). So the
   //    unified set changes no existing classification; the drift was latent, not a live mis-brand.
-  const pfInline = inlineDecidedIII().filter((r) => r.unit === 'pf');
+  //    GUARD the set is non-empty first — an empty inline set would make the equality below pass vacuously
+  //    (and cases 2-4 all rest on this set being a real population).
+  const inline = inlineDecidedIII();
+  assert(inline.length > 0, 'the inline-decided III catalog is non-empty (else the pf assertion below is vacuous)');
+  const pfInline = inline.filter((r) => r.unit === 'pf');
   assertEqual(pfInline.length, 0,
     `no inline-decided III param carries unit 'pf' (found: ${pfInline.map((r) => `${r.family}/${r.paramId}`).join(', ') || 'none'})`);
+
+  // 4. The classifier is actually WIRED to the shared KNOB_UNITS: for every inline-decided row (the only
+  //    rows the inline classifier feeds — the mined device rows override it), the classified `kind` must
+  //    equal `KNOB_UNITS.has(unit)`. Changing KNOB_UNITS' membership of a unit that appears here makes
+  //    this fail, so the classifier and the driver gate provably read ONE set. (Non-empty guarded above.)
+  for (const { family, paramId, unit } of inline) {
+    const kind = PROFILES[MODEL_III]!.ranges[family]?.[paramId]?.kind;
+    const want = KNOB_UNITS.has(unit) ? 'float' : 'enum';
+    assertEqual(kind, want, `III ${family}/${paramId} (unit '${unit}') classified '${kind}', expected '${want}' from KNOB_UNITS`);
+  }
+
+  // 5. THE FIX ITSELF — one source of truth. Cases 2-4 pin the III OUTCOME, but the mined catalog means
+  //    they pass even if gen3.ts re-declared its own allowlist (the drift risk). This source-guard fails
+  //    if the driver stops importing the shared KNOB_UNITS or re-introduces a local copy.
+  const srcDir = new URL('../../src/', import.meta.url);
+  const gen3Src = readFileSync(fileURLToPath(new URL('drivers/gen3.ts', srcDir)), 'utf8');
+  const devicesSrc = readFileSync(fileURLToPath(new URL('devices.ts', srcDir)), 'utf8');
+  assertSharedUnitSource(gen3Src, devicesSrc);
 }

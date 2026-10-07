@@ -32,6 +32,7 @@ import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { PROFILES } from '../../src/devices.js';
 import { effectRoster } from 'forgefx-midi/devices/gen3';
+import type { RequestOpts } from '../../src/transport/types.js';
 import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
@@ -47,9 +48,36 @@ function sysex(fn: number, payload: readonly number[]): number[] {
   return [...body, cs & 0x7f, 0xf7];
 }
 
-/** A driver over a mock whose reply script is `reply` (default: silence — the device says nothing). */
+/** MockTransport that counts WHICH transport primitive each op used. The suite needs this because
+ *  `#send` (fire-and-forget) is observably different from `#write` (reject-watched) ONLY in the
+ *  primitive it calls — sendQueued vs request — and `#send` never consults `reply`, so a reply-scripted
+ *  assertion alone cannot fail. Counting the primitive makes the fire-and-forget claim falsifiable. */
+class SpyTransport extends MockTransport {
+  requestN = 0;
+  queuedN = 0;
+  pacedN = 0;
+  sendN = 0;
+  async request(bytes: readonly number[], opts?: RequestOpts): Promise<number[][]> {
+    this.requestN += 1;
+    return super.request(bytes, opts);
+  }
+  async sendQueued(bytes: readonly number[], settle?: number): Promise<void> {
+    this.queuedN += 1;
+    return super.sendQueued(bytes, settle);
+  }
+  async sendPaced(bytes: readonly number[], chunk?: number, delay?: number): Promise<void> {
+    this.pacedN += 1;
+    return super.sendPaced(bytes, chunk, delay);
+  }
+  send(bytes: readonly number[]): void {
+    this.sendN += 1;
+    super.send(bytes);
+  }
+}
+
+/** A driver over a spy mock whose reply script is `reply` (default: silence — the device says nothing). */
 function gen3(reply: (bytes: readonly number[]) => number[][] = () => []) {
-  const mock = new MockTransport('serial', 'mock-silent-write');
+  const mock = new SpyTransport('serial', 'mock-silent-write');
   mock.isOpen = true;
   mock.reply = reply;
   const driver = createGen3Driver(PROFILES[MODEL]!, {
@@ -93,20 +121,27 @@ export async function runSilentWriteTests(): Promise<void> {
     assert(!r.ok, 'a 0x64 echoing our fn is an explicit reject — {ok:false}');
   }
 
-  // 3. INDISTINGUISHABILITY (the reason silence cannot be mapped to failure). An ACCEPTING device
-  //    and an IGNORING device emit the identical wire (silence) and sent the identical frame, so the
-  //    driver — and therefore the client — cannot tell them apart: the verdict is {ok:true} for both.
+  // 3. THE ONLY WIRE SIGNAL IS THE 0x64. The verdict is a function of exactly one thing — whether a
+  //    0x64 echoing our fn replies — so a device that stays silent (an ACCEPT and a silent-IGNORE are
+  //    both silence, hence byte-identical and inseparable by device identity) AND a device that replies
+  //    with an unrelated NON-0x64 frame both map to {ok:true}; only a matching 0x64 flips it to
+  //    {ok:false}. Each row is a DIFFERENT reply script, so this can fail: if the driver ever treated a
+  //    non-0x64 reply as a rejection, `chatty` would go {ok:false}; if it stopped honouring 0x64,
+  //    `reject` would go {ok:true}. (The old form compared two IDENTICAL silent mocks — a tautology.)
   {
-    const accepting = gen3(() => []); // a device that ACCEPTS
-    const ignoring = gen3(() => []); // a device that IGNORES (probe Q5, unknown eid)
-    const ra = await accepting.driver.setParam(BOGUS_EID, 0, 0, false);
-    const ri = await ignoring.driver.setParam(BOGUS_EID, 0, 0, false);
-    assertEqual(ra.ok, ri.ok, 'accept and silent-ignore produce the SAME verdict — indistinguishable');
-    assert(ra.ok && ri.ok, 'both silence cases map to {ok:true} (no wire signal separates them)');
+    const silent = gen3(() => []); // accept OR silent-ignore — indistinguishable, both silence
+    const chatty = gen3(() => [sysex(0x0c, [0x00])]); // a benign unrelated reply (e.g. a scene echo)
+    const reject = gen3((req) => [sysex(0x64, [req[5]!, 0x05])]); // our own fn echoed in a 0x64
+    const rs = await silent.driver.setParam(BOGUS_EID, 0, 0, false);
+    const rc = await chatty.driver.setParam(BOGUS_EID, 0, 0, false);
+    const rr = await reject.driver.setParam(BOGUS_EID, 0, 0, false);
+    assert(rs.ok, 'silence (accept = silent-ignore) → {ok:true}');
+    assert(rc.ok, 'an unrelated NON-0x64 reply is NOT a rejection → {ok:true}');
+    assert(!rr.ok, 'a 0x64 echoing our fn is the ONE signal that flips the verdict → {ok:false}');
     assertEqual(
-      accepting.mock.sent[0]!.join(','),
-      ignoring.mock.sent[0]!.join(','),
-      'and the outgoing frame is byte-identical — there is no distinguishing signal on the request either'
+      silent.mock.sent[0]!.join(','),
+      chatty.mock.sent[0]!.join(','),
+      'the outgoing request is byte-identical whether the device stays silent or replies — no reply-driven resend'
     );
   }
 
@@ -120,18 +155,26 @@ export async function runSilentWriteTests(): Promise<void> {
 
   // 5. setScene is FIRE-AND-FORGET (gen3.ts setScene → #send → sendQueued): it does not watch for a
   //    0x64 at all, so a device refusal there is unreportable — the verdict is {ok:true} regardless.
-  //    Pinned so a future "route scene through #write" change is a deliberate one.
+  //    Pinned so a future "route scene through #write" change is a deliberate one. The reply script is a
+  //    matching 0x64 that WOULD reject a `#write`; since #send never reads it, the only thing that makes
+  //    this non-vacuous is asserting the PRIMITIVE: it went out via sendQueued with ZERO request() calls
+  //    (a request() path would both flip `r.ok` to false and show requestN ≥ 1 → this fails).
   {
-    const { driver } = gen3(() => [sysex(0x64, [0x01, 0x05])]); // even a reject reply cannot reach #send
+    const { driver, mock } = gen3(() => [sysex(0x64, [0x01, 0x05])]); // a reject a #write would catch
     const r = await driver.setScene(0);
     assert(r.ok, 'setScene uses #send — it never collects a reply, so its verdict is always {ok:true}');
+    assert(mock.queuedN >= 1, 'setScene actually went out via #send → sendQueued');
+    assertEqual(mock.requestN, 0, 'setScene issued NO request() — so no 0x64 could ever reach it');
   }
 
   // 6. The continuous knob path is fire-and-forget BY DESIGN (gen3.ts setParam continuous → #send):
-  //    silence (the only possible reply for a fire-and-forget write) → {ok:true}.
+  //    silence (the only possible reply for a fire-and-forget write) → {ok:true}. Same primitive pin as
+  //    case 5 so the fire-and-forget claim is falsifiable rather than an always-true reply-blind assert.
   {
-    const { driver } = gen3(() => []);
+    const { driver, mock } = gen3(() => []);
     const r = await driver.setParam(AMP_EID, 1, 0.5, true);
     assert(r.ok, 'a continuous setParam (#send) is fire-and-forget — {ok:true}');
+    assert(mock.queuedN >= 1, 'continuous setParam went out via #send → sendQueued');
+    assertEqual(mock.requestN, 0, 'continuous setParam issued NO request() — no reply is ever collected');
   }
 }
