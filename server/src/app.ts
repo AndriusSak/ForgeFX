@@ -75,6 +75,7 @@ export async function buildApp(
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
+    channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
     decodeH, decodeBytes
   } = createUnifiedHandlers(registry);
 
@@ -470,33 +471,18 @@ export async function buildApp(
     async (req, reply) => setParamH(reply, Number(req.params.eid), Number(req.params.paramId), req.body.value, req.body.continuous ?? false)
   );
   app.post<{ Params: { eid: string }; Body: { bypassed: boolean } }>('/preset/blocks/:eid/bypass', async (req, reply) => bypassH(reply, Number(req.params.eid), req.body.bypassed));
-  app.post<{ Params: { eid: string }; Body: { channel: string } }>('/preset/blocks/:eid/channel', async (req, reply) => {
-    const d = await driver();
-    if (!d.setChannel) return unsupported(reply, 'channels');
-    return d.setChannel(Number(req.params.eid), req.body.channel);
-  });
-  app.post<{ Params: { eid: string }; Body: { value: number } }>('/preset/blocks/:eid/type', async (req, reply) => {
-    const d = await driver();
-    if (!d.setType) return unsupported(reply, 'setType');
-    return d.setType(Number(req.params.eid), req.body.value);
-  });
+  app.post<{ Params: { eid: string }; Body: { channel: string } }>('/preset/blocks/:eid/channel', (req, reply) =>
+    channelH(reply, Number(req.params.eid), req.body.channel));
+  app.post<{ Params: { eid: string }; Body: { value: number } }>('/preset/blocks/:eid/type', (req, reply) =>
+    typeH(reply, Number(req.params.eid), req.body.value));
 
   // ── grid editing (1-indexed row/col, matching FM-Edit) ──
-  app.put<{ Body: { row: number; col: number; blockId: number } }>('/preset/grid/cell', async (req, reply) => {
-    const d = await driver();
-    if (!d.placeCell) return unsupported(reply, 'gridEdit');
-    return d.placeCell(req.body.row, req.body.col, req.body.blockId);
-  });
-  app.post<{ Body: { srcRow: number; srcCol: number; destRow: number; connect?: boolean } }>('/preset/grid/cable', async (req, reply) => {
-    const d = await driver();
-    if (!d.cable) return unsupported(reply, 'gridEdit');
-    return d.cable(req.body.srcRow, req.body.srcCol, req.body.destRow, req.body.connect ?? true);
-  });
-  app.post<{ Body: { row: number; col: number } }>('/preset/grid/select', async (req, reply) => {
-    const d = await driver();
-    if (!d.selectCell) return unsupported(reply, 'gridEdit');
-    return d.selectCell(req.body.row, req.body.col);
-  });
+  app.put<{ Body: { row: number; col: number; blockId: number } }>('/preset/grid/cell', (req, reply) =>
+    gridCellH(reply, req.body.row, req.body.col, req.body.blockId));
+  app.post<{ Body: { srcRow: number; srcCol: number; destRow: number; connect?: boolean } }>('/preset/grid/cable', (req, reply) =>
+    gridCableH(reply, req.body.srcRow, req.body.srcCol, req.body.destRow, req.body.connect ?? true));
+  app.post<{ Body: { row: number; col: number } }>('/preset/grid/select', (req, reply) =>
+    gridSelectH(reply, req.body.row, req.body.col));
 
   // ── telemetry cadence-mode control (GET/PUT /telemetry/config) ──
   app.get('/telemetry/config', () => telemetryConfigH());
@@ -509,11 +495,7 @@ export async function buildApp(
     if (!d.getTempo) return unsupported(reply, 'getTempo');
     return d.getTempo();
   });
-  app.post<{ Body: { bpm: number } }>('/tempo', async (req, reply) => {
-    const d = await driver();
-    if (!d.setTempo) return unsupported(reply, 'setTempo');
-    return d.setTempo(req.body.bpm);
-  });
+  app.post<{ Body: { bpm: number } }>('/tempo', async (req, reply) => tempoH(reply, req.body.bpm));
   app.post('/tempo/tap', async (_req, reply) => {
     const d = await driver();
     if (!d.tapTempo) return unsupported(reply, 'tapTempo');
@@ -526,17 +508,10 @@ export async function buildApp(
   });
   app.post<{ Body: { index: number } }>('/scene', async (req, reply) => sceneSetH(reply, req.body.index));
   // Rename a scene (0-based index) in the working buffer. Visible immediately; persist is a separate store.
-  app.post<{ Body: { index: number; name: string } }>('/scene/name', async (req, reply) => {
-    const d = await driver();
-    if (!d.setSceneName) return unsupported(reply, 'scenes');
-    return d.setSceneName(req.body.index, req.body.name);
-  });
+  app.post<{ Body: { index: number; name: string } }>('/scene/name', async (req, reply) =>
+    sceneNameH(reply, req.body.index, req.body.name));
   // Rename the working-buffer preset. Visible immediately; persist is a separate store.
-  app.post<{ Body: { name: string } }>('/preset/name', async (req, reply) => {
-    const d = await driver();
-    if (!d.setPresetName) return unsupported(reply, 'setPresetName');
-    return d.setPresetName(req.body.name);
-  });
+  app.post<{ Body: { name: string } }>('/preset/name', async (req, reply) => presetRenameH(reply, req.body.name));
 
   // auto-detect the connected Fractal unit (FM3/FM9/Axe-Fx/…) via the fn 0x00 handshake
   app.get('/device/detect', () => registry.detect());
@@ -620,18 +595,8 @@ export async function buildApp(
   app.put<{ Body: { key?: string; value?: number } }>('/device/param', async (req, reply) => deviceParamH(reply, req.body?.key, req.body?.value));
 
   // bind a modifier slot to a target parameter (writes targetEffectId + targetParam + source on the slot eid)
-  app.post<{ Body: { slot: number; targetEffectId: number; targetParam: number; source: number } }>('/mod/bind', async (req, reply) => {
-    const b = req.body;
-    if (b?.slot == null || b.targetEffectId == null || b.targetParam == null || b.source == null) {
-      reply.code(400);
-      return { ok: false, error: 'slot, targetEffectId, targetParam, source required' };
-    }
-    try {
-      const d = await driver();
-      if (!d.bindModifier) return unsupported(reply, 'modifiers.bind');
-      return await d.bindModifier(b.slot, b.targetEffectId, b.targetParam, b.source);
-    } catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
-  });
+  app.post<{ Body: { slot: number; targetEffectId: number; targetParam: number; source: number } }>('/mod/bind', async (req, reply) =>
+    modBindH(reply, req.body));
   // raw param values for an effect (for FC eid 199 / Modifier eid 3, whose params have no display range)
   app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/raw', async (req, reply) => {
     try {
