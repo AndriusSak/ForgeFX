@@ -20,6 +20,7 @@ import { runCabMuteCacheRowTests, CAB_MUTE_CACHE_ROW_CASE_COUNT } from './driver
 import { runCabBtnPseudoParamTests, CAB_BTN_PSEUDO_PARAM_CASE_COUNT } from './drivers/cab-btn-pseudo-param.test.js';
 import { runBlockReadFailureTests, BLOCK_READ_FAILURE_CASE_COUNT } from './drivers/block-read-failure.test.js';
 import { runWriteRejectionTests, WRITE_REJECTION_CASE_COUNT } from './drivers/write-rejection.test.js';
+import { runWriteWindowTests, WRITE_WINDOW_CASE_COUNT } from './drivers/write-window.test.js';
 import { runEnumCoverageTests, ENUM_COVERAGE_CASE_COUNT } from './drivers/enum-coverage.test.js';
 import { runUnitSetParityTests, UNIT_SET_PARITY_CASE_COUNT } from './drivers/unit-set-parity.test.js';
 import { runBrowserGlobalsTests, BROWSER_GLOBALS_CASE_COUNT } from './drivers/browser-globals.test.js';
@@ -62,6 +63,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/cab-btn-pseudo-param (${CAB_BTN_PSEUDO_PARAM_CASE_COUNT} cases, server-side _BTN_ pseudo-param layout rewrite)`, run: runCabBtnPseudoParamTests },
   { name: `drivers/block-read-failure (${BLOCK_READ_FAILURE_CASE_COUNT} torn/short bulk read must not be served as complete)`, run: runBlockReadFailureTests },
   { name: `drivers/write-rejection (${WRITE_REJECTION_CASE_COUNT} 0x64 attribution cases)`, run: runWriteRejectionTests },
+  { name: `drivers/write-window (${WRITE_WINDOW_CASE_COUNT} late-0x64 window cases, real transport timing)`, run: runWriteWindowTests },
   { name: `drivers/enum-coverage (${ENUM_COVERAGE_CASE_COUNT} real-gen3 enum/range completeness guards)`, run: runEnumCoverageTests },
   { name: `drivers/unit-set-parity (${UNIT_SET_PARITY_CASE_COUNT} one unit allowlist for knob gate + III float/enum classifier)`, run: runUnitSetParityTests },
   { name: `drivers/browser-globals (${BROWSER_GLOBALS_CASE_COUNT} drivers build with no Node process global)`, run: runBrowserGlobalsTests },

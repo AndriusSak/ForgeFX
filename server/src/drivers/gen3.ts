@@ -260,16 +260,35 @@ class Gen3Driver implements DeviceDriver {
     return { ok: true };
   }
 
-  /** Write + watch a short window for a 0x64 rejection. For structural ops where a reject matters.
-   *  A 0x64 echoes the FUNCTION it rejected (`[echoedFn, resultCode]` — see write-protocol.md +
-   *  parseMultipurposeResponse), so only count one that echoes THIS write's function: otherwise a
-   *  stray/late rejection for another op (a refused read, a queued write, an earlier error) is
-   *  misattributed to this write and surfaces as a rejected user action. A 0x64 too short to carry an
-   *  echoed function is treated conservatively as ours. */
+  /** Write + watch a window for a 0x64 rejection. For structural ops where a reject matters.
+   *
+   *  Window = 250 ms, matched to forgefx-midi's writer (`writer.ts` sendAndWatchForError — the
+   *  better-evidenced number): a SysEx round-trip is 30-60 ms, so the old 120 ms window could close
+   *  before a genuine rejection arrived and report a rejected write as accepted. Since P1.1 the Axis
+   *  client HONOURS `ok`, so that false "accepted" showed a successful save/value the device refused.
+   *
+   *  Which option actually gates the verdict (transport `#once`, src/transport/serial.ts): the promise
+   *  resolves on (a) `match` — immediate; (b) `quietMs` of silence after the last inbound frame; or
+   *  (c) the `timeoutMs` hard cap. On ACCEPT the device is silent, so the quiet timer never starts and
+   *  the write is declared accepted at `timeoutMs`; a stray inbound frame during the window would
+   *  instead close the watch `quietMs` later. So BOTH are set to the window: `timeoutMs` gates the
+   *  silent-accept case, and `quietMs` stops an unrelated frame from cutting the watch short before a
+   *  late rejection lands (a `match` on any 0x64 still resolves immediately). `timeoutMs` caps the
+   *  total wait at 250 ms in every case. Only this discrete-write confirmation path is widened — reads
+   *  and the fire-and-forget `#send` path are untouched.
+   *
+   *  Attribution is by FUNCTION byte only: a 0x64 echoes `[echoedFn, resultCode]` and the wire carries
+   *  no sub-action (write-protocol.md + parseMultipurposeResponse), so a rejection for one fn=0x01 op
+   *  (setParam / setType / setSceneName / renamePreset / clearBlock / setGridCell / setGridRouting /
+   *  switchPresetSysEx / store) is indistinguishable from another within the window. That residual is
+   *  deliberately resolved CONSERVATIVELY — a matching-function 0x64 is treated as ours and reported
+   *  {ok:false}, which errs toward "rejected" rather than a false "accepted". Count only a rejection
+   *  that echoes THIS write's function, so a foreign-function 0x64 (a refused read, etc.) is not
+   *  misattributed to this write. A 0x64 too short to carry an echoed function is treated as ours. */
   async #write(bytes: number[]): Promise<{ ok: boolean }> {
     const dev = await this.#conn();
     const fn = bytes[5];
-    const frames = await dev.request(bytes, { timeoutMs: 120, quietMs: 60, match: (fs) => fs.some((f) => f[5] === 0x64) });
+    const frames = await dev.request(bytes, { timeoutMs: 250, quietMs: 250, match: (fs) => fs.some((f) => f[5] === 0x64) });
     const rejected = frames.some((f) => f[5] === 0x64 && (f[6] === undefined || f[6] === fn));
     return { ok: !rejected };
   }
@@ -1447,7 +1466,7 @@ class Gen3Driver implements DeviceDriver {
   }
   // W1.1: bypass and channel are write ops named in docs/write-protocol.md's op table, so they use
   // #write to watch a short window for a 0x64 rejection of the function they sent (the accept/reject
-  // model). Trade-off: this adds up to the #write window (120 ms) to an "instant" toggle. Other
+  // model). Trade-off: this adds up to the #write window (250 ms) to an "instant" toggle. Other
   // fire-and-forget paths (a continuous knob stream, tapTempo, selectCell) keep #send — the contract
   // does not demand a watch there.
   async setBypass(eid: number, bypassed: boolean) {
