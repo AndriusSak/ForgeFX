@@ -76,3 +76,18 @@ AM4-only paths remain as a fallback but should be untouched by this build).
 - [ ] Remote control (Axis Cloud): live param edits + scene/preset changes relay;
       saving to a slot is (correctly) refused remotely.
 - [ ] Two windows on one host stay in sync (SSE) for scene/tempo/grid changes.
+
+## Open hardware questions — one-command probe
+
+The five FM3 questions that prose scattered across the review docs (cached read-back of a
+GLOBAL write, a Cab 2 Mute/Solo write, whether a 16-bit-scaled enum wire value like
+`PHASER_ORDER` ever arrives, whether a complete bulk read ever pads past the `0x74` itemCount,
+and the real wire latency of a `0x64` rejection) are now a single command:
+`npx tsx scripts/probe-device.ts` — **read-only by default**; add `--writes` for the three
+mutating probes, which capture the original value, verify the write, then restore it and verify
+the restore (a failed restore prints a `FAILED-RESTORE` block). `--mock` runs the whole runbook
+against a built-in scripted FM3 with no hardware, which is also what
+`test/drivers/device-probe-runbook.test.ts` drives. Exit 0 = every *eligible* probe gave a
+definite verdict; non-zero = a probe could not be attempted (no device → 3) or was
+inconclusive → 2 (a silent pass is impossible). The script itself is the runbook; this is only a
+pointer.
