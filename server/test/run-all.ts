@@ -40,6 +40,7 @@ import { runPresetConvertTests, PRESET_CONVERT_CASE_COUNT } from './api/preset-c
 import { runPresetConvertExportTests, PRESET_CONVERT_EXPORT_CASE_COUNT } from './api/preset-convert-export.test.js';
 import { runWriteSafetyTests, WRITE_SAFETY_CASE_COUNT } from './api/write-safety.test.js';
 import { runParamDefaultTests, PARAM_DEFAULT_CASE_COUNT } from './api/param-default.test.js';
+import { runLayoutParamCoverageTests, LAYOUT_PARAM_COVERAGE_CASE_COUNT } from './drivers/layout-param-coverage.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -77,7 +78,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `api/preset-convert (${PRESET_CONVERT_CASE_COUNT} cases, cross-device convert offline/connected/501/caps, mocked)`, run: runPresetConvertTests },
   { name: `api/preset-convert-export (${PRESET_CONVERT_EXPORT_CASE_COUNT} cases, FM3→FM3 author round-trip + guards, mocked)`, run: runPresetConvertExportTests },
   { name: `api/write-safety (${WRITE_SAFETY_CASE_COUNT} cases, ?dryRun=true + --writes false, mocked FM3)`, run: runWriteSafetyTests },
-  { name: `api/param-default (${PARAM_DEFAULT_CASE_COUNT} cases, omitted continuous → discrete frame, mocked FM3)`, run: runParamDefaultTests }
+  { name: `api/param-default (${PARAM_DEFAULT_CASE_COUNT} cases, omitted continuous → discrete frame, mocked FM3)`, run: runParamDefaultTests },
+  { name: `drivers/layout-param-coverage (${LAYOUT_PARAM_COVERAGE_CASE_COUNT} guards, every FM3 layout knob/dropdown served in its owning family)`, run: runLayoutParamCoverageTests }
 ];
 
 let failures = 0;

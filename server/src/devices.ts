@@ -208,6 +208,34 @@ const layoutFrom = (layouts: DeviceEditorLayouts) =>
     };
   };
 
+// The device's OWN editor layouts are the authority on how a param is PRESENTED: a control drawn as
+// 'knob' is continuous, one drawn as 'dropdown' is a discrete selector. Index those widget bindings
+// so the serve filters can honour the device's own evidence even when the catalog disagrees — an
+// 'unverified'-unit float the device draws as a knob (FM3 GLOBAL Brightness/Contrast 7115/7116), or a
+// selector the cache mined as a float row (FM3 GLOBAL FC default-layout ids 3602-3604). Built once
+// per profile, keyed by the param's OWN family — a cross-block control (`crossBlock.family`, e.g. the
+// GLOBAL params the FC page renders) files under that serving family; otherwise the layout's family.
+// Pseudo-params (id ≥ 0xff00) are excluded — they are never served as real params.
+const layoutWidgetByFamily = (layouts: DeviceEditorLayouts, widget: string): ReadonlyMap<string, ReadonlySet<number>> => {
+  const byFam = new Map<string, Set<number>>();
+  for (const block of Object.values(layouts as unknown as Record<string, EditorBlockLayout>)) {
+    for (const variant of block.variants ?? []) {
+      for (const page of variant.pages ?? []) {
+        for (const row of page.rows ?? []) {
+          for (const c of row.controls ?? []) {
+            if (c.widget !== widget || c.paramId == null || c.paramId >= 0xff00) continue;
+            const fam = c.crossBlock?.family ?? block.family;
+            if (!fam) continue;
+            if (!byFam.has(fam)) byFam.set(fam, new Set());
+            byFam.get(fam)!.add(c.paramId);
+          }
+        }
+      }
+    }
+  }
+  return byFam;
+};
+
 // A param the block actually SERVES on the wire: its id, the served display name the client keys on
 // (`named`/`enums` `.name`, i.e. the family-prefix-stripped label), and the raw editor param symbol
 // (the codec's `<FAMILY>_<SYM>`, written back into the layout when a pseudo control is rewritten).
@@ -444,6 +472,11 @@ export interface DeviceProfile {
   staticRanges?: Ranges;
   /** Device-true fn=0x1F channel-block wire stride by family. Do not derive this from max(paramId); tables include special high ids. */
   rangeSections: RangeSections;
+  /** Per-family paramIds the device's OWN editor layouts draw as a continuous 'knob' (any variant), so
+   *  the serve filters honour a knob the catalog tags with a non-display unit. See layoutWidgetByFamily. */
+  layoutKnobIds?: ReadonlyMap<string, ReadonlySet<number>>;
+  /** Per-family paramIds the device's OWN editor layouts draw as a discrete 'dropdown' selector. */
+  layoutDropdownIds?: ReadonlyMap<string, ReadonlySet<number>>;
   rosterFor(slug: string): TypeModel[];
   enumLabelsFor(family: string, paramId: number): string[] | undefined;
   /** Cab IR names per bank (Factory 1/2, Legacy, Scratchpad) — for the cab IR picker. {} if the device has none. */
@@ -593,6 +626,8 @@ export const PROFILES: Record<number, DeviceProfile> = {
     cabIrs: () => AXE3_CAB_IRS as unknown as Record<string, string[]>, // factory banks bundled (III editor cache, fw 32.6 era); USER banks read live
     familyForEffectId: eidFamily(), // III ships no effectId table → shared gen-3 virtual eids only
     layoutFor: layoutFrom(AXE3_LAYOUTS as unknown as DeviceEditorLayouts),
+    layoutKnobIds: layoutWidgetByFamily(AXE3_LAYOUTS as unknown as DeviceEditorLayouts, 'knob'),
+    layoutDropdownIds: layoutWidgetByFamily(AXE3_LAYOUTS as unknown as DeviceEditorLayouts, 'dropdown'),
     fcModel: AXE3_FC_MODEL,
     modModel: AXE3_MOD_MODEL,
     monitorParams: AXE3_MONITOR_PARAMS
@@ -610,6 +645,8 @@ export const PROFILES: Record<number, DeviceProfile> = {
     cabIrs: () => fm3CabIrs, // device-true IR names per bank (fractal-midi FM3_CAB_IRS)
     familyForEffectId: eidFamily(FM3_FAMILY_BY_EFFECT_ID as Record<number, string>),
     layoutFor: layoutFrom(FM3_LAYOUTS as unknown as DeviceEditorLayouts),
+    layoutKnobIds: layoutWidgetByFamily(FM3_LAYOUTS as unknown as DeviceEditorLayouts, 'knob'),
+    layoutDropdownIds: layoutWidgetByFamily(FM3_LAYOUTS as unknown as DeviceEditorLayouts, 'dropdown'),
     fcModel: FM3_FC_MODEL,
     modModel: FM3_MOD_MODEL,
     monitorParams: FM3_MONITOR_PARAMS,
@@ -627,6 +664,8 @@ export const PROFILES: Record<number, DeviceProfile> = {
     cabIrs: () => FM9_CAB_IRS as unknown as Record<string, string[]>, // factory banks bundled (FM9-Edit cache 76p0); USER banks read live
     familyForEffectId: eidFamily(FM9_FAMILY_BY_EFFECT_ID as Record<number, string>),
     layoutFor: layoutFrom(FM9_LAYOUTS as unknown as DeviceEditorLayouts),
+    layoutKnobIds: layoutWidgetByFamily(FM9_LAYOUTS as unknown as DeviceEditorLayouts, 'knob'),
+    layoutDropdownIds: layoutWidgetByFamily(FM9_LAYOUTS as unknown as DeviceEditorLayouts, 'dropdown'),
     fcModel: FM9_FC_MODEL,
     modModel: FM9_MOD_MODEL,
     monitorParams: FM9_MONITOR_PARAMS

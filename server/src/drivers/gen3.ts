@@ -157,6 +157,8 @@ const UNIT_LABEL: Record<string, string> = {
 const KNOB_UNITS = new Set([
   'numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees', 'pf'
 ]);
+// Shared empty set for the optional layout-widget evidence maps (see DeviceProfile.layoutKnobIds).
+const EMPTY_ID_SET: ReadonlySet<number> = new Set();
 // Ceiling for an enum dropdown's option list — a guard against a bogus catalog row only. Real gen-3
 // lists top out at 336 ordinals (Axe-Fx III amp type); the list is otherwise bounded by the param's
 // device-true ordinal count, and a hard 128-cap used to silently truncate every longer list.
@@ -622,6 +624,11 @@ class Gen3Driver implements DeviceDriver {
       return { block: blockName, slug, page, named: [], enums: [], type: null, layout }; // no device-true param family mapped
     }
     const defs = this.#prof.params[family] ?? [];
+    // The device's OWN layout widget evidence for this family (see DeviceProfile.layoutKnobIds): a
+    // param the FM3 draws as 'knob' is continuous, one it draws as 'dropdown' is a selector — even when
+    // the catalog row disagrees (an 'unverified'-unit float, or a selector mined as a float row).
+    const layoutKnob = this.#prof.layoutKnobIds?.get(family) ?? EMPTY_ID_SET;
+    const layoutDropdown = this.#prof.layoutDropdownIds?.get(family) ?? EMPTY_ID_SET;
     // Which range row actually SERVES a param. A device-cache row wins only when it can be served on
     // its own terms: an enum row always can, a float row only with a real display unit (KNOB_UNITS)
     // and a non-zero width. A cache row that fails that test would silently DELETE the param — both
@@ -644,7 +651,9 @@ class Gen3Driver implements DeviceDriver {
     const knobs = defs.filter((p) => {
       const range = rangeFor(p);
       if (range?.kind !== 'float') return false;
-      if (!KNOB_UNITS.has(p.unit ?? '')) return false;
+      // A device layout 'knob' is continuous evidence: honour it even when the catalog unit is a
+      // non-display marker (the FM3 GLOBAL Brightness/Contrast 7115/7116 carry unit 'unverified').
+      if (!KNOB_UNITS.has(p.unit ?? '') && !layoutKnob.has(p.paramId)) return false;
       if (/bypass/i.test(p.displayLabel ?? p.name)) return false;
       if (range.displayMin === range.displayMax) return false; // unusable (0..0) knob
       if (seenIds.has(p.paramId)) return false; // dedupe same wire paramId (first wins)
@@ -656,7 +665,10 @@ class Gen3Driver implements DeviceDriver {
     const typeId = this.#paramId(family, 'type');
     const enumDefs = defs.filter((p) => {
       const range = rangeFor(p);
-      if (range?.kind !== 'enum' || p.paramId === typeId) return false;
+      if (!range || p.paramId === typeId) return false;
+      // A device layout 'dropdown' is selector evidence: honour it even when the catalog row is not an
+      // enum (the FM3 GLOBAL FC default-layout ids 3602-3604 carry a mined float 1..9 row).
+      if (range.kind !== 'enum' && !layoutDropdown.has(p.paramId)) return false;
       if (range.displayMax <= range.displayMin) return false;
       if (/^bypass$/i.test(p.displayLabel ?? p.name)) return false;
       return true;
