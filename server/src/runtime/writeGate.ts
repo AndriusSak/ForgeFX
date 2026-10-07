@@ -48,15 +48,7 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['POST', '/version/:id/load'],
   ['POST', '/version/:id/restore'],
   // device-cache build (mode:'full' writes a taper sweep to the unit — gate the whole op in read-only)
-  ['POST', '/device/cache/build'],
-  // deprecated /am4/* aliases (app surface only; the router has none → they 404 there)
-  ['PUT', '/am4/blocks/:pidLow/params/:pidHigh'],
-  ['PUT', '/am4/param'],
-  ['POST', '/am4/bypass'],
-  ['POST', '/am4/scene'],
-  ['POST', '/am4/preset'],
-  ['POST', '/am4/preset/store'],
-  ['POST', '/am4/preset/restore']
+  ['POST', '/device/cache/build']
 ];
 
 /** True when a request targets a DEVICE-write endpoint (mutates the unit). Used by the read-only gate. */

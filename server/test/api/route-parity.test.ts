@@ -8,8 +8,8 @@
 // exception list below, so a route can never again land in one table only.
 //
 // Enumeration is AUTHORITATIVE, not source-scraped: the app table comes from Fastify's own `onRoute`
-// hook (buildApp's test-only `onRoute` seam, so registerHelpRoutes/registerLocalRoutes/am4 aliases are
-// all included) and the router table from createRouter().listRoutes(). Nothing here runs a device.
+// hook (buildApp's test-only `onRoute` seam, so registerHelpRoutes/registerLocalRoutes are all
+// included) and the router table from createRouter().listRoutes(). Nothing here runs a device.
 //
 // It also covers P3: a route param that makes the codec's encode14 throw (a preset number outside
 // 0..16383, a non-integer :paramId) must answer 400 on BOTH surfaces, not an unhandled 500.
@@ -77,18 +77,13 @@ function makeFakeFm3(): FakeFm3 {
   } as DeviceDriver as FakeFm3;
 }
 
-// ── the documented, justified app-only differences (the claim is verified in the code, not assumed) ──
-//  • /am4/* — the deprecated Phase-6 ALIASES. app.ts registers them with Deprecation/Sunset headers +
-//    a /diag hit counter (see the `deprecated()` shim + the alias block in app.ts); router.ts's header
-//    states plainly "no deprecated /am4/* aliases (v2 clients don't call them) → they 404 naturally".
+// ── the documented, justified app-only difference (the claim is verified in the code, not assumed) ──
 //  • GET /events — the SSE stream. app.ts hijacks the socket (reply.hijack + text/event-stream); the
 //    browser runtime replaces it with createRouter().subscribe() (router.ts header), so there is no
-//    SSE route to register there.
+//    SSE route to register there. This is now the ONLY app-only route (the /am4/* alias surface was
+//    removed, which the stricter assertion in §2 below pins down exactly).
 function exceptionReason(key: string): string | null {
   const [method, path] = key.split(' ');
-  if (path?.startsWith('/am4/')) {
-    return 'deprecated /am4/* alias — Node host only; the browser runtime has no aliases (v2 clients never call them)';
-  }
   if (method === 'GET' && path === '/events') {
     return 'SSE — Node host only; the browser runtime consumes DeviceEvents via subscribe() instead';
   }
@@ -207,10 +202,12 @@ export async function runRouteParityTests(): Promise<void> {
         `  router-only (unexplained): ${routerOnly.join(', ') || '(none)'}`
     );
 
-    // ── 2. every exception must actually correspond to a real app-only route (no stale excuses) ──
-    const am4Aliases = appOnly.filter((k) => k.split(' ')[1]?.startsWith('/am4/'));
-    assert(am4Aliases.length >= 15, `the /am4/* deprecated aliases must exist app-only (found ${am4Aliases.length})`);
-    assert(appOnly.includes('GET /events'), 'GET /events must be an app-only difference');
+    // ── 2. every exception must actually correspond to a real app-only route (no stale excuses).
+    //    After the /am4/* alias removal the ONLY app-only difference is the SSE route — assert that
+    //    EXACTLY (an equality, not a count), so a revived or newly-drifting one-table route fails
+    //    here, not merely a non-zero tally. ──
+    assertEqual(appOnly.join(','), 'GET /events', `the only app-only route must be GET /events (found: ${appOnly.join(', ') || '(none)'})`);
+    assert(!appOnly.some((k) => k.split(' ')[1]?.startsWith('/am4/')), 'no /am4/* alias may remain app-only — the alias surface is removed');
     for (const k of appOnly) assert(exceptionReason(k) != null, `${k} is app-only but has no documented exception`);
     assertEqual(routerOnly.length, 0, `the router must not register routes the app lacks: ${routerOnly.join(', ')}`);
 

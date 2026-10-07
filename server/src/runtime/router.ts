@@ -8,7 +8,7 @@
 // Differences by design:
 //   • no /events SSE — `subscribe()` replaces it (a browser runtime consumes DeviceEvents directly);
 //     PUT /store/config/:id still fans the config event out via the shared putStoreDoc().
-//   • no deprecated /am4/* aliases (v2 clients don't call them) → they 404 naturally.
+//   • no /am4/* aliases (removed; the deprecated alias surface is gone) → they 404 naturally.
 //   • services absent from deps answer their server "disabled" shapes: no `local` → the
 //     unconfigured-root responses; no `cloud` → the AXIS_CLOUD=off /cloud/status + /remote/status
 //     stubs (the other /cloud/* routes don't exist then — 404, exactly like app.ts); no `telemetry`
@@ -123,8 +123,8 @@ export function createRouter(deps: RuntimeDeps): {
     const hz = await registry.health();
     return { ok: hz.ok, api: { version: 2 }, device: hz.device };
   });
-  // full connection diagnostic; the router has no deprecated aliases, so the hit counters stay empty
-  on('GET', '/diag', async () => ({ ...(await registry.diagnostics()), deprecatedAliasHits: {} }));
+  // full connection diagnostic
+  on('GET', '/diag', async () => registry.diagnostics());
   // Diagnostic (READ-ONLY): which RANGE row serves a family's param — the Axis Range Trace panel's
   // source. Mirrors app.ts (merged `ranges` vs the catalogue `staticRanges`), so a param dropped from
   // /preset/blocks/:eid/params can be traced to the row that dropped it in browser-direct mode too.

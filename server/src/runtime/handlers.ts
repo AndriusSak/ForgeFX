@@ -1,5 +1,5 @@
 // Unified route handlers — the NON-TRIVIAL handler bodies shared verbatim by the Fastify app
-// (app.ts, including its deprecated /am4/* aliases) and the browser-facing runtime router
+// (app.ts) and the browser-facing runtime router
 // (runtime/router.ts). Each handler resolves the ACTIVE per-device driver from the registry and
 // capability-gates optional driver methods: a device that can't do something answers
 // `501 {error:'unsupported', capability}` instead of firing another model's frames at it. Handlers

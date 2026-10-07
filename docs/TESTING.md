@@ -9,9 +9,9 @@ work — anything that doesn't is a bug in the migration, please report it.
 ## How to report
 
 - Note the device, firmware version, and the exact step that failed.
-- `GET http://localhost:5056/diag` returns a connection diagnostic **plus the
-  deprecated-alias hit counter** — include it in reports. A non-zero `/am4/*` alias
-  count with this UI build is itself a bug (the UI should only use unified routes).
+- `GET http://localhost:5056/diag` returns the connection diagnostic — include it in reports.
+  (The deprecated `/am4/*` aliases and their hit counter have been removed; every client
+  must use the unified routes.)
 - The in-app debug report (telemetry upload) bundles the server log + diag.
 
 ## Every device — connection & identity
@@ -57,8 +57,8 @@ work — anything that doesn't is a bug in the migration, please report it.
 
 ## AM4
 
-Everything now runs through the same unified routes as the other devices (the old
-AM4-only paths remain as a fallback but should be untouched by this build).
+Everything runs through the same unified routes as the other devices (the deprecated
+AM4-only alias paths have been removed).
 
 - [ ] 4-slot chain renders; block tiles show correct names/types.
 - [ ] Knob drag writes params (continuous + stepped); bypass toggles.

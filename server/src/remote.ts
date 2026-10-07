@@ -30,8 +30,7 @@ export function remoteAllowed(method: string, path: string): boolean {
     return (
       /^\/preset\/blocks\/\d+\/params(\/\d+)?$/.test(p) ||
       /^\/preset\/grid\/cell$/.test(p) ||
-      /^\/am4\/param$/.test(p) ||
-      /^\/device\/param$/.test(p) || // unified twin of /am4/param (live device/global param edit)
+      /^\/device\/param$/.test(p) || // live device/global param edit
       p === '/telemetry/config' || // cadence-mode control — a benign perf/UX setting (no device data moves)
       /^\/store\/config\/[^/]+$/.test(p) // shared UI config (layouts/swipe/surface/tags…) — lets remote edits sync back to the host. Config only, never presets/backups.
     );
@@ -46,8 +45,7 @@ export function remoteAllowed(method: string, path: string): boolean {
       p === '/tempo' ||
       p === '/tempo/tap' ||
       p === '/tuner' ||
-      p === '/mod/bind' ||
-      /^\/am4\/(bypass|scene|preset)$/.test(p)
+      p === '/mod/bind'
     );
   return false;
 }

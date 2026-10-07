@@ -264,7 +264,7 @@ export class DeviceRegistry {
   }
 
   /** The AM4 driver instance — used by the /preset/decode model-byte dispatch (offline decode of an
-   *  AM4 .syx works whatever unit is attached) and pre-fold by the /am4/* singleton routes. */
+   *  AM4 .syx works whatever unit is attached). */
   am4(): Am4Driver {
     return this.#driverFor(0x15) as Am4Driver;
   }

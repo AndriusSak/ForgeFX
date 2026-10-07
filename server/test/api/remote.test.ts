@@ -1,7 +1,6 @@
-// Phase-6 remote-relay whitelist — the gatekeeper for Axis Cloud Remote. Writable paths must stay
-// a tight allowlist: live edits yes; anything that persists to a slot, moves dump/firmware bytes,
-// touches auth/hardware selection, or uploads stays local-only. Covers the unified twins added in
-// Phase 6 alongside the deprecated /am4 aliases (both allowed during the transition window).
+// The whitelist gatekeeper for Axis Cloud Remote. Writable paths stay a tight allowlist: live edits
+// yes; anything that persists to a slot, moves dump/firmware bytes, touches auth/hardware selection,
+// or uploads stays local-only. (The deprecated /am4/* aliases were removed — only unified routes.)
 import { remoteAllowed } from '../../src/remote.js';
 
 const ALLOWED: [string, string][] = [
@@ -29,11 +28,6 @@ const ALLOWED: [string, string][] = [
   ['PUT', '/device/param'],
   ['GET', '/telemetry/config'],  // read relays broadly
   ['PUT', '/telemetry/config'],  // benign cadence-mode control (no device data moves)
-  // deprecated aliases stay relayable during the window
-  ['PUT', '/am4/param'],
-  ['POST', '/am4/bypass'],
-  ['POST', '/am4/scene'],
-  ['POST', '/am4/preset'],
   // shared UI config (any id incl. library) — pre-migration behavior, preserved
   ['PUT', '/store/config/library'],
   ['PUT', '/store/config/layouts'],
