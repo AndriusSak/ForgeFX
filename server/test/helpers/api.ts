@@ -18,7 +18,7 @@ export interface TestApp {
 /** Build app + isolated registry with the given model detected (via mocked handshake). An optional
  *  fake driver is seeded into the registry's driver cache BEFORE detection activates it. `opts` is
  *  forwarded to buildApp (e.g. `{ writes: false }` for the read-only-server suites). */
-export async function buildTestApp(modelId: number, fakeDriver?: DeviceDriver, opts?: { writes?: boolean }): Promise<TestApp> {
+export async function buildTestApp(modelId: number, fakeDriver?: DeviceDriver, opts?: Parameters<typeof buildApp>[1]): Promise<TestApp> {
   const mock = new MockTransport('serial', `mock-0x${modelId.toString(16)}`);
   mock.reply = (req) => (isIdentifyBroadcast(req) ? [handshakeReply(modelId)] : []);
   const registry = __createRegistryForTest({

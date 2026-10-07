@@ -59,6 +59,12 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   // Unified param write: {value, continuous}. continuous:true → the driver's normalized write
   // (gen-3 continuous SET; AM4 SET_NORM with value as 0..1), continuous:false → discrete ordinal.
   const setParamH = async (reply: StatusSink, addr: number, paramId: number, value: number, continuous: boolean) => {
+    // 400 (not an unhandled 500) on a non-integer/out-of-range address or param id — the codec's
+    // encode14 throws on these, so a bad route param must be mapped to Bad Request at the seam.
+    if (!Number.isInteger(addr) || addr < 0 || addr > 0x3fff || !Number.isInteger(paramId) || paramId < 0 || paramId > 0x3fff) {
+      reply.code(400);
+      return { error: 'eid and paramId must be integers in 0..16383' };
+    }
     const d = await driver();
     if (!d.setParam) return unsupported(reply, 'setParam');
     return d.setParam(addr, paramId, value, continuous);
@@ -74,6 +80,12 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     return d.setScene(index);
   };
   const presetSelectH = async (reply: StatusSink, number: number) => {
+    // 400 (not an unhandled 500) on a missing/non-integer slot — the codec's encode14 guard throws on
+    // anything outside 0..16383 (e.g. 20000), so validate at the seam before reaching the driver.
+    if (!Number.isInteger(number) || number < 0 || number > 0x3fff) {
+      reply.code(400);
+      return { error: 'number required (integer 0..16383)' };
+    }
     const d = await driver();
     if (!d.selectPreset) return unsupported(reply, 'selectPreset');
     const r = await d.selectPreset(number);
