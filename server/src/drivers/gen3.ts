@@ -674,6 +674,12 @@ class Gen3Driver implements DeviceDriver {
         this.#watchedChannel = activeCh; // keep the device-edit-burst diff on the same channel (see decodeEditBurst)
         const frames = await dev.request(this.#codec.buildBlockBulkReadPoll(eid), { timeoutMs: dev.slow ? 8000 : 2500, quietMs: dev.slow ? 600 : 120, match: (fs) => fs.some((f) => f[5] === 0x76) });
         const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
+        // A torn multi-frame read (a dropped 0x75 page) leaves fewer values than the 0x74 head
+        // advertised. detect it HERE so the failure path below (not the `?? 0` reads) handles it:
+        // otherwise the missing tail params are silently served as 0 and the block looks complete.
+        if (bulk.values.length < bulk.itemCount) {
+          throw new Error(`torn block bulk read for eid ${eid}: got ${bulk.values.length} of ${bulk.itemCount} values`);
+        }
         const { stride, base } = this.#channelSlice(family, bulk, activeCh);
         // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
         // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).
@@ -703,9 +709,19 @@ class Gen3Driver implements DeviceDriver {
           const tv = raw > max ? Math.round((raw / 65534) * max) : raw;
           type = { value: tv, name: roster[tv]?.name ?? '' };
         }
-      } catch {
-        named.length = 0; // a mid-loop throw left partial data — reset before the zeroed fallback
-        for (const p of knobs) named.push({ id: p.paramId, name: paramLabel(p), value: 0, norm: 0 });
+      } catch (e) {
+        // Any mid-decode throw (malformed 0x75, a torn/short burst, a transport timeout) means the
+        // block's state is UNKNOWN. The old code reset only `named` and fell through to a zero-filled
+        // fallback, so the failure was swallowed: the handler saw a normal return and answered 200
+        // with a valid-looking snapshot (knobs 0, no enums/type) for a read that never completed.
+        // Reset EVERY decoded output (named, enums, type — the layout-selector map is derived from
+        // these below) so no partial real/zero snapshot can leak, then RETHROW: blockParamsH already
+        // maps a thrown error to 404 + {error} (the repo's existing failure shape), so the torn read is
+        // surfaced to the client instead of silently served as a complete block.
+        named.length = 0;
+        enums.length = 0;
+        type = null;
+        throw e;
       }
     }
     // Current value of any page/control selector param, keyed by its editor symbol: the family type

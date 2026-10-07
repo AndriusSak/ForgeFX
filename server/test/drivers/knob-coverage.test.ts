@@ -32,21 +32,23 @@ export const KNOB_COVERAGE_CASE_COUNT = 4;
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
 
-function sysex(fn: number, payload: readonly number[]): number[] {
-  const body = [0xf0, 0x00, 0x01, 0x74, MODEL, fn, ...payload];
+function sysex(model: number, fn: number, payload: readonly number[]): number[] {
+  const body = [0xf0, 0x00, 0x01, 0x74, model, fn, ...payload];
   let cs = 0;
   for (const b of body) cs ^= b;
   return [...body, cs & 0x7f, 0xf7];
 }
 
-/** fn=0x74/0x75/0x76 block-bulk-read reply carrying `values` (same shape as definition-completeness). */
-function blockBulkFrames(effectId: number, values: readonly number[]): number[][] {
+/** fn=0x74/0x75/0x76 block-bulk-read reply carrying `values` (same shape as definition-completeness).
+ *  `model` MUST match the driver's own byte: the invariant below runs the loop over the FM3/FM9/III
+ *  profiles, and a reply carrying another model's byte is (correctly) rejected by the codec. */
+function blockBulkFrames(model: number, effectId: number, values: readonly number[]): number[][] {
   const body: number[] = [0x00, 0x02];
   for (const v of values) body.push(...packValue16(v));
   return [
-    sysex(0x74, [...enc14(effectId), ...enc14(values.length), 0x07]),
-    sysex(0x75, body),
-    sysex(0x76, [])
+    sysex(model, 0x74, [...enc14(effectId), ...enc14(values.length), 0x07]),
+    sysex(model, 0x75, body),
+    sysex(model, 0x76, [])
   ];
 }
 
@@ -55,7 +57,7 @@ async function servedKnobs(profile: DeviceProfile, eid: number): Promise<Map<num
   const codec = createModernFractalCodec(profile.model);
   const stride = profile.rangeSections[SLUG_FAMILY[familyForEid(eid)] ?? '']?.stride ?? 1;
   const values = new Array(Math.max(stride, 1) * 4).fill(0);
-  const bulk = blockBulkFrames(eid, values);
+  const bulk = blockBulkFrames(profile.model, eid, values);
   const mock = new MockTransport('serial', `mock-knob-${eid}`);
   mock.isOpen = true;
   mock.reply = (req) => (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(eid)) ? bulk : []);
