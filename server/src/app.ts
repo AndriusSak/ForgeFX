@@ -38,8 +38,25 @@ import { registerHelpRoutes } from './help.js';
 import { telemetryStatus, uploadDebugReport, type DebugReport } from './telemetry.js';
 import { isDeviceWrite, isDryRunRequest, frameHex, READ_ONLY_BODY } from './runtime/writeGate.js';
 
-export async function buildApp(registry: DeviceRegistry, opts?: { writes?: boolean }): Promise<FastifyInstance> {
+export async function buildApp(
+  registry: DeviceRegistry,
+  opts?: {
+    writes?: boolean;
+    /** TEST-ONLY seam: invoked once per registered route with its (method, path). Lets the
+     *  route-parity drift guard (test/api/route-parity.test.ts) enumerate THIS table authoritatively
+     *  (registerHelpRoutes/localStore/am4 aliases included) instead of re-parsing the source. */
+    onRoute?: (method: string, path: string) => void;
+  },
+): Promise<FastifyInstance> {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
+  // Hook FIRST so it observes every route registered below (help/local/am4 aliases/SSE included).
+  if (opts?.onRoute) {
+    const collect = opts.onRoute;
+    app.addHook('onRoute', (routeOptions) => {
+      const methods = Array.isArray(routeOptions.method) ? routeOptions.method : [routeOptions.method];
+      for (const m of methods) collect(m, routeOptions.url);
+    });
+  }
   await app.register(cors, { origin: true });
   // tolerate an empty JSON body (no-body POSTs like /cloud/sync, /cloud/logout, /tempo/tap send
   // content-type: application/json with no payload → Fastify would 400 by default).

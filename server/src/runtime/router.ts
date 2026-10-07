@@ -17,6 +17,8 @@
 import type { DeviceRegistry } from '../drivers/registryCore.js';
 import type { DeviceEvent } from '../drivers/types.js';
 import * as backups from '../services/backups.js';
+import * as convert from '../services/convert.js';
+import type { ConverterPreset } from 'forgefx-midi/convert';
 import * as deviceCache from '../services/deviceCache.js';
 import * as editorCacheImport from '../services/editorCacheImport.js';
 import * as cloudProfiles from '../services/cloudProfiles.js';
@@ -81,7 +83,7 @@ interface Ctx {
 }
 
 type Handler = (ctx: Ctx) => unknown | Promise<unknown>;
-interface Route { method: string; segs: string[]; octet: boolean; handler: Handler }
+interface Route { method: string; path: string; segs: string[]; octet: boolean; handler: Handler }
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const OCTET_TYPE = 'application/octet-stream';
@@ -89,6 +91,9 @@ const OCTET_TYPE = 'application/octet-stream';
 export function createRouter(deps: RuntimeDeps): {
   handle(method: string, path: string, body?: string | Uint8Array): Promise<RouterResponse>;
   subscribe(fn: (e: DeviceEvent) => void): () => void;
+  /** The registered (method, path) table — for the route-parity drift guard
+   *  (test/api/route-parity.test.ts) so it can diff this table against app.ts without re-parsing. */
+  listRoutes(): Array<{ method: string; path: string }>;
 } {
   const { registry, store } = deps;
   const h = createUnifiedHandlers(registry);
@@ -110,7 +115,7 @@ export function createRouter(deps: RuntimeDeps): {
 
   const routes: Route[] = [];
   const on = (method: string, path: string, handler: Handler, opts?: { octet?: boolean }) =>
-    routes.push({ method, segs: path.split('/').filter(Boolean), octet: !!opts?.octet, handler });
+    routes.push({ method, path, segs: path.split('/').filter(Boolean), octet: !!opts?.octet, handler });
 
   // ── system ──
   // /healthz carries the unified-API version handshake (mirrored as apiVersion on /device).
@@ -120,6 +125,40 @@ export function createRouter(deps: RuntimeDeps): {
   });
   // full connection diagnostic; the router has no deprecated aliases, so the hit counters stay empty
   on('GET', '/diag', async () => ({ ...(await registry.diagnostics()), deprecatedAliasHits: {} }));
+  // Diagnostic (READ-ONLY): which RANGE row serves a family's param — the Axis Range Trace panel's
+  // source. Mirrors app.ts (merged `ranges` vs the catalogue `staticRanges`), so a param dropped from
+  // /preset/blocks/:eid/params can be traced to the row that dropped it in browser-direct mode too.
+  on('GET', '/diag/ranges', (c) => {
+    const profile = registry.profile;
+    const family = (c.query.get('family') ?? 'CABINET').toUpperCase();
+    const merged = profile.ranges[family] ?? {};
+    const catalogue = (profile.staticRanges ?? profile.ranges)[family] ?? {};
+    const defs = new Map((profile.params[family] ?? []).map((p) => [p.paramId, p]));
+    const pidQ = c.query.get('pid');
+    const pid = pidQ != null ? Number(pidQ) : null;
+    const ids = pid != null ? [pid] : Object.keys(merged).map(Number).sort((a, b) => a - b);
+    const row = (r?: { kind: string; displayMin: number; displayMax: number }) =>
+      r ? { kind: r.kind, min: r.displayMin, max: r.displayMax } : null;
+    return {
+      profile: profile.key,
+      model: `0x${profile.model.toString(16)}`,
+      family,
+      count: ids.length,
+      rows: ids.map((id) => ({
+        pid: id,
+        name: defs.get(id)?.name ?? null,
+        unit: defs.get(id)?.unit ?? null,
+        serving: row(merged[id]),
+        catalogue: row(catalogue[id])
+      }))
+    };
+  });
+  // debug probe (raw SysEx round-trip; for FC read-decode RE) — mirrors app.ts, incl. its 503 on a
+  // malformed/missing body (the handler throws → the catch maps it, identical on both surfaces).
+  on('POST', '/debug/raw', async (c) => {
+    try { const bytes = ((c.body as { hex: string }).hex.match(/../g) ?? []).map((x) => parseInt(x, 16)); return { frames: await registry.rawRequest(bytes) }; }
+    catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
+  });
   on('GET', '/device', () => registry.deviceInfo());
   on('GET', '/ports', () => registry.connections()); // serial + MIDI connections (Fractal flagged) + chosen + override
   on('POST', '/ports/select', (c) => {
@@ -159,18 +198,26 @@ export function createRouter(deps: RuntimeDeps): {
     return r.body;
   }, { octet: true });
   // ── shared device-definition profiles (THIRD cache source; services/cloudProfiles.ts). deps.cloud is
-  //    optional — absent (no cloud in this runtime) degrades to the same non-erroring disabled shape. ──
+  //    optional — the GET always serves the disabled shape without it; pull/publish are registered only
+  //    when it is present (parity with app.ts's AXIS_CLOUD gate — see below). ──
   on('GET', '/device/cache/cloud', () => cloudProfiles.cloudCacheCheck(deps.cloud ?? null, store, registry));
-  on('POST', '/device/cache/cloud/pull', async (c) => {
-    const r = await cloudProfiles.cloudCachePull(deps.cloud ?? null, store, registry);
-    c.reply.code(r.code);
-    return r.body;
-  });
-  on('POST', '/device/cache/cloud/publish', async (c) => {
-    const r = await cloudProfiles.cloudCachePublish(deps.cloud ?? null, store, registry);
-    c.reply.code(r.code);
-    return r.body;
-  });
+  // pull/publish exist ONLY when a cloud service is wired — exactly app.ts's AXIS_CLOUD=1 gate (its
+  // cloud-off else-branch registers the disabled GET above but neither POST). Registering them always
+  // made the router answer a `503 cloud disabled` shape where app.ts 404s; the route-table drift guard
+  // (test/api/route-parity.test.ts) caught it.
+  if (deps.cloud) {
+    const cloud = deps.cloud;
+    on('POST', '/device/cache/cloud/pull', async (c) => {
+      const r = await cloudProfiles.cloudCachePull(cloud, store, registry);
+      c.reply.code(r.code);
+      return r.body;
+    });
+    on('POST', '/device/cache/cloud/publish', async (c) => {
+      const r = await cloudProfiles.cloudCachePublish(cloud, store, registry);
+      c.reply.code(r.code);
+      return r.body;
+    });
+  }
   // cab IR names per bank (Factory 1/2, Legacy, Scratchpad) — refresh lets a driver merge live per-device banks.
   on('GET', '/cab/irs', async (c) => {
     if (c.query.get('refresh') === '1') {
@@ -261,6 +308,72 @@ export function createRouter(deps: RuntimeDeps): {
       return await d.loadPresetBytes(c.raw);
     } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
   }, { octet: true });
+
+  // ── cross-device preset conversion (OFFLINE decode; the Convert dialog's endpoints) ──
+  // Mirrors app.ts. `source.syx` (base64) → offline decode; omit `source` → the CONNECTED device's
+  // current preset (capability-gated 501). 400 for an unknown target or an undecodable dump.
+  on('POST', '/preset/convert', async (c) => {
+    const b = (c.body ?? {}) as { targetDevice?: string; source?: { syx?: string } };
+    const targetDevice = b.targetDevice;
+    if (!convert.isConverterDeviceId(targetDevice)) {
+      c.reply.code(400);
+      return { error: 'unknown targetDevice', targetDevice: targetDevice ?? null, supported: convert.SUPPORTED_TARGETS };
+    }
+    const syxB64 = b.source?.syx;
+    try {
+      if (typeof syxB64 === 'string' && syxB64.length > 0) {
+        return convert.convertFromSyx(base64ToBytes(syxB64), targetDevice);
+      }
+      const d = await driver();
+      if (!d.capabilities.presetConvert) return unsupported(c.reply, 'presetConvert');
+      return await convert.convertFromDriver(d, targetDevice);
+    } catch (e) {
+      const err = e as { statusCode?: number; message?: string };
+      c.reply.code(err.statusCode ?? 503);
+      return { error: err.message ?? 'conversion failed' };
+    }
+  });
+  // Author a target-device `.syx` from a converted preset by full-body synthesis (FM3 targets only,
+  // 501 otherwise). `preset` (edited IR) preferred; else `source.syx` (base64); else the connected
+  // device. Mirrors app.ts.
+  on('POST', '/preset/convert/export', async (c) => {
+    const b = (c.body ?? {}) as {
+      targetDevice?: string; preset?: ConverterPreset; source?: { syx?: string };
+      base?: { syx?: string }; name?: string; slot?: number;
+    };
+    const targetDevice = b.targetDevice;
+    if (!convert.isConverterDeviceId(targetDevice)) {
+      c.reply.code(400);
+      return { error: 'unknown targetDevice', targetDevice: targetDevice ?? null, supported: convert.SUPPORTED_TARGETS };
+    }
+    const baseB64 = b.base?.syx;
+    const base = typeof baseB64 === 'string' && baseB64.length > 0 ? base64ToBytes(baseB64) : undefined;
+    const editedPreset = b.preset;
+    const syxB64 = b.source?.syx;
+    try {
+      if (editedPreset && Array.isArray(editedPreset.blocks)) {
+        return await convert.exportConvertedSyx({ targetDevice, preset: editedPreset, base, name: b.name, slot: b.slot });
+      }
+      if (typeof syxB64 === 'string' && syxB64.length > 0) {
+        return await convert.exportConvertedSyx({ targetDevice, sourceSyx: base64ToBytes(syxB64), base, name: b.name, slot: b.slot });
+      }
+      const d = await driver();
+      if (!d.capabilities.presetConvert) return unsupported(c.reply, 'presetConvert');
+      return await convert.exportConvertedSyx({ targetDevice, driver: d, base, name: b.name, slot: b.slot });
+    } catch (e) {
+      const err = e as { statusCode?: number; message?: string };
+      c.reply.code(err.statusCode ?? 503);
+      return { error: err.message ?? 'export failed' };
+    }
+  });
+  // decompressed preset body (hex) — for per-block param-decode RE (offset diffs). Mirrors app.ts.
+  on('GET', '/preset/body', async (c) => {
+    try {
+      const d = await driver();
+      if (!d.presetBodyHex) return unsupported(c.reply, 'presetDump');
+      return await d.presetBodyHex();
+    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
+  });
 
   // ── catalog ──
   on('GET', '/blocks', async (c) => {
@@ -629,13 +742,26 @@ export function createRouter(deps: RuntimeDeps): {
     return respond(404, { message: `Route ${m}:${pathname} not found`, error: 'Not Found', statusCode: 404 });
   };
 
-  return { handle, subscribe: (fn) => registry.subscribe(fn) };
+  return {
+    handle,
+    subscribe: (fn) => registry.subscribe(fn),
+    listRoutes: () => routes.map((r) => ({ method: r.method, path: r.path }))
+  };
 }
 
 /** Local-folder responses map onto the reply exactly like localStore.ts's `send` (bytes stay bytes). */
 function send(c: Ctx, r: { status: number; body: unknown }): unknown {
   c.reply.code(r.status);
   return r.body;
+}
+
+/** Base64 → bytes WITHOUT Buffer (a Node global, absent in the browser this file must bundle for).
+ *  `atob` is a global in browsers AND in Node ≥16, so the same code runs on both surfaces. */
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 /** Stub adapter behind the no-`local`-deps case: nothing exists, nothing is writable — every gated
