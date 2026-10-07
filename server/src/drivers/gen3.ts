@@ -254,6 +254,29 @@ class Gen3Driver implements DeviceDriver {
     return { stride, channelCount, base: Math.min(activeChannel, channelCount - 1) * stride };
   }
 
+  /** Why the fn=0x1F bulk body CANNOT resolve a family's param VALUES, or null when it can.
+   *
+   *  The bulk read is POSITIONAL: `assembleGen3BlockBulkRead` reconstructs `values[i]` as the param
+   *  whose device-true paramId is i, and blockParams indexes `values[base + pid]`. That identity only
+   *  holds for a DENSE family — one whose catalog pids tile `0..stride-1`, so pid == record ordinal.
+   *  A SPARSE family breaks it: the FM3 GLOBAL family declares `stride 186` yet carries 173 pids up to
+   *  65522 (91 of them >= 186) — those are device WIRE ADDRESSES, not positions. For such a family the
+   *  positional index is meaningless: `pid >= stride` runs past the block (where the old `?? 0` served
+   *  a fabricated 0 — the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident), and `pid < stride`
+   *  lands on whatever record shares that ordinal (silently WRONG, not zero). The catalog ships no
+   *  pid→ordinal map to fix this (ranges.generated.ts keys its GLOBAL table by paramId, not position),
+   *  so blockParams must refuse to guess. We detect the case structurally: if ANY ordinary (< 0xff00)
+   *  catalog pid reaches the declared stride, the family is not provably positional. */
+  #bulkUnresolvedReason(family: string | undefined): string | null {
+    if (!family) return null;
+    const stride = this.#prof.rangeSections[family]?.stride;
+    if (stride == null || stride <= 0) return null; // no declared fn=0x1F stride → nothing to reason about
+    const defs = this.#prof.params[family] ?? [];
+    const off = defs.find((p) => p.paramId < 0xff00 && p.paramId >= stride);
+    if (!off) return null; // every ordinary pid < stride → dense/positional (pid == ordinal) → safe
+    return `${family} param values are not addressable by the fn=0x1F positional body: catalog paramId ${off.paramId} >= the block stride ${stride}, so the bulk read cannot index it (the catalog provides no pid→record-ordinal map)`;
+  }
+
   /** Fire-and-forget write, serialized on the request chain (so it never injects mid-read). */
   async #send(bytes: number[]): Promise<{ ok: boolean }> {
     await (await this.#conn()).sendQueued(bytes);
@@ -722,19 +745,42 @@ class Gen3Driver implements DeviceDriver {
         // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
         // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).
         this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
+        // The bulk body is POSITIONAL (record i == the param whose catalog paramId is i) — an identity
+        // that holds ONLY for a DENSE family. A SPARSE family (GLOBAL: pids to 65522, 91 of them >= its
+        // stride 186) has device WIRE ADDRESSES as pids, not positions, and the catalog ships NO
+        // pid→record-ordinal map for it (ranges.generated.ts keys its GLOBAL table by paramId, not by
+        // position). Indexing `bulk.values[base + pid]` then lands past the block — where the old `?? 0`
+        // fabricated a 0 (the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident) — or, for pid <
+        // stride, on an UNRELATED record (silently wrong, not zero). So never index a family we cannot
+        // prove is positional: serve its values as UNRESOLVED (null + reason), never a guessed number.
+        // Same spirit as the torn-read throw above — an unread value must stay visibly unread.
+        const familyUnresolved = this.#bulkUnresolvedReason(family);
+        const readRaw = (pid: number): number | null => {
+          if (familyUnresolved !== null) return null;
+          const v = bulk.values[base + pid];
+          return typeof v === 'number' ? v : null; // a missing record is UNKNOWN, never 0
+        };
+        const unresolvedReason = (pid: number): string => familyUnresolved
+          ?? `no fn=0x1F record at index ${base + pid} in the ${family} body (${bulk.values.length} values) to supply pid ${pid}`;
         for (const p of knobs) {
-          const raw = bulk.values[base + p.paramId] ?? 0;
-          named.push({ id: p.paramId, name: paramLabel(p), ...this.#display(family, p.paramId, raw) });
+          const raw = readRaw(p.paramId);
+          named.push(raw === null
+            ? { id: p.paramId, name: paramLabel(p), value: null, norm: null, unresolved: unresolvedReason(p.paramId) }
+            : { id: p.paramId, name: paramLabel(p), ...this.#display(family, p.paramId, raw) });
         }
         for (const p of enumDefs) {
           const range = rangeFor(p)!; // the SERVING row (see rangeFor), not the raw merged one
           const max = Math.round(range.displayMax);
           const min = Math.round(range.displayMin);
-          const raw = bulk.values[base + p.paramId] ?? 0;
+          const raw = readRaw(p.paramId);
           // The OPTION LIST is bounded by ordinals, not by display values. A scaled enum carries its
           // display range (PHASER_ORDER: scale 2, displayMin/Max 0..10) but only `enumCount` ordinals
           // (6), so listing min..displayMax offered 6..10 as phantom selectable ordinals with no label.
           const ordMax = range.enumCount != null ? min + range.enumCount - 1 : max;
+          if (raw === null) { // value unresolved (a non-positional family, or a missing record) — null it, never a guessed ordinal
+            enums.push({ id: p.paramId, name: paramLabel(p), value: null, options: this.#enumOptions(family, p.paramId, p.name, min, ordMax), unresolved: unresolvedReason(p.paramId) });
+            continue;
+          }
           // Discrete params store the ordinal; if the wire value looks 16-bit-scaled, unscale it. A
           // scaled enum's display span is `scale`× its ORDINAL span (the row's own metadata: display =
           // ordinal * scale — PHASER_ORDER's scale 2 over 6 ordinals spans display 0..10), so unscale
@@ -749,9 +795,15 @@ class Gen3Driver implements DeviceDriver {
         if (typeId != null) {
           const roster = this.#prof.rosterFor(slug);
           const max = Math.max(0, roster.length - 1);
-          const raw = bulk.values[base + typeId] ?? 0;
-          const tv = raw > max ? Math.round((raw / 65534) * max) : raw;
-          type = { value: tv, name: roster[tv]?.name ?? '' };
+          const raw = readRaw(typeId);
+          if (raw === null) {
+            // Unresolved type (e.g. a non-positional GLOBAL family): leave `type` null rather than
+            // fabricate a type 0 and resolve the layout to the wrong variant.
+            type = null;
+          } else {
+            const tv = raw > max ? Math.round((raw / 65534) * max) : raw;
+            type = { value: tv, name: roster[tv]?.name ?? '' };
+          }
         }
       } catch (e) {
         // Any mid-decode throw (malformed 0x75, a torn/short burst, a transport timeout) means the
@@ -773,7 +825,7 @@ class Gen3Driver implements DeviceDriver {
     // block's read enum/knob value. Lets layoutFor filter the served pages down to the ones the editor
     // would actually show — collapsing e.g. the amp's per-model 'Authentic' pages to the current model.
     const valueByPid = new Map<number, number>();
-    for (const e of enums) valueByPid.set(e.id, e.value);
+    for (const e of enums) if (e.value !== null) valueByPid.set(e.id, e.value);
     for (const n of named) if (typeof n.value === 'number') valueByPid.set(n.id, n.value);
     const selectors: SelectorValues = (selectorParamName) => {
       const pid = this.#paramId(family, selectorParamName);
