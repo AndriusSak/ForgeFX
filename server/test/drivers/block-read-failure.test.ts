@@ -68,11 +68,17 @@ function makeDriver(frames: () => number[][]) {
   return driver;
 }
 
-/** Assert `fn()` rejects; throws (failing the suite) when it resolves. */
-async function rejects(fn: () => Promise<unknown>, msg: string): Promise<void> {
+/** Assert `fn()` rejects with an error whose message matches `expect`.
+ *
+ *  A bare `catch {}` here would accept ANY throw: a typo in the harness, a transport error, or — worst —
+ *  a throw from the WRONG guard would all count as the torn read being detected. That is the vacuity
+ *  this replaces: assert the specific error the guard raises, so only the intended failure passes. */
+async function rejectsWith(fn: () => Promise<unknown>, expect: RegExp, msg: string): Promise<void> {
   try {
     await fn();
-  } catch {
+  } catch (e) {
+    const m = (e as Error).message ?? String(e);
+    assert(expect.test(m), `${msg} — wrong error (expected ${expect}, got: ${m})`);
     return;
   }
   throw new Error(msg);
@@ -86,12 +92,20 @@ class Sink implements StatusSink {
 export async function runBlockReadFailureTests(): Promise<void> {
   // ── A. malformed 0x75 body → the decode throws and must NOT be swallowed into a 200 ──
   const malformed = makeDriver(() => [head(AMP_EID, STRIDE * 4), sysex(0x75, []), end()]);
-  await rejects(() => malformed.blockParams(AMP_EID), 'case 1: a malformed 0x75 body must reject, not return a zeroed snapshot');
+  await rejectsWith(
+    () => malformed.blockParams(AMP_EID),
+    /parseGen3StateBroadcastBody/,
+    'case 1: a malformed 0x75 body must reject, not return a zeroed snapshot',
+  );
 
   // ── B. short-but-valid burst (head advertises 4 channels, only a partial body arrives) ──
   const torn = new Array(200).fill(0); // < STRIDE*4 → a dropped page
   const short = makeDriver(() => [head(AMP_EID, STRIDE * 4), body(torn), end()]);
-  await rejects(() => short.blockParams(AMP_EID), 'case 2: a short (torn) body must reject, not be served as a complete block');
+  await rejectsWith(
+    () => short.blockParams(AMP_EID),
+    new RegExp(`torn block bulk read for eid ${AMP_EID}: got ${torn.length} of ${STRIDE * 4} values`),
+    'case 2: a short (torn) body must reject with the TORN-read error, not be served as a complete block',
+  );
 
   // ── the handler maps the thrown decode to the repo's existing 404 + {error} shape ──
   const handlerFor = (d: ReturnType<typeof makeDriver>) => {

@@ -189,6 +189,23 @@ const VALIDATION_ROWS: ValRow[] = [
   // modifier bind: a non-integer slot flowed into Math.floor()→NaN and the encoder.
   { name: 'mod bind non-integer slot', method: 'POST', url: '/mod/bind', body: { slot: 'a', targetEffectId: 1, targetParam: 2, source: 3 }, expect: 400, callsDriver: false },
 
+  // ── P10 — the 16383/16384 BOUNDARY on the WRITE routes. Every 14-bit write guard is `<= 0x3fff`
+  //    (16383); the pre-existing out-of-range rows used 20000 (well past) and the valid twins used 58,
+  //    so an off-by-one AT the exact edge was untested. 16383 must pass and reach the driver; 16384 must
+  //    400 before it. Each pair is checked per surface (see the call-count assertion in §4). ──
+  { name: 'bypass eid boundary valid (16383)', method: 'POST', url: '/preset/blocks/16383/bypass', body: { bypassed: true }, expect: 200, callsDriver: true },
+  { name: 'bypass eid boundary invalid (16384)', method: 'POST', url: '/preset/blocks/16384/bypass', body: { bypassed: true }, expect: 400, callsDriver: false },
+  { name: 'set param eid boundary valid (16383)', method: 'PUT', url: '/preset/blocks/16383/params/7', body: { value: 0.5, continuous: true }, expect: 200, callsDriver: true },
+  { name: 'set param eid boundary invalid (16384)', method: 'PUT', url: '/preset/blocks/16384/params/7', body: { value: 0.5, continuous: true }, expect: 400, callsDriver: false },
+  { name: 'set param paramId boundary valid (16383)', method: 'PUT', url: '/preset/blocks/58/params/16383', body: { value: 0.5, continuous: true }, expect: 200, callsDriver: true },
+  { name: 'set param paramId boundary invalid (16384)', method: 'PUT', url: '/preset/blocks/58/params/16384', body: { value: 0.5, continuous: true }, expect: 400, callsDriver: false },
+  { name: 'set param discrete value boundary valid (16383 ordinal)', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 16383, continuous: false }, expect: 200, callsDriver: true },
+  { name: 'set param discrete value boundary invalid (16384 ordinal)', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 16384, continuous: false }, expect: 400, callsDriver: false },
+  { name: 'preset select boundary valid (16383)', method: 'POST', url: '/preset/select', body: { number: 16383 }, expect: 200, callsDriver: true },
+  { name: 'preset select boundary invalid (16384)', method: 'POST', url: '/preset/select', body: { number: 16384 }, expect: 400, callsDriver: false },
+  { name: 'preset store boundary valid (16383)', method: 'POST', url: '/preset/store', body: { number: 16383 }, expect: 200, callsDriver: true },
+  { name: 'preset store boundary invalid (16384)', method: 'POST', url: '/preset/store', body: { number: 16384 }, expect: 400, callsDriver: false },
+
   // ── P8 — the READ seam. A malformed address (non-integer / outside the 14-bit codec space) is
   //    400 on BOTH surfaces; a WELL-FORMED address that names no present block/slot is deliberately
   //    LEFT to the driver (the twin reaches it). Each garbage row is paired with a boundary twin. ──
@@ -239,8 +256,9 @@ const VALIDATION_ROWS: ValRow[] = [
 ];
 
 // drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row,
-// plus the P6 silent-accept proof (case 5, against the REAL gen-3 codec).
-export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 5;
+// plus the P6 silent-accept proof (against the REAL gen-3 codec) and the P9 fc/state proof, plus the
+// P10 repeated-query-key divergence block.
+export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 6;
 
 export async function runRouteParityTests(): Promise<void> {
   // Hermetic: no cloud (so app.ts's AXIS_CLOUD branch is off and both tables are compared in the
@@ -288,24 +306,33 @@ export async function runRouteParityTests(): Promise<void> {
     // ── 4. P3 — bad route params map to 400 (not an unhandled 500) on BOTH surfaces ──
     for (const row of VALIDATION_ROWS) {
       const fake = (await registry.driver()) as FakeFm3;
-      const start = fake.calls.length;
 
+      // Count the driver calls PER SURFACE, not across both: a combined tally lets one surface's call
+      // mask the other's absence on a valid row (only ONE of the two twins reaching the driver would
+      // still raise the shared count), which is exactly the cross-surface hole this guard exists to
+      // close. Snapshot before each call and diff.
+      const appStart = fake.calls.length;
       const res = await app.inject({
         method: row.method as 'GET',
         url: row.url,
         ...(row.body !== undefined ? { payload: row.body as Record<string, unknown> } : {})
       });
+      const appCalls = fake.calls.length - appStart;
+
+      const routerStart = fake.calls.length;
       const routed = await router.handle(row.method, row.url, row.body !== undefined ? JSON.stringify(row.body) : undefined);
+      const routerCalls = fake.calls.length - routerStart;
 
       assertEqual(res.statusCode, row.expect, `${row.name}: app status (body ${res.payload.slice(0, 120)})`);
       assertEqual(routed.status, row.expect, `${row.name}: router status (body ${String(routed.body).slice(0, 120)})`);
-      // the router body must deep-match the app body for the 400 envelope too
-      if (typeof routed.body === 'string' && res.payload.length) {
-        assertEqual(routed.body, res.payload, `${row.name}: 400 body parity`);
-      }
+      // Body parity is asserted UNCONDITIONALLY (the old `typeof routed.body === 'string' && res.payload.length`
+      // guard silently skipped it for any non-string body). These rows are all JSON, so the router body
+      // must BE the app payload, byte for byte — a status match with a divergent envelope is still drift.
+      assert(typeof routed.body === 'string', `${row.name}: router body is a JSON string (got ${typeof routed.body})`);
+      assertEqual(routed.body, res.payload, `${row.name}: body parity (app payload ≠ router body)`);
 
-      const madeCall = fake.calls.length > start;
-      assertEqual(madeCall, row.callsDriver, `${row.name}: driver ${row.callsDriver ? 'must be' : 'must NOT be'} called`);
+      assertEqual(appCalls > 0, row.callsDriver, `${row.name}: APP driver ${row.callsDriver ? 'must be' : 'must NOT be'} called`);
+      assertEqual(routerCalls > 0, row.callsDriver, `${row.name}: ROUTER driver ${row.callsDriver ? 'must be' : 'must NOT be'} called`);
     }
   } finally {
     await app.close();
@@ -357,6 +384,36 @@ export async function runRouteParityTests(): Promise<void> {
       const after = mock.sent.length;
       await real.fcReadState!(0, 0, 0); // valid config 0 still reads
       assert(mock.sent.length > after, 'a valid FC address still issues reads (the backstop is not over-broad)');
+    } finally {
+      await app.close();
+    }
+  }
+
+  // ── 7. P10 — REPEATED QUERY KEYS: a genuine, DOCUMENTED divergence between the two surfaces ──
+  // `?eid=1&eid=2` (the same key twice) is parsed differently by the two query parsers:
+  //   • Fastify (app.ts) → `req.query.eid` is the ARRAY ['1','2']; the shared handlers coerce with
+  //     `Number(['1','2'])` → NaN → not an integer → 400. (Same for /preset/looper and /fc/state's axes.)
+  //   • the browser router → `c.query` is a URLSearchParams and `.get('eid')` takes the FIRST value
+  //     ('1') → 200. The surface genuinely DIFFERS; the §4 guard above (single-key queries only) misses it.
+  // This block PINS the observed behaviour on EACH surface so the divergence cannot drift silently. It is
+  // a FINDING, not a fix: unifying the two parsers is a src/ change, out of scope for a test-only round.
+  // If a future fix makes the router reject repeated keys too, update these expectations deliberately.
+  {
+    const { app, registry } = await buildTestApp(0x11, makeFakeFm3());
+    const router = createRouter({ registry, store: store.defaultStore });
+    const REPEATED: Array<{ url: string; appError: string }> = [
+      { url: '/preset/monitors/live?eid=1&eid=2', appError: 'eid must be an integer 0..16383' },
+      { url: '/preset/looper?eid=1&eid=2', appError: 'eid required (integer 0..16383)' },
+      { url: '/fc/state?layout=0&layout=1', appError: 'layout, view and switch must be non-negative integers' }
+    ];
+    try {
+      for (const { url, appError } of REPEATED) {
+        const res = await app.inject({ method: 'GET', url });
+        assertEqual(res.statusCode, 400, `${url}: Fastify sees the repeated key as an array → 400`);
+        assertEqual((JSON.parse(res.payload) as { error: string }).error, appError, `${url}: app 400 error`);
+        const routed = await router.handle('GET', url, undefined);
+        assertEqual(routed.status, 200, `${url}: the browser router takes the FIRST value → 200 (documented divergence)`);
+      }
     } finally {
       await app.close();
     }

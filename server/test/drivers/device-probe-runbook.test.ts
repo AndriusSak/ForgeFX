@@ -69,8 +69,12 @@ export async function runDeviceProbeRunbookTests(): Promise<void> {
     const { session, mock } = createMockSession(MODEL);
     const report = await runDeviceProbes(session, { writes: true, log: noop });
 
-    // case 4: every eligible probe gave a definite verdict → exit 0.
+    // case 4: every eligible probe gave a definite verdict → exit 0. Guard the set is non-empty FIRST:
+    // `[].every(...)` is true, so without this the write path could report NO probes at all and still
+    // pass. --writes attempts all five (Q1-Q5) and skips none, so the eligible set is exactly the results.
     const eligible = report.results.filter((r) => r.status !== 'skipped');
+    assert(eligible.length > 0, '--writes attempted at least one probe (an empty set must not pass vacuously)');
+    assertEqual(eligible.length, report.results.length, '--writes skips NO probe — every result is eligible');
     assert(eligible.every((r) => r.status === 'determinate'), '--writes: every eligible probe is determinate');
     assertEqual(report.exitCode, 0, '--writes run with all verdicts exits 0');
 
