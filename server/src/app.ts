@@ -72,7 +72,7 @@ export async function buildApp(
     driver, unsupported,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
     rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetParamsH,
-    liveMonitorsH, looperTelemetryH,
+    liveMonitorsH, looperTelemetryH, fcStateH,
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
@@ -521,19 +521,13 @@ export async function buildApp(
       return await d.looperControl(eid as number, action, on !== false);
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   });
-  // FC current switch state via the sub-0x01 structured config-selector read (the read FM3-Edit uses on
-  // FC-page entry). Returns the decoded current state (category/function/display/color + labels) for one
-  // (layout,view,switch), read via the sub-0x1b value channel that tracks param edits (fcReadState).
-  app.get<{ Querystring: { layout?: string; view?: string; switch?: string } }>('/fc/state', async (req, reply) => {
-    const layout = Number(req.query.layout ?? 0);
-    const view = Number(req.query.view ?? 0);
-    const sw = Number(req.query.switch ?? 0);
-    try {
-      const d = await driver();
-      if (!d.fcReadState) return unsupported(reply, 'fcLiveRead');
-      return await d.fcReadState(layout, view, sw);
-    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
-  });
+  // FC current switch state for one (layout,view,switch), read via the sub-0x1b value channel that
+  // tracks param edits (fcReadState — distinct from the sub-0x01 compiled-snapshot read). layout/view/
+  // switch must be non-negative integers within this device's FC geometry (malformed → 400 BEFORE the
+  // driver; fcStateH); the driver additionally refuses to encode an out-of-range address (throws) rather
+  // than silently reading pid 0. See fcStateH for the NaN → enc14 [0,0] silent-misread rationale.
+  app.get<{ Querystring: { layout?: string; view?: string; switch?: string } }>('/fc/state', (req, reply) =>
+    fcStateH(reply, req.query.layout, req.query.view, req.query.switch));
 
   // decompressed preset body (hex) — for per-block param-decode RE (offset diffs)
   app.get('/preset/body', async (_req, reply) => {

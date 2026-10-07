@@ -31,7 +31,7 @@ const CAPS: DriverCapabilities = {
   blockParamDecode: true,
   telemetry: { tuner: false, outputMeters: false, cpu: false },
   fcModel: true,
-  fcLiveRead: false,
+  fcLiveRead: true,
   modBind: true,
   cabIrs: true,
   supportsSave: true,
@@ -87,7 +87,13 @@ function makeFakeFm3(): FakeFm3 {
     presetParams: async (n: number) => { rec('presetParams', n); return [] as never; },
     storedPresetName: async (n: number) => { rec('storedPresetName', n); return { number: n, name: `P${n}` }; },
     liveMonitors: async (onlyEid?: number) => { rec('liveMonitors', onlyEid); return []; },
-    looperTelemetry: async (eid: number) => { rec('looperTelemetry', eid); return { wave: [], position: null, level: null }; }
+    looperTelemetry: async (eid: number) => { rec('looperTelemetry', eid); return { wave: [], position: null, level: null }; },
+    // P9 — the /fc/state live read. Records so a garbage row proves the guard fired BEFORE it, and the
+    // valid boundary twin proves a well-formed address still reaches it.
+    fcReadState: async (layout: number, view: number, sw: number) => {
+      rec('fcReadState', layout, view, sw);
+      return { effectId: 199, layout, view, switch: sw, config: 0, fields: {}, tapLabel: '', holdLabel: '' } as never;
+    }
   } as DeviceDriver as FakeFm3;
 }
 
@@ -215,12 +221,26 @@ const VALIDATION_ROWS: ValRow[] = [
   { name: 'monitors live absent eid (all blocks)', method: 'GET', url: '/preset/monitors/live', body: undefined, expect: 200, callsDriver: true },
   { name: 'looper missing eid', method: 'GET', url: '/preset/looper', body: undefined, expect: 400, callsDriver: false },
   { name: 'looper fractional eid', method: 'GET', url: '/preset/looper?eid=1.5', body: undefined, expect: 400, callsDriver: false },
-  { name: 'looper valid eid query', method: 'GET', url: '/preset/looper?eid=58', body: undefined, expect: 200, callsDriver: true }
+  { name: 'looper valid eid query', method: 'GET', url: '/preset/looper?eid=58', body: undefined, expect: 200, callsDriver: true },
+
+  // ── P9 — GET /fc/state. The three axes address one FC config (`layout*configsPerLayout + view*switches
+  //    + sw`). A malformed axis makes the driver's config NaN → `enc14` encodes [0,0] → every field read
+  //    from pid 0 with a silent 200; an axis past the FM3's geometry (9×4×3) aliases another switch. Now
+  //    400 at the seam (before driver()), bounded to the device's declared geometry. Each garbage row is
+  //    paired with a valid boundary twin that proves the guard is not over-broad. ──
+  { name: 'fc state non-integer layout', method: 'GET', url: '/fc/state?layout=abc', body: undefined, expect: 400, callsDriver: false },
+  { name: 'fc state negative view', method: 'GET', url: '/fc/state?view=-1', body: undefined, expect: 400, callsDriver: false },
+  { name: 'fc state fractional switch', method: 'GET', url: '/fc/state?switch=1.5', body: undefined, expect: 400, callsDriver: false },
+  { name: 'fc state layout past the FM3 geometry', method: 'GET', url: '/fc/state?layout=9', body: undefined, expect: 400, callsDriver: false },
+  { name: 'fc state view past the FM3 geometry', method: 'GET', url: '/fc/state?view=4', body: undefined, expect: 400, callsDriver: false },
+  { name: 'fc state switch past the FM3 geometry', method: 'GET', url: '/fc/state?switch=3', body: undefined, expect: 400, callsDriver: false },
+  { name: 'fc state default config 0 (boundary twin)', method: 'GET', url: '/fc/state', body: undefined, expect: 200, callsDriver: true },
+  { name: 'fc state max valid geometry (boundary twin)', method: 'GET', url: '/fc/state?layout=8&view=3&switch=2', body: undefined, expect: 200, callsDriver: true }
 ];
 
 // drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row,
 // plus the P6 silent-accept proof (case 5, against the REAL gen-3 codec).
-export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 4;
+export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 5;
 
 export async function runRouteParityTests(): Promise<void> {
   // Hermetic: no cloud (so app.ts's AXIS_CLOUD branch is off and both tables are compared in the
@@ -314,6 +334,29 @@ export async function runRouteParityTests(): Promise<void> {
       const ok = await app.inject({ method: 'POST', url: '/tempo', payload: { bpm: 121 } });
       assertEqual(ok.statusCode, 200, 'a valid bpm still → 200');
       assertEqual(mock.sent.length, afterProbe + 1, 'and it does reach the device');
+    } finally {
+      await app.close();
+    }
+  }
+
+  // ── 6. P9 — the /fc/state NaN address, proven against the REAL FM3 driver ──
+  // The defect: `Number('abc')` → NaN made fcReadState's computed `config` NaN, and its `enc14`
+  // (`n & 0x7f`) encoded NaN as [0, 0] — so every field was read from pid 0 and the route answered 200.
+  // Prove the driver now REFUSES to encode such an address (throws) and puts NOTHING on the wire, while a
+  // valid address still issues reads (so the driver backstop is not over-broad).
+  {
+    const { app, registry, mock } = await buildTestApp(0x11); // REAL FM3 driver over MockTransport
+    const real = await registry.driver();
+    try {
+      const before = mock.sent.length;
+      let threw = false;
+      try { await real.fcReadState!(NaN, NaN, NaN); } catch { threw = true; }
+      assert(threw, 'fcReadState(NaN,NaN,NaN) must THROW — not silently encode [0,0] and read pid 0');
+      assertEqual(mock.sent.length, before, 'and the refused NaN address sent NOTHING to the device');
+
+      const after = mock.sent.length;
+      await real.fcReadState!(0, 0, 0); // valid config 0 still reads
+      assert(mock.sent.length > after, 'a valid FC address still issues reads (the backstop is not over-broad)');
     } finally {
       await app.close();
     }
