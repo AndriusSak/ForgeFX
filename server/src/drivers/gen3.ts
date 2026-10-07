@@ -27,7 +27,7 @@ import {
   retargetPresetDumpToEditBuffer,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
-import { SLUG_FAMILY, resolvePseudoParamControls, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
+import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
 import { ENV } from './env.js';
 import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
@@ -148,15 +148,11 @@ const UNIT_LABEL: Record<string, string> = {
   db: 'dB', hz: 'Hz', ms: 'ms', seconds: 's', percent: '%', bipolar_percent: '%',
   degrees: '°', semitones: 'st', pf: 'pF', ratio: ':1'
 };
-// units that mark a musician-facing knob. 'numeric' = a plain unitless knob (Drive, Tone, Level,
-// cut freqs…) — primary controls in many families; only 'unverified' / 'count' / 'enum' are non-knobs.
-// NOTE: this is an ALLOWLIST, so a real display unit missing here silently deletes the control from
-// every client (blockParams never serves it). 'pf' (picofarads — UNIT_LABEL renders it 'pF') is a real
-// unit: the amp block's Bright Cap (DISTORT/16, 10..10000 pF) is a 'knob' in the device's own layout.
-// test/drivers/knob-coverage.test.ts guards the invariant that no displayable unit is left out.
-const KNOB_UNITS = new Set([
-  'numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees', 'pf'
-]);
+// KNOB_UNITS (the musician-facing continuous-control unit allowlist) is the SINGLE source of truth,
+// owned by devices.ts and imported above — NOT redefined here. It gates blockParams' `named` (knob)
+// list AND devices.ts' Axe-Fx III float-vs-enum classifier; keeping two copies let them drift (a real
+// unit present in one but not the other silently mis-branded controls). See the comment at its
+// definition for WHY 'pf' must be included (the amp block's Bright Cap).
 // Shared empty set for the optional layout-widget evidence maps (see DeviceProfile.layoutKnobIds).
 const EMPTY_ID_SET: ReadonlySet<number> = new Set();
 // Ceiling for an enum dropdown's option list — a guard against a bogus catalog row only. Real gen-3
@@ -705,12 +701,18 @@ class Gen3Driver implements DeviceDriver {
           const max = Math.round(range.displayMax);
           const min = Math.round(range.displayMin);
           const raw = bulk.values[base + p.paramId] ?? 0;
-          // discrete params store the ordinal; if the wire value looks 16-bit-scaled, unscale it
-          const value = raw > max ? Math.round((raw / 65534) * (max - min)) + min : raw;
           // The OPTION LIST is bounded by ordinals, not by display values. A scaled enum carries its
           // display range (PHASER_ORDER: scale 2, displayMin/Max 0..10) but only `enumCount` ordinals
           // (6), so listing min..displayMax offered 6..10 as phantom selectable ordinals with no label.
           const ordMax = range.enumCount != null ? min + range.enumCount - 1 : max;
+          // Discrete params store the ordinal; if the wire value looks 16-bit-scaled, unscale it. A
+          // scaled enum's display span is `scale`× its ORDINAL span (the row's own metadata: display =
+          // ordinal * scale — PHASER_ORDER's scale 2 over 6 ordinals spans display 0..10), so unscale
+          // against the ordinal end (ordMax), not displayMax: otherwise the served value lands in
+          // DISPLAY space (0..10) outside its own option list (0..5) and a write-back would send a
+          // float where the device expects a discrete ordinal. ordMax === max for an unscaled enum, so
+          // this is a no-op off the scaled rows. Clamp to ordMax so the served value is always a member.
+          const value = raw > max ? Math.min(ordMax, Math.round((raw / 65534) * (ordMax - min)) + min) : raw;
           enums.push({ id: p.paramId, name: paramLabel(p), value, options: this.#enumOptions(family, p.paramId, p.name, min, ordMax) });
         }
         // current model/type (for EQ band layout etc.)

@@ -21,7 +21,7 @@ const PHASER_EID = effectRoster().find((e) => e.slug === 'phaser')!.page; // PHA
 const TONESTACK_TYPE_PID = 36;
 const PHASER_ORDER_PID = 1; // scaled enum: scale 2, displayMin/Max 0..10, enumCount 6
 
-export const ENUM_COVERAGE_CASE_COUNT = 4;
+export const ENUM_COVERAGE_CASE_COUNT = 5;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -45,12 +45,15 @@ function blockBulkFrames(model: number, effectId: number, values: readonly numbe
   ];
 }
 
-/** Serve blockParams over a mocked transport and return the enum params it hands the UI. */
-async function servedEnums(profile: DeviceProfile, eid: number): Promise<Map<number, { id: number; options: { value: number; label: string }[] }>> {
+/** Serve blockParams over a mocked transport and return the enum params it hands the UI.
+ *  `overrides` sets specific paramId wire values (16-bit raws) so a test can drive the
+ *  `raw > max` unscale branch; absent ids stay 0. */
+async function servedEnums(profile: DeviceProfile, eid: number, overrides: Record<number, number> = {}): Promise<Map<number, { id: number; options: { value: number; label: string }[] }>> {
   const codec = createModernFractalCodec(profile.model);
   const slug = effectRoster().find((e) => e.page === eid)?.slug ?? '';
   const stride = profile.rangeSections[SLUG_FAMILY[slug] ?? '']?.stride ?? 1;
   const values = new Array(Math.max(stride, 1) * 4).fill(0);
+  for (const [pid, v] of Object.entries(overrides)) values[Number(pid)] = v;
   const bulk = blockBulkFrames(profile.model, eid, values);
   const mock = new MockTransport('serial', `mock-enum-${eid}`);
   mock.isOpen = true;
@@ -103,7 +106,21 @@ export async function runEnumCoverageTests(): Promise<void> {
   assertEqual(order!.options.length, orderRange.enumCount, 'Order offers exactly enumCount options');
   assertEqual(order!.options.map((o) => o.value).join(','), '0,1,2,3,4,5', 'Order option values are the ordinals');
 
-  // 4. INVARIANT: every enum the driver serves is complete — no list may be shorter than its
+  // 4. A SCALED WIRE VALUE decodes into ORDINAL space, not display space. A 16-bit-scaled raw for
+  //    Order (scale 2: display = ordinal * scale, 6 ordinals over display 0..10) must land on a real
+  //    ordinal (0..5) — never a display value (6..10) outside its own option list. servedRaw 65534
+  //    is the top of the wire scale; it must decode to the top ORDINAL (ordMax = 5), not displayMax.
+  const scaled = await servedEnums(profile, PHASER_EID, { [PHASER_ORDER_PID]: 65534 });
+  const scaledOrder = scaled.get(PHASER_ORDER_PID)!;
+  assert(!!scaledOrder, 'phaser block serves Order when a scaled raw is on the wire');
+  const scaledOptValues = scaledOrder.options.map((o) => o.value);
+  assert(scaledOptValues.includes(scaledOrder.value),
+    `a scaled Order value decodes inside its own options: value ${scaledOrder.value} ∈ [${scaledOptValues.join(',')}]`);
+  assertEqual(scaledOrder.value, orderRange.enumCount! - 1 + Math.round(orderRange.displayMin),
+    'the top of the wire scale decodes to the top ORDINAL (ordMax), not displayMax');
+  assertEqual(scaledOrder.options.length, orderRange.enumCount, 'Order still offers exactly enumCount options');
+
+  // 5. INVARIANT: every enum the driver serves is complete — no list may be shorter than its
   //    device-true ordinal count (catches any future hard cap, on every gen-3 device).
   const offenders: string[] = [];
   for (const model of [0x10, 0x11, 0x12]) {

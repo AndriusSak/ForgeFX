@@ -564,7 +564,20 @@ function fm3EnumLabels(family: string, paramId: number): string[] | undefined {
 // over the param table's inline displayMin/Max. Cache placeholder rows (all-zero float rows kept 1:1
 // for wire-stride math) carry no display info — inline bounds win there; informative cache rows win
 // everywhere else (they're the newer authority).
-const CONT_UNITS = new Set(['numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees']);
+// Units that mark a musician-facing CONTINUOUS control (a knob). 'numeric' = a plain unitless knob
+// (Drive, Tone, Level, cut freqs…) — primary controls in many families; only 'unverified' / 'count' /
+// 'enum' are non-knobs. This is the ONE source of truth, shared by the gen-3 driver's knob gate
+// (blockParams' `named` list, imported there) AND this module's Axe-Fx III float-vs-enum classifier
+// below — the two used to be separate sets that drifted ('pf' was in the driver's set but not this
+// one, so a III param in pF classified as a phantom enum dropdown).
+// NOTE: this is an ALLOWLIST, so a real display unit missing here silently deletes the control from
+// every client (blockParams never serves it) and mis-brands it in the III classifier. 'pf'
+// (picofarads — UNIT_LABEL renders it 'pF') is a real unit: the amp block's Bright Cap (III
+// DISTORT/10, FM3 DISTORT/16, 10..10000 pF) is a 'knob' in the device's own layout.
+// test/drivers/knob-coverage.test.ts guards the invariant that no displayable unit is left out.
+export const KNOB_UNITS: ReadonlySet<string> = new Set([
+  'numeric', 'knob_0_10', 'knob_0_20', 'db', 'hz', 'ms', 'seconds', 'percent', 'bipolar_percent', 'ratio', 'semitones', 'degrees', 'pf'
+]);
 const axe3Params = AXE3_PARAMS as unknown as Record<string, (ParamDef & { displayMin?: number; displayMax?: number })[]>;
 const axe3DeviceRanges = AXE3_DEVICE_RANGES as unknown as Ranges;
 const AXE3_RANGES: Ranges = (() => {
@@ -573,7 +586,7 @@ const AXE3_RANGES: Ranges = (() => {
     out[fam] = {};
     for (const p of list) {
       if (p.displayMin == null || p.displayMax == null) continue;
-      out[fam][p.paramId] = { kind: CONT_UNITS.has(p.unit ?? '') ? 'float' : 'enum', displayMin: p.displayMin, displayMax: p.displayMax, typecode: 0 };
+      out[fam][p.paramId] = { kind: KNOB_UNITS.has(p.unit ?? '') ? 'float' : 'enum', displayMin: p.displayMin, displayMax: p.displayMax, typecode: 0 };
     }
   }
   for (const [fam, rows] of Object.entries(axe3DeviceRanges)) {
