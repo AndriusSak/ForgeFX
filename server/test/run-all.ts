@@ -29,7 +29,6 @@ import { runTelemetryTests, TELEMETRY_CASE_COUNT } from './drivers/telemetry.tes
 import { runW2ReflectionTests, W2_REFLECTION_CASE_COUNT } from './drivers/w2-reflection.test.js';
 import { runFm3SweepTests, FM3_SWEEP_CASE_COUNT } from './drivers/fm3-sweep.test.js';
 import { runModifierReadbackTests, MODIFIER_READBACK_CASE_COUNT } from './drivers/modifier-readback.test.js';
-import { runAliasParityTests, ALIAS_PARITY_CASE_COUNT } from './api/alias-parity.test.js';
 import { runCapsTests, CAPS_CASE_COUNT } from './api/caps.test.js';
 import { runTelemetryConfigTests, TELEMETRY_CONFIG_CASE_COUNT } from './api/telemetryConfig.test.js';
 import { runRemoteTests, REMOTE_CASE_COUNT } from './api/remote.test.js';
@@ -73,7 +72,6 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/w2-reflection (${W2_REFLECTION_CASE_COUNT} slow-link/scene-state/blockState/scene cases)`, run: runW2ReflectionTests },
   { name: `drivers/fm3-sweep (${FM3_SWEEP_CASE_COUNT} no-block-open round-robin edit reflection cases)`, run: runFm3SweepTests },
   { name: `drivers/modifier-readback (${MODIFIER_READBACK_CASE_COUNT} decoded modifier → DTO + slot/resolution cases, real FM3 dumps)`, run: runModifierReadbackTests },
-  { name: `api/alias-parity (${ALIAS_PARITY_CASE_COUNT} alias↔unified twins, mocked AM4)`, run: runAliasParityTests },
   { name: `api/caps (${CAPS_CASE_COUNT} device capability matrices)`, run: runCapsTests },
   { name: `api/telemetryConfig (${TELEMETRY_CONFIG_CASE_COUNT} GET/PUT mode + event + parity)`, run: runTelemetryConfigTests },
   { name: `api/remote (${REMOTE_CASE_COUNT} whitelist decisions)`, run: runRemoteTests },

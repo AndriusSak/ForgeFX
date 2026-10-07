@@ -6,9 +6,8 @@
 // Connection/system concerns (ports, detect, SSE bus, telemetry supervisor) live on the registry.
 //
 // The gen-3 routes ARE the unified surface: every pre-Phase-6 gen-3 route keeps its path and a
-// byte-identical response for FM3 (additive fields only). The old /am4/* routes are thin DEPRECATED
-// ALIASES of the unified routes — same handler functions with param/body shims, `Deprecation` +
-// `Sunset` headers, and a per-path hit counter surfaced in GET /diag.
+// byte-identical response for FM3 (additive fields only). The deprecated /am4/* alias surface has
+// been removed (the client's calls to it were dropped); everything routes through the unified paths.
 //
 // `buildApp(registry)` exists so the API tests can `app.inject()` against an ISOLATED mocked
 // registry without listening; the production entry (index.ts) builds the app over the singleton
@@ -16,9 +15,9 @@
 //
 // The NON-TRIVIAL handler bodies (grid/blocks/param writes/preset ops/decode) live in
 // runtime/handlers.ts and are shared verbatim with the browser-facing runtime router
-// (runtime/router.ts) — this module keeps only the Fastify wiring, the deprecated /am4/* alias
-// shims, SSE, static UI and the Node-gated cloud/remote/telemetry surface.
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+// (runtime/router.ts) — this module keeps only the Fastify wiring, SSE, static UI and the
+// Node-gated cloud/remote/telemetry surface.
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import { existsSync, statSync, createReadStream } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
@@ -44,12 +43,12 @@ export async function buildApp(
     writes?: boolean;
     /** TEST-ONLY seam: invoked once per registered route with its (method, path). Lets the
      *  route-parity drift guard (test/api/route-parity.test.ts) enumerate THIS table authoritatively
-     *  (registerHelpRoutes/localStore/am4 aliases included) instead of re-parsing the source. */
+     *  (registerHelpRoutes/localStore included) instead of re-parsing the source. */
     onRoute?: (method: string, path: string) => void;
   },
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
-  // Hook FIRST so it observes every route registered below (help/local/am4 aliases/SSE included).
+  // Hook FIRST so it observes every route registered below (help/local/SSE included).
   if (opts?.onRoute) {
     const collect = opts.onRoute;
     app.addHook('onRoute', (routeOptions) => {
@@ -117,24 +116,6 @@ export async function buildApp(
     done();
   });
 
-  // ── deprecated-alias plumbing (the folded /am4/* routes) ──
-  // Every alias hit gets `Deprecation: true` + a `Sunset` date (≈ one release after Axis migrates to
-  // the unified routes), bumps a per-path counter surfaced in GET /diag, and console-warns at most
-  // once a minute per path so a chatty old client can't flood the log.
-  const ALIAS_SUNSET = 'Tue, 01 Dec 2026 00:00:00 GMT';
-  const aliasHits: Record<string, number> = {};
-  const aliasLastWarn = new Map<string, number>();
-  const deprecated = (req: FastifyRequest, reply: FastifyReply): void => {
-    const p = req.routeOptions?.url ?? (req.url.split('?')[0] || req.url);
-    aliasHits[p] = (aliasHits[p] ?? 0) + 1;
-    void reply.header('Deprecation', 'true').header('Sunset', ALIAS_SUNSET);
-    const now = Date.now();
-    if ((aliasLastWarn.get(p) ?? 0) + 60_000 <= now) {
-      aliasLastWarn.set(p, now);
-      console.warn(`[forgefx] DEPRECATED alias ${req.method} ${p} — use the unified route instead (sunset ${ALIAS_SUNSET})`);
-    }
-  };
-
   // ── block & parameter help (curated tooltips; see help.ts) ──
   registerHelpRoutes(app, registry);
 
@@ -150,8 +131,8 @@ export async function buildApp(
     const h = await registry.health();
     return { ok: h.ok, api: { version: 2 }, device: h.device };
   });
-  // full connection diagnostic for the desktop debug log, plus the deprecated-alias hit counters
-  app.get('/diag', async () => ({ ...(await registry.diagnostics()), deprecatedAliasHits: { ...aliasHits } }));
+  // full connection diagnostic for the desktop debug log
+  app.get('/diag', async () => registry.diagnostics());
   // Diagnostic (READ-ONLY): which RANGE row serves a family's param. Merged rows come from the device's
   // on-connect self-describe cache where it has them (see runtimeProfileFrom) and can differ in KIND
   // from the catalogue, so a param missing from /preset/blocks/:eid/params can be traced to the row
@@ -235,9 +216,8 @@ export async function buildApp(
   });
 
   // ── unified handlers ──────────────────────────────────────────────────────────────────────────
-  // Each capability-gated handler that a /am4/* alias folds into is a named function from
-  // createUnifiedHandlers above: the unified route AND its alias call the SAME function (aliases
-  // only shim params/body) — no fastify inject.
+  // Every capability-gated handler below is a named function from createUnifiedHandlers; the
+  // Fastify route and its browser-runtime twin call the SAME function — no fastify inject.
 
   // ── preset ──
   app.get('/preset', async (_req, reply) => {
@@ -636,42 +616,6 @@ export async function buildApp(
       return await d.meters(req.body?.wants ?? {});
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   });
-
-  // ── DEPRECATED /am4/* aliases (Phase 6 route folding) ─────────────────────────────────────────
-  // Each is the SAME unified handler with a param/body shim: `pidLow`→addr, `pidHigh`→paramId,
-  // `norm`→{value, continuous:true}, `value`→{value, continuous:false}, `location`→number. They
-  // answer with the unified response shape, send Deprecation/Sunset headers, and count into /diag.
-  app.get('/am4/grid', async (req, reply) => { deprecated(req, reply); return gridH(reply); });
-  app.get('/am4/slots', async (req, reply) => { deprecated(req, reply); return blocksH(reply); });
-  app.get<{ Params: { n: string } }>('/am4/presets/:n/name', async (req, reply) => { deprecated(req, reply); return presetNameH(Number(req.params.n)); });
-  app.get<{ Params: { pidLow: string } }>('/am4/blocks/:pidLow/params', async (req, reply) => { deprecated(req, reply); return blockParamsH(reply, Number(req.params.pidLow)); });
-  app.put<{ Params: { pidLow: string; pidHigh: string }; Body: { norm?: number; value?: number } }>('/am4/blocks/:pidLow/params/:pidHigh', async (req, reply) => {
-    deprecated(req, reply);
-    const pl = Number(req.params.pidLow), ph = Number(req.params.pidHigh);
-    if (req.body?.norm != null) return setParamH(reply, pl, ph, req.body.norm, true);
-    if (req.body?.value != null) return setParamH(reply, pl, ph, req.body.value, false);
-    reply.code(400); return { error: 'norm or value required' };
-  });
-  app.get('/am4/presets', async (req, reply) => { deprecated(req, reply); return locationsH(reply); });
-  app.put<{ Body: { key?: string; value?: number } }>('/am4/param', async (req, reply) => { deprecated(req, reply); return deviceParamH(reply, req.body?.key, req.body?.value); });
-  app.post<{ Body: { pidLow: number; bypassed: boolean } }>('/am4/bypass', async (req, reply) => { deprecated(req, reply); return bypassH(reply, req.body.pidLow, req.body.bypassed); });
-  app.post<{ Body: { index: number } }>('/am4/scene', async (req, reply) => { deprecated(req, reply); return sceneSetH(reply, req.body.index); });
-  app.post<{ Body: { location: number } }>('/am4/preset', async (req, reply) => { deprecated(req, reply); return presetSelectH(reply, req.body.location); });
-  app.post<{ Body: { location?: number } }>('/am4/preset/store', async (req, reply) => {
-    deprecated(req, reply);
-    if (req.body?.location == null) { reply.code(400); return { error: 'location (0..103) required' }; }
-    return presetStoreH(reply, req.body.location);
-  });
-  app.post<{ Body: { location?: number } }>('/am4/preset/backup', async (req, reply) => { deprecated(req, reply); return backupH(reply, req.body?.location); });
-  app.post<{ Body: { bytes?: number[] } }>('/am4/preset/restore', async (req, reply) => { deprecated(req, reply); return restoreH(reply, req.body?.bytes); });
-  app.post<{ Body: { bytes?: number[] } }>('/am4/preset/decode', async (req, reply) => {
-    deprecated(req, reply);
-    const bytes = Array.isArray(req.body?.bytes) ? req.body.bytes : null;
-    if (!bytes || !bytes.length) { reply.code(400); return { error: 'POST raw .syx bytes as application/octet-stream, or JSON {bytes:number[]}' }; }
-    return decodeH(reply, Uint8Array.from(bytes));
-  });
-  app.get('/am4/mod/model', async (req, reply) => { deprecated(req, reply); return modModelH(); });
-  app.post<{ Body: { bytes?: number[] } }>('/am4/firmware/validate', async (req, reply) => { deprecated(req, reply); return fwValidateH(reply, req.body?.bytes); });
 
   // ── live event stream (SSE): tuner / tempo / scene / cpu pushes ──
   app.get('/events', (req, reply) => {
