@@ -166,6 +166,38 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       return await d.looperTelemetry(eid);
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   };
+  // GET /fc/state?layout&view&switch — FC current-switch state (fcReadState, sub-0x1b value channel).
+  // The three axes address one FC config as `layout*configsPerLayout + view*switches + sw`. A MALFORMED
+  // axis is 400 BEFORE driver(): `Number('abc')` → NaN makes the driver's computed config NaN, which its
+  // `enc14` then encodes as `[0,0]` (JS bitwise ops on NaN → 0) — reading pid 0 for EVERY field with a
+  // silent 200 (the same silent-misread class as the read routes; the driver now also throws as a
+  // backstop). A non-integer/negative is the same class, and an axis past the model's own geometry
+  // ALIASES another switch (view*switches wraps into the next layout), so it is malformed too, not merely
+  // absent. Bound each axis to the device's declared FC geometry when the profile carries it (FM3:
+  // 9 layouts × 4 views × 3 switches); an axis the model does not declare is only integer/non-negative
+  // checked, so we reject what we can prove and never guess a maximum we cannot.
+  const fcStateH = async (reply: StatusSink, rawLayout?: string, rawView?: string, rawSwitch?: string) => {
+    const axis = (raw?: string): number => (raw == null || raw === '' ? 0 : Number(raw));
+    const layout = axis(rawLayout);
+    const view = axis(rawView);
+    const sw = axis(rawSwitch);
+    if (!Number.isInteger(layout) || layout < 0 || !Number.isInteger(view) || view < 0
+      || !Number.isInteger(sw) || sw < 0) {
+      reply.code(400);
+      return { error: 'layout, view and switch must be non-negative integers' };
+    }
+    const m = registry.profile.fcModel;
+    if (m && ((m.layouts != null && layout >= m.layouts) || (m.views != null && view >= m.views)
+      || (m.switches != null && sw >= m.switches))) {
+      reply.code(400);
+      return { error: `layout/view/switch out of range for this device (layout ${layout}/${m.layouts ?? '?'}, view ${view}/${m.views ?? '?'}, switch ${sw}/${m.switches ?? '?'})` };
+    }
+    try {
+      const d = await driver();
+      if (!d.fcReadState) return unsupported(reply, 'fcLiveRead');
+      return await d.fcReadState(layout, view, sw);
+    } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
   // Unified param write: {value, continuous}. continuous:true → the driver's normalized write
   // (gen-3 continuous SET; AM4 SET_NORM with value as 0..1), continuous:false → discrete ordinal.
   const setParamH = async (reply: StatusSink, addr: number, paramId: number, value: number, continuous: boolean) => {
@@ -440,7 +472,7 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     driver, unsupported, decodeFail,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
     rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetParamsH,
-    liveMonitorsH, looperTelemetryH,
+    liveMonitorsH, looperTelemetryH, fcStateH,
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,

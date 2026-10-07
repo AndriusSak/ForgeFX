@@ -1028,6 +1028,16 @@ class Gen3Driver implements DeviceDriver {
     if (!model.liveState) throw new Error('live FC state read is not supported for this device model (FM3 only); the address model is available via GET /fc/model');
     const eid = model.effectId;
     const config = layout * model.configsPerLayout! + view * model.switches! + sw;
+    // Address bound: a NaN / fractional / negative address (e.g. the route passing Number('abc') straight
+    // through) computes a NaN config, and `enc14` below — `n & 0x7f` on NaN is 0 — would encode it as
+    // [0, 0], silently reading pid 0 for EVERY field with a 200. An out-of-space address (> the device's
+    // own config count) similarly wraps in enc14 to a different config's pids. NEVER encode either: throw
+    // explicitly (same class as this driver's torn-read / absent-model throws) so the route surfaces a
+    // clear failure instead of wrong data. The route seam rejects malformed input first (400); this is the
+    // driver's own backstop so no caller can bypass it.
+    if (!Number.isInteger(config) || config < 0 || config >= model.configs) {
+      throw new Error(`FC address (layout=${layout}, view=${view}, switch=${sw}) resolves to an invalid config ${config} outside 0..${model.configs - 1}`);
+    }
     const enc14 = (n: number) => [n & 0x7f, (n >> 7) & 0x7f];
     const build = (pid: number): number[] => {
       const f = [0xf0, 0x00, 0x01, 0x74, this.#prof.model, 0x01, 0x1b, 0x00, ...enc14(eid), ...enc14(pid), 0, 0, 0, 0, 0, 0, 0, 0, 0];

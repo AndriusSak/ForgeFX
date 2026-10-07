@@ -464,17 +464,10 @@ export function createRouter(deps: RuntimeDeps): {
       return await d.looperControl(eid as number, action, onv !== false);
     } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
   });
-  // FC current switch state via the sub-0x01 structured config-selector read (see app.ts).
-  on('GET', '/fc/state', async (c) => {
-    const layout = Number(c.query.get('layout') ?? 0);
-    const view = Number(c.query.get('view') ?? 0);
-    const sw = Number(c.query.get('switch') ?? 0);
-    try {
-      const d = await driver();
-      if (!d.fcReadState) return unsupported(c.reply, 'fcLiveRead');
-      return await d.fcReadState(layout, view, sw);
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  // FC current switch state for one (layout,view,switch), via the sub-0x1b value channel (see app.ts).
+  // layout/view/switch are validated in the SHARED fcStateH (malformed → 400 before driver()).
+  on('GET', '/fc/state', (c) => h.fcStateH(c.reply,
+    c.query.get('layout') ?? undefined, c.query.get('view') ?? undefined, c.query.get('switch') ?? undefined));
   // bind a modifier slot to a target parameter (writes targetEffectId + targetParam + source on the slot eid)
   on('POST', '/mod/bind', async (c) => {
     const b = c.body as { slot?: number; targetEffectId?: number; targetParam?: number; source?: number } | undefined;
