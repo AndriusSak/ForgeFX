@@ -20,7 +20,7 @@ import { assert } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
 
-export const WRITE_WINDOW_CASE_COUNT = 5;
+export const WRITE_WINDOW_CASE_COUNT = 6;
 
 function sysex(fn: number, payload: readonly number[]): number[] {
   const body = [0xf0, 0x00, 0x01, 0x74, MODEL, fn, ...payload];
@@ -147,5 +147,20 @@ export async function runWriteWindowTests(): Promise<void> {
     t.schedule = [{ atMs: 90, frame: sysex(0x64, [0x01, 0x05]) }];
     const r = await driverOver(t).setSceneName!(0, 'Test Scene');
     assert(!r.ok, 'a same-function (0x01) 0x64 is conservatively attributed to our write — ok:false');
+  }
+
+  // 6. THE P5 BUG (item 1). A FOREIGN-function 0x64 (0x1f — a refused read, say) arrives FIRST, then OUR
+  //    rejection (fn 0x01) lands later but still inside the 250 ms window. The old predicate resolved on
+  //    ANY 0x64, so the foreign frame closed the window at 60 ms and our own rejection (at 150 ms) was
+  //    never collected → {ok:true} for a write the device refused. With the shared isOurReject predicate
+  //    the foreign frame only starts the quiet timer and the late rejection is still caught → {ok:false}.
+  {
+    const t = new WindowTransport();
+    t.schedule = [
+      { atMs: 60, frame: sysex(0x64, [0x1f, 0x0b]) },   // foreign fn — must NOT close the window
+      { atMs: 150, frame: sysex(0x64, [0x01, 0x0b]) }   // OUR rejection, later, within the window
+    ];
+    const r = await driverOver(t).setSceneName!(0, 'Test Scene');
+    assert(!r.ok, 'a foreign 0x64 first must not close the window before our own later rejection arrives — ok:false');
   }
 }

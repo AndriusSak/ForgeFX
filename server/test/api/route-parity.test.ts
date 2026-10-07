@@ -100,6 +100,12 @@ const VALIDATION_ROWS: ValRow[] = [
   { name: 'set param non-integer paramId', method: 'PUT', url: '/preset/blocks/58/params/not-a-number', body: { value: 0.5, continuous: true }, expect: 400, callsDriver: false },
   { name: 'set param non-integer eid', method: 'PUT', url: '/preset/blocks/xyz/params/7', body: { value: 0.5 }, expect: 400, callsDriver: false },
   { name: 'set param out-of-range paramId', method: 'PUT', url: '/preset/blocks/58/params/20000', body: { value: 0.5 }, expect: 400, callsDriver: false },
+  // P5 item 3 — `value` itself is validated at the seam. A DISCRETE write's value is an integer ORDINAL;
+  // a fraction or an out-of-14-bit ordinal passed through to the codec (which does NOT throw — it
+  // encodes any number as float32) and reached the device as a garbage frame with a 200. Now 400.
+  { name: 'set param discrete non-integer value', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 1.5 }, expect: 400, callsDriver: false },
+  { name: 'set param discrete out-of-range ordinal', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 20000 }, expect: 400, callsDriver: false },
+  { name: 'set param discrete valid ordinal (boundary twin)', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 12, continuous: false }, expect: 200, callsDriver: true },
   { name: 'set param valid', method: 'PUT', url: '/preset/blocks/58/params/7', body: { value: 0.5, continuous: true }, expect: 200, callsDriver: true }
 ];
 

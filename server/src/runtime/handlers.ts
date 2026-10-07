@@ -65,6 +65,21 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       reply.code(400);
       return { error: 'eid and paramId must be integers in 0..16383' };
     }
+    // `value` is validated at the seam too. Unlike eid/paramId it is NOT caught downstream: the gen-3
+    // codec encodes it as a 5-septet float32 and happily encodes NaN / a fraction / a huge ordinal into
+    // a garbage frame (it does not throw), and the continuous path clamp01()s it — so a bad ordinal used
+    // to reach the device as a malformed value with a 200. Require a finite number always; for a DISCRETE
+    // write (continuous === false) require an integer read-roster ORDINAL in the same 14-bit 0..16383
+    // space as the effect/param ids (the file's convention). A continuous value stays any finite number
+    // (the driver clamps it into 0..1).
+    if (!Number.isFinite(value)) {
+      reply.code(400);
+      return { error: 'value must be a finite number' };
+    }
+    if (!continuous && (!Number.isInteger(value) || value < 0 || value > 0x3fff)) {
+      reply.code(400);
+      return { error: 'discrete value must be an integer ordinal in 0..16383 (send continuous:true for a normalized knob value)' };
+    }
     const d = await driver();
     if (!d.setParam) return unsupported(reply, 'setParam');
     return d.setParam(addr, paramId, value, continuous);

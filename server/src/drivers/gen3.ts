@@ -268,12 +268,15 @@ class Gen3Driver implements DeviceDriver {
    *  client HONOURS `ok`, so that false "accepted" showed a successful save/value the device refused.
    *
    *  Which option actually gates the verdict (transport `#once`, src/transport/serial.ts): the promise
-   *  resolves on (a) `match` — immediate; (b) `quietMs` of silence after the last inbound frame; or
-   *  (c) the `timeoutMs` hard cap. On ACCEPT the device is silent, so the quiet timer never starts and
-   *  the write is declared accepted at `timeoutMs`; a stray inbound frame during the window would
-   *  instead close the watch `quietMs` later. So BOTH are set to the window: `timeoutMs` gates the
+   *  resolves on (a) `match` — immediate, but `match` fires ONLY on a frame that would actually count
+   *  as OUR rejection (`isOurReject`, by function byte — see below), so a FOREIGN-function 0x64 does
+   *  NOT close the window early; (b) `quietMs` of silence after the last inbound frame; or (c) the
+   *  `timeoutMs` hard cap. On ACCEPT the device is silent, so the quiet timer never starts and the
+   *  write is declared accepted at `timeoutMs`; a stray inbound frame during the window (e.g. a
+   *  foreign 0x64) starts the `quietMs` timer and the watch closes `quietMs` later, so our own late
+   *  rejection can still land. So BOTH are set to the window: `timeoutMs` gates the
    *  silent-accept case, and `quietMs` stops an unrelated frame from cutting the watch short before a
-   *  late rejection lands (a `match` on any 0x64 still resolves immediately). `timeoutMs` caps the
+   *  late rejection lands. `timeoutMs` caps the
    *  total wait at 250 ms in every case. Only this discrete-write confirmation path is widened — reads
    *  and the fire-and-forget `#send` path are untouched.
    *
@@ -288,8 +291,16 @@ class Gen3Driver implements DeviceDriver {
   async #write(bytes: number[]): Promise<{ ok: boolean }> {
     const dev = await this.#conn();
     const fn = bytes[5];
-    const frames = await dev.request(bytes, { timeoutMs: 250, quietMs: 250, match: (fs) => fs.some((f) => f[5] === 0x64) });
-    const rejected = frames.some((f) => f[5] === 0x64 && (f[6] === undefined || f[6] === fn));
+    // ONE predicate for BOTH the early-exit `match` and the verdict. A frame counts as OUR rejection
+    // iff it is a 0x64 that either echoes THIS write's function, or is too short to carry one (f[6]
+    // undefined — conservative: absent an echoed function we cannot rule it out, so treat it as ours).
+    // Using it in `match` too means the window closes early ONLY on a frame that would actually reject
+    // us: a FOREIGN-function 0x64 (a refused read, etc.) leaves the window open on the `quietMs` timer,
+    // so our own rejection arriving after it is still collected — before this fix a foreign 0x64 closed
+    // the window immediately and a later genuine rejection was lost, reporting a refused write {ok:true}.
+    const isOurReject = (f: number[]) => f[5] === 0x64 && (f[6] === undefined || f[6] === fn);
+    const frames = await dev.request(bytes, { timeoutMs: 250, quietMs: 250, match: (fs) => fs.some(isOurReject) });
+    const rejected = frames.some(isOurReject);
     return { ok: !rejected };
   }
 
@@ -1442,8 +1453,12 @@ class Gen3Driver implements DeviceDriver {
   async setParam(eid: number, paramId: number, value: number, continuous: boolean) {
     // continuous knob writes stream at high frequency → fire-and-forget (instant);
     // a discrete write (enum) is rarer + worth confirming, so reject-watch it.
-    const r = continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
+    // Stamp the local-edit window BEFORE sending (not after the await): the discrete #write waits up to
+    // its 250 ms window, so a stamp placed after it leaves that whole gap uncovered — the FM3 device-edit
+    // poll could run mid-wait and echo our own write back. Stamping first also means a write that THROWS
+    // still pauses the poll (the frame may have reached the device before the throw).
     this.#lastLocalEditAt = Date.now(); // pause the FM3 device-edit poll briefly so it doesn't echo our own write mid-drag
+    const r = continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
     // W1.2: the `param` event's `norm` is the 0..1 NORMALIZED value (drivers/types.ts). A discrete
     // write's `value` is the enum/model ORDINAL, so broadcasting it as a norm handed every other
     // window a value far outside 0..1 (Axis applies `p.norm = e.norm` verbatim). The event has no
@@ -1457,10 +1472,11 @@ class Gen3Driver implements DeviceDriver {
     const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()];
     const tid = family ? this.#paramId(family, 'type') : undefined;
     if (tid == null) return { ok: false };
-    const r = await this.#write(this.#codec.buildSetParameter(eid, tid, value));
-    // W1.4: stamp the local-edit window like setParam/setChannel so the FM3 device-edit poll pauses
-    // ~2 s and does not re-read the type we just wrote and emit it back as a spurious param event.
+    // W1.4: stamp the local-edit window BEFORE sending (same fix as setParam — see there) so the FM3
+    // device-edit poll pauses ~2 s, covering the 250 ms #write window, and does not re-read the type we
+    // just wrote and emit it back as a spurious param event; also stamped even if the write throws.
     this.#lastLocalEditAt = Date.now();
+    const r = await this.#write(this.#codec.buildSetParameter(eid, tid, value));
     this.#emit({ type: 'changed', scope: 'grid' });
     return r;
   }
