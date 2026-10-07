@@ -242,23 +242,11 @@ export function createRouter(deps: RuntimeDeps): {
     return d.presetRef();
   });
   // Stored preset name (driver-backed since Phase 6; gen-3 keeps the {number, name:''} stub).
-  on('GET', '/presets/:n', (c) => h.presetNameH(Number(c.params.n)));
+  on('GET', '/presets/:n', (c) => h.presetNameH(c.reply, Number(c.params.n)));
   // Decode any preset by number (non-disruptive) → library summary: name, scenes, unique blocks.
-  on('GET', '/presets/:n/summary', async (c) => {
-    try {
-      const d = await driver();
-      if (!d.presetSummary) return unsupported(c.reply, 'presetDump');
-      return await d.presetSummary(Number(c.params.n), c.query.get('full') === '1');
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  on('GET', '/presets/:n/summary', (c) => h.presetSummaryH(c.reply, Number(c.params.n), c.query.get('full') === '1'));
   // Full per-block decoded params for one preset (every family/param) — deep-search + browser detail.
-  on('GET', '/presets/:n/params', async (c) => {
-    try {
-      const d = await driver();
-      if (!d.presetParams) return unsupported(c.reply, 'presetDump');
-      return { blocks: await d.presetParams(Number(c.params.n)) };
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  on('GET', '/presets/:n/params', (c) => h.presetParamsH(c.reply, Number(c.params.n)));
   // Decoded modifier assignments for the CURRENT edit buffer (source → target block+param + slot).
   on('GET', '/preset/modifiers', async (c) => {
     try {
@@ -396,35 +384,15 @@ export function createRouter(deps: RuntimeDeps): {
   on('POST', '/preset/blocks/:eid/type', (c) =>
     h.typeH(c.reply, Number(c.params.eid), (c.body as { value: number }).value));
   // raw param values for an effect (for FC eid 199 / Modifier eid 3, whose params have no display range)
-  on('GET', '/preset/blocks/:eid/raw', async (c) => {
-    try {
-      const d = await driver();
-      if (!d.rawBlock) return unsupported(c.reply, 'rawBlock');
-      return await d.rawBlock(Number(c.params.eid));
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  on('GET', '/preset/blocks/:eid/raw', (c) => h.rawBlockH(c.reply, Number(c.params.eid)));
   // read specific paramIds via per-pid fn 0x01 GET (FC current state — the 0x1F bulk path doesn't cover FC)
-  on('POST', '/preset/blocks/:eid/read', async (c) => {
-    try {
-      const d = await driver();
-      if (!d.readParams) return unsupported(c.reply, 'readParams');
-      return await d.readParams(Number(c.params.eid), (c.body as { pids?: number[] } | undefined)?.pids ?? []);
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  on('POST', '/preset/blocks/:eid/read', (c) =>
+    h.readParamsH(c.reply, Number(c.params.eid), (c.body as { pids?: number[] } | undefined)?.pids));
   // FC read path: sub 0x1a range-read returning the normalized (0..1) value per pid
-  on('POST', '/preset/blocks/:eid/readrange', async (c) => {
-    try {
-      const d = await driver();
-      if (!d.readRange) return unsupported(c.reply, 'readRange');
-      return await d.readRange(Number(c.params.eid), (c.body as { pids?: number[] } | undefined)?.pids ?? []);
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  on('POST', '/preset/blocks/:eid/readrange', (c) =>
+    h.readRangeH(c.reply, Number(c.params.eid), (c.body as { pids?: number[] } | undefined)?.pids));
   // current state of a cab block (mode / per-slot bank + IR + dyna type) for the picker
-  on('GET', '/preset/blocks/:eid/cab', async (c) => {
-    const d = await driver();
-    if (!d.cabState) return unsupported(c.reply, 'cabState');
-    return d.cabState(Number(c.params.eid));
-  });
+  on('GET', '/preset/blocks/:eid/cab', (c) => h.cabStateH(c.reply, Number(c.params.eid)));
 
   // per-block meter + swipe-control values for the always-on grid level fill
   on('POST', '/preset/meters', async (c) => {
@@ -485,25 +453,8 @@ export function createRouter(deps: RuntimeDeps): {
   // Per-block monitor (meter) param table — read-only pids Axis renders meters from. {} if none.
   on('GET', '/preset/monitors', () => registry.profile.monitorParams ?? {});
   // Live per-block audio meters: reads each placed monitored block's level (normalized 0..1) + dB.
-  on('GET', '/preset/monitors/live', async (c) => {
-    const q = c.query.get('eid') ?? undefined;
-    const eid = q != null && q !== '' ? Number(q) : undefined;
-    try {
-      const d = await driver();
-      if (!d.liveMonitors) return unsupported(c.reply, 'liveMonitors');
-      return await d.liveMonitors(Number.isFinite(eid as number) ? eid : undefined);
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
-  on('GET', '/preset/looper', async (c) => {
-    const q = c.query.get('eid') ?? undefined;
-    const eid = q != null && q !== '' ? Number(q) : NaN;
-    try {
-      const d = await driver();
-      if (!d.looperTelemetry) return unsupported(c.reply, 'looperTelemetry');
-      if (!Number.isFinite(eid)) { c.reply.code(400); return { error: 'eid required' }; }
-      return await d.looperTelemetry(eid);
-    } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
-  });
+  on('GET', '/preset/monitors/live', (c) => h.liveMonitorsH(c.reply, c.query.get('eid') ?? undefined));
+  on('GET', '/preset/looper', (c) => h.looperTelemetryH(c.reply, c.query.get('eid') ?? undefined));
   on('POST', '/preset/looper/control', async (c) => {
     const { eid, action, on: onv } = (c.body ?? {}) as { eid?: number; action?: string; on?: boolean };
     try {
