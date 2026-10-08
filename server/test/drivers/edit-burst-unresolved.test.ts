@@ -28,7 +28,7 @@ import type { DeviceRegistry } from '../../src/drivers/registryCore.js';
 import type { DeviceEvent, DriverCtx } from '../../src/drivers/types.js';
 
 const MODEL = 0x11; // FM3
-const GLOBAL_EID = 1; // virtual GLOBAL effect (the non-positional family)
+const GLOBAL_EID = 1; // virtual GLOBAL effect (the pid-indexed family — see ADR-0004)
 const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // DISTORT (dense)
 const CAB_EID = effectRoster().find((e) => e.slug === 'cab')!.page; // CABINET (dense)
 const GLOBAL_STRIDE = PROFILES[MODEL]!.rangeSections['GLOBAL']!.stride; // 186

@@ -756,12 +756,14 @@ class Gen3Driver implements DeviceDriver {
         // Out-of-range is therefore PER PID, not per family: a pid whose record the body genuinely
         // does not carry (a short/torn tail) reads `null`, never a fabricated 0.
         //
-        // WRITE-SCALE (measured, filed for a follow-up — see the report; NOT changed here): the GLOBAL
-        // body also confirms writes land (setParam(eid 1, pid 7115, 70) read back 45874 = 70.0%), and
-        // that a GLOBAL param takes DISPLAY UNITS (0..100), NOT a normalized 0..1 float — writing 0.70
-        // through the continuous path set 0.7% (raw 459), and 0.40 set 0.4% (raw 262). This contradicts
-        // the "continuous SET carries a normalized float" contract, so any caller writing GLOBAL 0..1
-        // sets ~100x too small. That is a write-path decision, not this read path.
+        // WRITE UNITS ARE PER-OPCODE and are NOT a property of this read path. Measured on THIS path:
+        // the eid-1 GLOBAL body is 14,880 records indexed by pid, body[7115] tracks the panel, and raw
+        // 65534 = 100% — so `values[base + pid]` is that pid's own record (see above). The unit a write
+        // carries depends on the OPCODE the caller chose: the CONTINUOUS set takes the client's
+        // normalized 0..1; the DISCRETE set takes percent for a 0..100 param. See
+        // docs/decisions/0006-units-are-per-opcode.md. A value written without an explicit `continuous`
+        // flag is a CALLER error, not a device property — the omitted flag silently selects the other
+        // opcode's unit. No unit conversion belongs in this driver.
         //
         // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
         // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).

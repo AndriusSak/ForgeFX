@@ -4,11 +4,13 @@
 //   npx tsx scripts/restore-brightness.ts --go        # restore to 70% (display units)
 //   npx tsx scripts/restore-brightness.ts --go --pct 60
 //
-// WHY THIS EXISTS. The continuous write path is the one under change (P14: norm -> display units), so it
-// cannot be trusted to restore a value while that change is in question. The DISCRETE path is independent:
-// measured 2026-10-08, `setParam(eid 1, pid 7115, 70)` (continuous=false) set the panel to 70% and the body
-// to raw 45874. This script uses only that path, so it works no matter which way the continuous path is
-// behaving. It verifies through the fn-0x1F bulk body (an independent read), never through the GET.
+// WHY THIS EXISTS. This script restores through the DISCRETE path with display units because that is the
+// independently-proven restore: measured on the unit 2026-10-08, `setParam(eid 1, pid 7115, 70)`
+// (continuous=false) set the panel to 70% and the body to raw 45874 — a discrete write on a 0..100 param
+// takes percent, so `70` means 70% (units are per-opcode; see docs/decisions/0006-units-are-per-opcode.md).
+// It works regardless of how a caller feels about opcodes. (The earlier P14 change to the CONTINUOUS path
+// was reverted — the continuous path was never the problem.) It verifies through the fn-0x1F bulk body (an
+// independent read), never through the GET.
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
 
