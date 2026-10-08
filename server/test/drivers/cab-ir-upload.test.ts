@@ -22,7 +22,7 @@ import { pack5Septet32 } from 'forgefx-midi/gen3/axe-fx-iii';
 
 const MODEL = 0x11; // FM3
 
-export const CAB_IR_UPLOAD_CASE_COUNT = 11;
+export const CAB_IR_UPLOAD_CASE_COUNT = 13;
 
 function frame(model: number, fn: number, payload: readonly number[]): number[] {
   const body = [0xf0, 0x00, 0x01, 0x74, model, fn, ...payload];
@@ -58,6 +58,8 @@ class AckTransport implements Transport {
   readonly blobs: number[][] = [];
   paced = false;
   silent = false;
+  /** The code the unit answers the CLOSE frame with. 0x00 = accepted, 0x13 = DISCARDED (measured). */
+  closeCode = 0x00;
   #handlers = new Set<(f: number[]) => void>();
 
   async open(): Promise<void> {}
@@ -76,7 +78,8 @@ class AckTransport implements Transport {
       const end = bytes.indexOf(0xf7, i);
       if (end < 0) break;
       const fn = bytes[i + 5]!;
-      this.#emit(frame(MODEL, 0x64, [fn, 0x00, fn & 0x0f]));
+      const code = fn === 0x7c ? this.closeCode : 0x00;
+      this.#emit(frame(MODEL, 0x64, [fn, code, fn & 0x0f]));
       i = end + 1;
     }
   }
@@ -264,6 +267,27 @@ export async function runCabIrUploadTests(): Promise<void> {
     }
     assert(/invalid checksum/.test(msg), `expected a checksum refusal, got: ${msg || '(no throw)'}`);
     assert(t.blobs.length === 0, 'a refused container sends NOTHING');
+  }
+
+  // 12 — a 0x13 CLOSE answer means the unit DISCARDED the upload: every frame is acked, yet nothing landed
+  {
+    const t = new AckTransport();
+    t.closeCode = 0x13;
+    const r = await makeDriver(t).uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1 });
+    assert(t.blobs.length === 1, 'the frames still went out');
+    assert(r.acks.complete === true, 'the acks themselves are complete — that is exactly the trap');
+    assert(r.ok === false, 'a 0x13 close answer MUST NOT report ok, even with a complete ack set');
+    assert(r.discarded === true && r.closeCode === 0x13, 'the discard is named explicitly');
+    assert(/DISCARDED/.test(r.reason), `the reason must say the unit discarded it, got ${JSON.stringify(r.reason)}`);
+    assert(/NOT written/.test(r.reason), 'and that the destination was not written');
+  }
+
+  // 13 — the accepted arm: a 0x00 close answer is what makes ok true, and it says so
+  {
+    const t = new AckTransport();
+    const r = await makeDriver(t).uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1 });
+    assert(r.ok === true && r.discarded === false && r.closeCode === 0x00, 'the accepted arm reports accepted');
+    assert(/accepted the container/.test(r.reason), `the reason must name acceptance, got ${JSON.stringify(r.reason)}`);
   }
 
   // 11 — a user slot destination round-trips through the same encoding the editor used

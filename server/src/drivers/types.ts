@@ -265,14 +265,32 @@ export interface CabIrUploadOptions {
 /**
  * What an IR upload established.
  *
- * `ok` is now evidence-backed rather than "the frames were handed over": the upload LISTENS and
- * `ok === true` means the unit acknowledged the start frame, every data frame and the close with the
- * same reply shapes the editor's own upload drew. That is the strongest signal available — the editor
- * relies on exactly the same acks — but it is still NOT proof the IR was stored correctly or sounds
- * right; nothing on this firmware reads a slot's name back. Say "acknowledged", not "installed".
+ * `ok` requires BOTH halves of the measured acceptance rule:
+ *   1. every frame was acknowledged (start, all data frames, close), and
+ *   2. the close frame's answer was **code `0x00`** — the unit's signal that the container's close
+ *      value MATCHES its content.
+ * A close answer of **`0x13` means the unit DISCARDED the upload** and left the destination untouched,
+ * even though every frame was acknowledged. That is measured, in four controlled arms (2026-10-08):
+ * verbatim → `0x00` → the slot became populated; name changed → `0x13`; samples changed → `0x13`; close
+ * value mutated with the content unchanged → `0x13` — and in all three `0x13` arms an EMPTY destination
+ * slot STAYED EMPTY. Reporting `ok` from the acks alone (as an earlier revision did) told the caller
+ * "acknowledged" for an upload the device threw away.
+ *
+ * `ok` still does NOT mean the IR is correct or sounds right: nothing on this firmware reads a slot's
+ * name back, and the close frame's encoding is undecoded (it must be RECOMPUTED for any content change,
+ * which is why a rename cannot work yet). Say "accepted", not "installed".
  */
 export interface CabIrUploadResult {
   ok: boolean;
+  /**
+   * True when the unit answered the close frame with `0x13` — the container's close value does not match
+   * its content, so the upload was DISCARDED and the destination slot was not written.
+   */
+  discarded: boolean;
+  /** The close frame's reply code, or null when the unit never answered it. `0x00` = accepted. */
+  closeCode: number | null;
+  /** One line naming what the acks and the close code establish, for logs and UI. */
+  reason: string;
   /** The name as sent. */
   name: string;
   modelId: number;

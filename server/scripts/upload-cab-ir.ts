@@ -48,7 +48,7 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
-import { parseCabIrSyx, buildCabIrSyx, cabIrScratchpad, cabIrUserSlot, interpretCabIrAcks } from 'forgefx-midi/devices/gen3';
+import { parseCabIrSyx, buildCabIrSyx, cabIrScratchpad, cabIrUserSlot, interpretCabIrAcks, CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH } from 'forgefx-midi/devices/gen3';
 
 const hex = (b: readonly number[]) => b.map((x) => x.toString(16).padStart(2, '0')).join(' ');
 
@@ -226,6 +226,23 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
     log('  NOTE: do NOT read those codes through a label table — the MIDI_ERROR_* names in this codebase');
     log('  are an ASSUMED index mapping and contradict this device. Measured here: every ACCEPTED frame');
     log('  (the editor\'s own upload included) is answered with code 0x00.');
+    // The CLOSE frame's code is not decoration — it decides whether the unit KEPT the upload.
+    const closeCode = acks.codes.find((c) => c.fn === CAB_IR_FN_END)?.code ?? null;
+    if (closeCode === CAB_IR_CLOSE_MISMATCH) {
+      log('');
+      log('*** the unit DISCARDED this upload ***');
+      log('the close frame answered 0x13: the container\'s close-frame value does not match its content,');
+      log('so the unit threw the whole transfer away and left the destination UNTOUCHED.');
+      log('MEASURED in four controlled arms (2026-10-08) — verbatim -> 0x00 -> the slot became');
+      log('populated; name changed, samples zeroed, and close-value-mutated all -> 0x13, and in every');
+      log('0x13 arm an EMPTY destination slot STAYED EMPTY. Only a container byte-identical to one the');
+      log('device or FM3-Edit produced is accepted; any edit needs the close value RECOMPUTED, and its');
+      log('encoding is not decoded. Do NOT report this as a successful send.');
+    } else if (closeCode === CAB_IR_CLOSE_ACCEPTED) {
+      log('  close frame answered 0x00 — the container\'s close value matches its content (accepted).');
+    } else {
+      log(`  close frame answered ${closeCode === null ? 'NOTHING' : `0x${closeCode.toString(16)}`} — acceptance NOT established.`);
+    }
   }
 
   // Put the cab selection back. Restoring is reported honestly: the read-back is the same path that
@@ -247,7 +264,12 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
   await s.close();
 
   log('');
-  log('SENT — the unit acknowledged every frame, which is what this script establishes.');
+  const closeCodeFinal = interpretCabIrAcks(inbound, parsed.frames.filter((f) => f[5] === 0x7b).length).codes.find((c) => c.fn === CAB_IR_FN_END)?.code ?? null;
+  if (closeCodeFinal === CAB_IR_CLOSE_MISMATCH) {
+    log('DISCARDED — every frame was acknowledged and the unit still threw the transfer away. Nothing was stored.');
+  } else {
+    log('SENT — the unit acknowledged every frame and the close frame answered 0x00 (accepted).');
+  }
   log('to CONFIRM the slot, read its state back (read-only):');
   const slotArg = dest && dest.page >= 0x10 && dest.page <= 0x13 ? `--slots ${(dest.page - 0x10) * 128 + dest.index + 1}` : dest && dest.page === 0x20 ? `--slots ${512 + dest.index + 1}` : '--slots <n>';
   log(`  npx tsx scripts/probe-cab-slot-state.ts ${slotArg}`);

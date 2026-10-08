@@ -28,6 +28,7 @@ import {
   parseCabIrSyx, buildCabIrSyx, interpretCabIrAcks,
   buildCabSlotQuery, parseCabSlotState,
   CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
+  CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -1911,8 +1912,28 @@ class Gen3Driver implements DeviceDriver {
       off();
     }
     const acks = interpretCabIrAcks(inbound, expectedData);
+    // The close frame's answer is not decoration — it decides whether the unit KEPT the upload.
+    // Measured (four controlled arms, 2026-10-08): close code 0x00 = the container's close value
+    // matches its content and the upload is stored; 0x13 = mismatch, and the unit DISCARDS the whole
+    // upload leaving the destination untouched (an EMPTY destination stayed empty in every 0x13 arm).
+    // So `ok` requires both the complete ack set and a 0x00 close answer.
+    const closeCode = acks.codes.find((c) => c.fn === CAB_IR_FN_END)?.code ?? null;
+    const discarded = closeCode === CAB_IR_CLOSE_MISMATCH;
+    const reason = discarded
+      ? 'the unit DISCARDED this upload: the close frame answered 0x13, its content check failed (the ' +
+        'container\'s close value does not match the data sent). The destination slot was NOT written — ' +
+        'a destination that was empty stays empty (measured). Any change to the container (rename, ' +
+        'converted samples) needs the close value RECOMPUTED, which is not decoded yet.'
+      : acks.complete && closeCode === CAB_IR_CLOSE_ACCEPTED
+        ? 'every frame acknowledged and the close frame answered 0x00 — the unit accepted the container.'
+        : acks.complete
+          ? `every frame acknowledged but the close frame answered ${closeCode === null ? 'nothing' : `0x${closeCode.toString(16)}`} — acceptance NOT established.`
+          : `not all frames acknowledged (start=${acks.start}, data ${acks.data}/${acks.expectedData}, end=${acks.end}) — treat as failed.`;
     return {
-      ok: acks.complete,
+      ok: acks.complete && closeCode === CAB_IR_CLOSE_ACCEPTED,
+      discarded,
+      closeCode,
+      reason,
       name: opts.name ?? parsed.name,
       modelId: parsed.modelId,
       frames: parsed.frames.length,
