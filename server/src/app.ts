@@ -22,6 +22,7 @@ import cors from '@fastify/cors';
 import { existsSync, statSync, createReadStream } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import type { DeviceRegistry } from './drivers/registry.js';
+import type { CabIrUploadOptions } from './drivers/types.js';
 import * as backups from './services/backups.js';
 import * as convert from './services/convert.js';
 import type { ConverterPreset } from 'forgefx-midi/convert';
@@ -302,6 +303,36 @@ export async function buildApp(
       if (!d.loadPresetBytes) return unsupported(reply, 'loadPresetBytes');
       return await d.loadPresetBytes(new Uint8Array(buf));
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  });
+  // upload a user-cab IR .syx container to the unit (§2.5). Body: raw bytes (octet-stream) or JSON
+  // {bytes:number[]}. Query: ?name=… to rewrite the 32 name slots; ?target=N&order=msb|lsb for the
+  // UNVERIFIED retarget experiment; ?force=1 to bypass the FAIL-CLOSED gate below.
+  //
+  // The gate exists because of a measurement, not a hunch: replaying a real FM3-Edit IR export drew a
+  // 0x64 refusal on every frame on fw 13 (fn=0x7A → 0x16, fn=0x7B → 0x10 bad message length), so the
+  // container is not accepted as-is and the device's real IR-upload opcodes are still uncaptured. A
+  // request without ?force=1 is answered 400 with that reason and NOTHING is sent. Even with it,
+  // `{ok:true}` means the frames were sent — not that the unit stored them: there is no cab-name
+  // read-back on this firmware, so confirmation is the slot name on the unit.
+  app.post<{ Querystring: { name?: string; target?: string; order?: string; force?: string } }>('/cab/ir/upload', async (req, reply) => {
+    const q = req.query;
+    const body = req.body as Buffer | { bytes?: number[] } | undefined;
+    const bytes = Buffer.isBuffer(body) ? new Uint8Array(body) : Array.isArray(body?.bytes) ? Uint8Array.from(body.bytes) : null;
+    if (!bytes || !bytes.length) { reply.code(400); return { error: 'POST raw .syx bytes as application/octet-stream, or JSON {bytes:number[]}' }; }
+    try {
+      const d = await driver();
+      if (!d.uploadCabIr) return unsupported(reply, 'uploadCabIr');
+      const opts: CabIrUploadOptions = {};
+      if (q.force === '1' || q.force === 'true') opts.allowUnverified = true; // the ONLY way past the fail-closed gate
+      if (q.name != null) opts.name = q.name;
+      if (q.target != null) {
+        const target = Number(q.target);
+        if (!Number.isInteger(target) || target < 0 || target > 0x3fff) { reply.code(400); return { error: `target ${q.target} is not a 14-bit slot number` }; }
+        opts.target = target;
+        if (q.order === 'msb' || q.order === 'lsb') opts.targetOrder = q.order;
+      }
+      return await d.uploadCabIr(bytes, opts);
+    } catch (e) { reply.code(400); return { error: (e as Error).message }; }
   });
   // version history (all, or for one slot via ?location=)
   app.get<{ Querystring: { location?: string } }>('/versions', (req) => ({ versions: store.listPresetVersions(req.query.location != null ? Number(req.query.location) : undefined) }));

@@ -15,7 +15,7 @@
 //     → the unconfigured telemetryStatus shape and the 503 upload error.
 // NO fastify/node:/transport imports here or in anything this pulls in — must bundle for the browser.
 import type { DeviceRegistry } from '../drivers/registryCore.js';
-import type { DeviceEvent } from '../drivers/types.js';
+import type { DeviceEvent, CabIrUploadOptions } from '../drivers/types.js';
 import * as backups from '../services/backups.js';
 import * as convert from '../services/convert.js';
 import type { ConverterPreset } from 'forgefx-midi/convert';
@@ -292,6 +292,37 @@ export function createRouter(deps: RuntimeDeps): {
       if (!d.loadPresetBytes) return unsupported(c.reply, 'loadPresetBytes');
       return await d.loadPresetBytes(c.raw);
     } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
+  }, { octet: true });
+
+  // upload a user-cab IR .syx container to the unit (§2.5). Mirrors app.ts: raw bytes or JSON
+  // {bytes}; ?name= rewrites the 32 name slots, ?target=N&order=msb|lsb is the UNVERIFIED retarget
+  // experiment, ?force=1 bypasses the FAIL-CLOSED gate. The gate is a measurement, not a hunch:
+  // replaying a real FM3-Edit IR export drew a 0x64 on every frame (fn=0x7A → 0x16, fn=0x7B → 0x10 bad
+  // message length) on fw 13, so without ?force=1 the request is 400 and NOTHING is sent. Even with it,
+  // `{ok:true}` = frames sent, NOT stored — no cab-name read-back exists on this firmware.
+  on('POST', '/cab/ir/upload', async (c) => {
+    const body = (c.body ?? {}) as { bytes?: number[] };
+    const bytes = c.raw && c.raw.length ? c.raw : Array.isArray(body.bytes) ? Uint8Array.from(body.bytes) : null;
+    if (!bytes || !bytes.length) { c.reply.code(400); return { error: 'POST raw .syx bytes as application/octet-stream, or JSON {bytes:number[]}' }; }
+    try {
+      const d = await driver();
+      if (!d.uploadCabIr) return unsupported(c.reply, 'uploadCabIr');
+      const opts: CabIrUploadOptions = {};
+      const q = c.query;
+      const force = q.get('force');
+      if (force === '1' || force === 'true') opts.allowUnverified = true; // the ONLY way past the gate
+      const name = q.get('name');
+      const targetRaw = q.get('target');
+      const order = q.get('order');
+      if (name != null) opts.name = name;
+      if (targetRaw != null) {
+        const target = Number(targetRaw);
+        if (!Number.isInteger(target) || target < 0 || target > 0x3fff) { c.reply.code(400); return { error: `target ${targetRaw} is not a 14-bit slot number` }; }
+        opts.target = target;
+        if (order === 'msb' || order === 'lsb') opts.targetOrder = order;
+      }
+      return await d.uploadCabIr(bytes, opts);
+    } catch (e) { c.reply.code(400); return { error: (e as Error).message }; }
   }, { octet: true });
 
   // ── cross-device preset conversion (OFFLINE decode; the Convert dialog's endpoints) ──

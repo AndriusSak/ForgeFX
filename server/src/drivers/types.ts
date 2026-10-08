@@ -214,6 +214,52 @@ export interface DriverCtx {
  * one (e.g. the AM4 has no grid edit / gen-3 telemetry / FC) simply doesn't implement it, and the
  * route answers `501 {error:'unsupported', capability}`.
  */
+/** Options for `uploadCabIr`. Every field is optional; the default is a VERBATIM replay. */
+export interface CabIrUploadOptions {
+  /** Rewrite the 32 name slots before sending (flag bits preserved). */
+  name?: string;
+  /**
+   * ⚠️ UNVERIFIED — patch the 0x7A start frame's 14-bit slot field. The single measured specimen
+   * carries `7F 7F` (the "no explicit target" sentinel), which cannot distinguish the septet orders,
+   * so this is an experiment to run on hardware, not a known-good path. Omit it and the container is
+   * replayed exactly as it came off disk — which is what Fractal's own tools send.
+   */
+  target?: number;
+  /** Septet order for `target`; defaults to `'msb'`, matching the sibling preset-dump header. */
+  targetOrder?: 'msb' | 'lsb';
+  /**
+   * Opt IN to an UNVERIFIED wire path. Required, because the measured result is a refusal: replaying an
+   * FM3-Edit IR export verbatim drew a `0x64` on every frame (`0x7A` → 0x16, `0x7B` → **0x10 bad message
+   * length**), so the container is not accepted as-is and the real IR-upload opcodes are still
+   * uncaptured. Without this flag the driver refuses with that reason and sends nothing — a caller
+   * cannot push refused frames at a unit by accident. Set it only to run the next measurement round.
+   */
+  allowUnverified?: boolean;
+}
+
+/**
+ * What an IR upload ACTUALLY established. Read this before telling anyone the IR is on the unit.
+ *
+ * - `ok` means the frames were handed to the transport — nothing more. The device's answer is not
+ *   observed (the upload path is a paced send, like a preset dump); there is no cab-name read-back
+ *   oracle on this firmware (`fn=0x12` is refused), so confirmation is a HUMAN observable: the slot's
+ *   name on the front panel / in the editor.
+ * - `renamed` and `retargeted` say what the caller changed. A rename leaves the 0x7C value verbatim —
+ *   whether that value covers the name is unverified.
+ */
+export interface CabIrUploadResult {
+  ok: boolean;
+  /** The name as sent. */
+  name: string;
+  modelId: number;
+  /** Frame count and total byte length of the stream sent (for the dry-run preview too). */
+  frames: number;
+  bytes: number;
+  sampleSlots: number;
+  renamed: boolean;
+  retargeted?: { target: number; order: 'msb' | 'lsb' };
+}
+
 export interface DeviceDriver {
   /** SysEx model byte of the device this driver drives (0x10/0x11/0x12/0x15). */
   readonly modelId: number;
@@ -297,6 +343,10 @@ export interface DeviceDriver {
   /** Store the edit buffer to slot n. `location`/`code` are ADDITIVE (AM4). */
   store?(n: number): Promise<{ ok: boolean; location?: number; code?: string }>;
   loadPresetBytes?(syx: Uint8Array): Promise<{ ok: boolean }>;
+  /** Upload a user-cab IR `.syx` container to the device (§2.5). Gen-3 only (the container geometry is
+   *  measured on an FM3-Edit export). The frames go out as they came in unless a rename/retarget is
+   *  asked for; see `CabIrUploadResult` for what the caller may and may not conclude. */
+  uploadCabIr?(syx: Uint8Array, opts?: CabIrUploadOptions): Promise<CabIrUploadResult>;
   setSceneName?(index: number, name: string): Promise<{ ok: boolean }>;
   setPresetName?(name: string): Promise<{ ok: boolean }>;
 

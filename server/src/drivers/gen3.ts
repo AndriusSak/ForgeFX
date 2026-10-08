@@ -25,6 +25,7 @@ import {
   readBlockParamsForModel, modelsFromBlocks,
   effectRoster, blockRefForEid, slugForEffectId, blockInstances,
   retargetPresetDumpToEditBuffer,
+  parseCabIrSyx, buildCabIrSyx, retargetCabIrStart,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -32,7 +33,8 @@ import { ENV } from './env.js';
 import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
   PresetGridDTO, PresetBlockDTO, PresetSummary, NamedParam, EnumParam, MeterVal,
-  FcSwitchState, FcReadState, PresetModifier
+  FcSwitchState, FcReadState, PresetModifier,
+  CabIrUploadOptions, CabIrUploadResult
 } from './types.js';
 
 // slug → { name, page=base effect id } from the authoritative codec base table (replaces the old
@@ -1748,6 +1750,79 @@ class Gen3Driver implements DeviceDriver {
     else await dev.sendQueued(bytes);
     this.#gridCache = null; // edit buffer changed → next grid/blocks read reflects it
     return { ok: true };
+  }
+
+  /**
+   * Upload a user-cab IR `.syx` container to the unit (§2.5 user-cab IR management).
+   *
+   * WHAT IS ESTABLISHED: the container geometry (1×0x7A + 8×0x7B + 1×0x7C, 256 five-byte chunks per
+   * data frame, 32-char name in the first 8 chunks, 2040 sample slots) was MEASURED on a real
+   * FM3-Edit export, and the file IS the wire stream Fractal's own tools send — so the default path
+   * REPLAYS THE BYTES VERBATIM and nothing is re-derived. The sample payload is deliberately not
+   * decoded and the 0x7C value is never recomputed (see `forgefx-midi/devices/gen3/cabIrSyx.ts`).
+   *
+   * WHAT IS NOT ESTABLISHED — and the load test settled it against us: the FM3 **refuses** this replay.
+   * Measured 2026-10-08 on fw 13 (frames verbatim, paced, with the inbound stream listened to): every
+   * one of the 10 frames drew a `0x64` — `fn=0x7A` → result 0x16, all eight `fn=0x7B` → result **0x10
+   * (MIDI_ERROR_BAD_MSG_LENGTH)**, `fn=0x7C` likewise. So the export container is not accepted as-is,
+   * the gen-2 `0x7A/0x7B/0x7C` IR-download family is not what this device listens for, and the real
+   * opcodes remain uncaptured. **This method therefore FAILS CLOSED**: without `allowUnverified` it
+   * throws with that reason and sends nothing, so no caller can push refused frames at a unit by
+   * accident. `allowUnverified` exists only to run the next measurement round.
+   *
+   * **`{ok:true}` means the frames were handed to a paced send — it is NOT a landing.** There is also
+   * no cab-name read-back on this firmware (`fn=0x12` is refused), so even a successful send would be
+   * confirmed only by a human looking at the slot name on the unit.
+   *
+   * The device's own documented workflow targets the slot selected in the Cab block, so pick the
+   * destination (e.g. Bank `SCRATCHPAD`, IR 1) BEFORE sending; a container whose 0x7A carries the
+   * `7F 7F` sentinel does not name a destination itself.
+   */
+  async uploadCabIr(
+    syx: Uint8Array,
+    opts: CabIrUploadOptions = {},
+  ): Promise<CabIrUploadResult> {
+    if (opts.allowUnverified !== true) {
+      throw new Error(
+        'uploadCabIr: refusing to send — this wire path is measured-REFUSED, not merely unverified. ' +
+        'Replaying an FM3-Edit IR export verbatim on fw 13 drew a 0x64 for every frame (fn=0x7A → result 0x16, ' +
+        'fn=0x7B → result 0x10 bad message length, fn=0x7C likewise), so the container is not accepted as-is and ' +
+        'the device\'s real IR-upload opcodes are still uncaptured. Closing it needs a capture of FM3-Edit / ' +
+        'Fractal-Bot actually loading an IR onto the unit. Pass { allowUnverified: true } only to run that ' +
+        'measurement round.',
+      );
+    }
+    const dev = await this.#conn();
+    const parsed = parseCabIrSyx(syx); // strict: throws with a precise reason on anything unexpected
+    if (parsed.modelId !== this.#prof.model) {
+      throw new Error(
+        `uploadCabIr: the container carries model byte 0x${parsed.modelId.toString(16)} but this device is ` +
+        `0x${this.#prof.model.toString(16)} — an IR container is device-family specific and a wrong-model ` +
+        'replay is exactly the plausible-but-wrong failure this stack refuses to make.',
+      );
+    }
+    let bytes = buildCabIrSyx(parsed, { name: opts.name });
+    let retargeted: { target: number; order: 'msb' | 'lsb' } | undefined;
+    if (opts.target != null) {
+      const order = opts.targetOrder ?? 'msb';
+      if (!retargetCabIrStart(bytes, opts.target, order)) {
+        throw new Error('uploadCabIr: no 0x7A start frame found to retarget');
+      }
+      retargeted = { target: opts.target, order };
+    }
+    // paced: the FM3's CDC drops a flooded write (same reason loadPresetBytes paces a preset dump)
+    if (dev.sendPaced) await dev.sendPaced(bytes);
+    else await dev.sendQueued(bytes);
+    return {
+      ok: true,
+      name: opts.name ?? parsed.name,
+      modelId: parsed.modelId,
+      frames: parsed.frames.length,
+      bytes: bytes.length,
+      sampleSlots: parsed.sampleSlots,
+      renamed: opts.name !== undefined,
+      ...(retargeted ? { retargeted } : {}),
+    };
   }
 }
 

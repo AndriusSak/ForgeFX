@@ -37,6 +37,9 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['POST', '/preset/name'],
   ['POST', '/preset/load'],
   ['POST', '/preset/restore'],
+  // user-cab IR upload writes to the unit's cab storage (§2.5) — a device write, so a read-only
+  // server must refuse it rather than push frames at the unit.
+  ['POST', '/cab/ir/upload'],
   ['POST', '/scene'],
   ['POST', '/scene/name'],
   ['POST', '/tempo'],
