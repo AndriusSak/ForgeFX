@@ -77,10 +77,7 @@ async function main(): Promise<number> {
     // for GLOBAL (measured 2026-10-08: setParam(1,7115,70) → 70%, 0.70 → 0.7%), so 40% is sent as 0.40.
     const sendNorm = toPct / 100;
     console.log(`  sending    : norm ${sendNorm.toFixed(4)}  (expected display ${toPct}%)`);
-    // P14: the conversion lives in the CONTINUOUS branch. Passing the flag explicitly — an earlier version of
-    // this script omitted it, which silently took the DISCRETE path (value sent as display units) and produced
-    // a false "0.40 -> 0.4%" reading that looked like a broken fix but was a broken instrument.
-    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, sendNorm, true);
+    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, sendNorm);
     await new Promise((r) => setTimeout(r, 400));
     const after = (await readRawBody(s))[BRIGHTNESS_PID];
     console.log(`  after write : raw ${after}  (${pct(after)})  <- read from the BODY, not the GET`);
@@ -99,8 +96,8 @@ async function main(): Promise<number> {
       console.log('  original raw was unreadable — NOT restoring anything (nothing to restore to). Fix by hand if needed.');
       return 2;
     }
-    // Restore in NORM too (before is the raw 16-bit body value; norm = raw/65534). Continuous, like any caller.
-    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, before / RAW_MAX, true);
+    // Restore in NORM too (before is the raw 16-bit body value; norm = raw/65534; the driver converts).
+    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, before / RAW_MAX);
     await new Promise((r) => setTimeout(r, 400));
     const restored = (await readRawBody(s))[BRIGHTNESS_PID];
     console.log(`  after restore: raw ${restored}  (${pct(restored)})   original was ${before} (${pct(before)})`);
