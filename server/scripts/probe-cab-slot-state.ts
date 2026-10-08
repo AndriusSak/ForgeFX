@@ -126,7 +126,8 @@ export async function main(argv: string[]): Promise<number> {
     const empty = rows.filter((r) => r.state === 'empty').length;
     const silent = rows.filter((r) => r.state === 'SILENT').length;
     console.log(`\nsummary: ${populated} populated · ${empty} empty · ${silent} silent`);
-    console.log('NOTE: "populated" is a measured flag byte, not a name. The varying region is content-derived');
+    console.log('NOTE: "populated" is a measured flag byte, not a name. The varying region is NAME-derived (measured: the
+      same samples under different names differ, and the same name under different samples matches)');
     console.log('      but its encoding is NOT decoded — never report a slot as holding a particular IR.');
     return 0;
   } finally {

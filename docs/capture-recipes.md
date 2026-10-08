@@ -20,17 +20,41 @@ a slot-data read?* Probing for one (`fn=0x7D/0x7E/0x7F/0x79`, and the `fn=0x01` 
 found none, which is very likely deliberate: extractable user-IR data is exactly what protects commercial IR
 vendors. If the editor CAN read a slot's data, this capture shows the opcode and the finding is corrected.
 
-**Do this FIRST — it may make the whole capture unnecessary (2 minutes):** the editor must be asked about a
-slot it has never uploaded itself. Make one: with **FM3-Edit closed**, have the stack write a cab to an empty
-user slot (upload any IR to, say, `U0030`, or rename an existing one). Then open FM3-Edit and look at the name
-it shows for that slot.
+**THE 2-MINUTE QUESTION IS ANSWERED (2026-10-08): the editor DOES read names from the unit.**
 
-- If FM3-Edit shows the name the stack wrote, the editor is getting it **from the unit** → the name IS on the
-  wire, and R1's capture tells us where.
-- If FM3-Edit shows nothing usable for that cab (or a stale/default name), the editor is displaying **its own
-  record** of what it uploaded — which is the current answer in §2.5c, and R1 is then only about REORDER.
-- Note that all the test slots the stack wrote have since been erased, so this needs a fresh write — do not
-  look at `U0021`, it is EMPTY again.
+The stack wrote a silent container named `LYKOS-NAMETEST` to `U0030` over the wire; FM3-Edit had never seen
+the file; it displayed `LYKOS-NAMETEST`. So **a user-cab name is readable over the wire** — the path is simply
+not one this stack has found. It is NOT the `0x4B` region: with two known plaintexts that region shows no
+repeated values for a name with repeated letters, i.e. it is a hash-like fingerprint, not an encoding.
+
+**A capture of the cab page showing the name was taken and it does NOT contain the name** (2026-10-08, checked
+in 8 encodings with a validated tool — see below). `U0030` still holds `LYKOS-NAMETEST`, the editor displayed
+it, and no frame in that capture carries it in ASCII, charset-index, 16-bit, high-bit or 5-septet-packed form.
+**So the read happens OUTSIDE that window — it must be at CONNECT.**
+
+**What R1 needs: capture the CONNECT, not the cab page.**
+
+1. **Close FM3-Edit completely.**
+2. Start the capture.
+3. **Launch FM3-Edit** and let it connect to the unit.
+4. Open the cab manager and let the USER bank fill in — slot 30's name is the one to look for.
+5. Stop the capture.
+
+At connect the editor must read everything it needs to paint that page, so the name read has to be in the
+window. If it still is not, the answer is a different one and worth knowing: the editor keeps a **local
+database** and the name for a stack-written cab comes from somewhere other than this unit — which would itself
+be a finding, since the editor had never seen that file.
+
+**Two tools for the fixture, both validated by a POSITIVE CONTROL before any negative is believed:**
+
+- `npx tsx scripts/analyze-cab-capture.ts <cap>` — unmapped function bytes and sub-actions, frames carrying
+  readable text. It immediately surfaced **`fn=0x01 sub=0x00`, `0x20`, `0x56` as previously unseen**, plus a
+  **590-byte DUMP reply on `sub=0x2e`** (12 distinct payloads over 11 request/reply pairs) — all four still
+  unmapped and worth decoding: a dump that size is a table.
+- `npx tsx scripts/hunt-cab-name.ts <cap> [container.syx]` and `hunt-charset.ts <cap> TEXT` — hunt the name in
+  8 encodings and name the carrier frame. **Always run the control first**: hunt for a string you know is in
+  the capture (`HUNT_NAME="Jul 16 2026"` finds the firmware build date in the `fn=0x08` frame). A tool that
+  cannot find a known string cannot be trusted to report an absence.
 
 That distinction is why the refresh capture matters here: it contains **only `fn=0x01 sub=0x4B`** (1056
 queries for 528 slots) and no other read at all, so whatever the editor displays for the cab list it gets
