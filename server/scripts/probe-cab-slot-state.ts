@@ -24,6 +24,7 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
+import { decodeCabSlotName } from 'forgefx-midi/devices/gen3';
 import { fractalChecksum } from 'forgefx-midi/shared';
 import { cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
 
@@ -120,15 +121,20 @@ export async function main(argv: string[]): Promise<number> {
     console.log('\nslot   state        flag  payload (52B)');
     for (const r of rows) {
       const flag = r.payload ? `0x${r.payload[PAGE_EMPTY_FLAG]!.toString(16).padStart(2, '0')}` : '  - ';
-      console.log(`${r.label.padEnd(6)} ${r.state.padEnd(12)} ${flag}   ${r.payload ? hex(r.payload) : ''}`);
+      // The NAME is decoded from the reply (measured 2026-10-08) — show it, and only trust it for a
+      // POPULATED slot: an empty slot's field holds the device's literal "<EMPTY>" plus stale bytes.
+      const decoded = r.payload ? decodeCabSlotName(r.payload) : undefined;
+      const name = decoded === undefined ? '' : r.state === 'populated' ? `  name "${decoded}"` : `  name field ${JSON.stringify(decoded)} (not a name — slot is ${r.state})`;
+      console.log(`${r.label.padEnd(6)} ${r.state.padEnd(12)} ${flag}   ${r.payload ? hex(r.payload) : ''}${name}`);
     }
     const populated = rows.filter((r) => r.state === 'populated').length;
     const empty = rows.filter((r) => r.state === 'empty').length;
     const silent = rows.filter((r) => r.state === 'SILENT').length;
     console.log(`\nsummary: ${populated} populated · ${empty} empty · ${silent} silent`);
-    console.log('NOTE: "populated" is a measured flag byte, not a name. The varying region is NAME-derived (measured: the
-      same samples under different names differ, and the same name under different samples matches)');
-    console.log('      but its encoding is NOT decoded — never report a slot as holding a particular IR.');
+    console.log('NOTE: "populated" is a measured flag byte. The name shown above IS decoded from the reply (the field');
+    console.log('      carries the 32-char name re-packed as 8-bit chars, MSB-first, into 7-bit septets, NUL-terminated).');
+    console.log('      Only a POPULATED slot has a meaningful name: an empty slot holds the device literal "<EMPTY>" plus');
+    console.log('      stale bytes, so an empty slot is never reported as holding a particular IR.');
     return 0;
   } finally {
     await session.close();
