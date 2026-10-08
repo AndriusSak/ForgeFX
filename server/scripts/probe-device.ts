@@ -10,23 +10,26 @@
 //       whether the P2.3 decode is live or latent.
 //   Q4  Does a COMPLETE block bulk read ever deliver MORE values than the 0x74 head advertises
 //       (padding)? A fixed torn-read guard assumes values.length >= itemCount means complete.
-//   Q5  How does the FM3 answer a write to an UNKNOWN effect id — a clean refusal (0x64), a
-//       non-refusal reply, or NOTHING at all? The discrete-write confirm window is 250 ms, inherited
-//       from the writer path and never measured; Q5 must never claim a rejection latency it did not
-//       measure. (Observed on real hardware: an unknown eid draws no reply — the FM3 silently
-//       ignores it rather than refusing it.)
+//   Q5  How long does a REFUSED write take to be refused — and does the 250 ms write-confirm window
+//       (inherited from the writer path, never measured) cover it? The question used to be framed as a
+//       write to an UNKNOWN effect id, and that framing was WRONG: the FM3 silently IGNORES an unknown
+//       eid, so it measures no latency at all — silence is not a rejection latency, and the absence of a
+//       refusal is not acceptance. Q5 therefore has two arms, and the second is the one that answers the
+//       question: ARM 1 the bogus eid (kept — "the FM3 ignores an unknown eid" is a measured fact), and
+//       ARM 2 a REAL param written with an OUT-OF-RANGE value, which the device must refuse. Q5 never
+//       claims a latency it did not measure.
 //
 // SAFETY. Default is READ-ONLY. Q3 and Q4 are pure reads. Q1, Q2 and Q5 need a WRITE; all three are
 // behind --writes. The mutating probes (Q1, Q2) capture the original value, verify the write, then
 // RESTORE the original value and verify the restore, printing loudly what they changed. If a restore
 // cannot be verified they print a FAILED-RESTORE block naming the param and its original value so a
-// human can fix it by hand. Q5 uses a deliberately INVALID write (a bogus effect id the device should
-// refuse) so it changes no real setting; it is still behind --writes.
+// human can fix it by hand. Q5's ARM 2 writes a REAL setting (out of range on purpose) and is held to
+// the same contract: read, write, read back, restore, re-read. Its ARM 1 is the harmless bogus eid.
 //
 // Each probe prints the RAW observation AND a verdict (`matches the expectation` / `does NOT match` /
 // `cannot determine`, plus Q5's distinct `silent (no reply)`) — never just a conclusion. Q5's
-// observation is SINGLE-SOURCED: it prints the frames actually seen and the elapsed time to THOSE
-// frames, and reports a latency only when a frame — never the poll timeout — was measured.
+// observation is SINGLE-SOURCED: it reports both arms from the frames actually seen and the elapsed
+// time to THOSE frames, and reports a latency only when a frame — never the poll timeout — was measured.
 //
 // EXIT CODES
 //   0  every ELIGIBLE probe (a probe that the current mode could run) produced a definite verdict.
@@ -51,6 +54,7 @@ import { pathToFileURL } from 'node:url';
 import { createGen3Driver } from '../src/drivers/gen3.js';
 import { cadenceFor } from '../src/drivers/telemetryProfiles.js';
 import { PROFILES, SLUG_FAMILY } from '../src/devices.js';
+import { isFirmwareFamilyFn, frameFn } from 'forgefx-midi/devices/gen3';
 import { resolveConn, openConn } from '../src/transport/connection.js';
 import type { Transport, Conn } from '../src/transport/types.js';
 import type { DeviceDriver } from '../src/drivers/types.js';
@@ -74,7 +78,7 @@ export type ProbeStatus = 'determinate' | 'indeterminate' | 'skipped';
 
 /** Q5: how the device answered a write to an UNKNOWN effect id — the three mutually-exclusive wire
  *  outcomes. `refused` = a 0x64 arrived; `accepted` = a (non-0x64) reply arrived; `silent` = nothing. */
-export type RejectOutcome = 'refused' | 'accepted' | 'silent';
+export type RejectOutcome = 'refused' | 'not-refused' | 'silent';
 
 /** --dry-run only: what a mutating probe WOULD write and restore. Nothing is written in dry-run. */
 export interface WritePlan {
@@ -448,57 +452,179 @@ async function probePadding(s: ProbeSession): Promise<ProbeResult> {
 }
 
 /**
- * Q5 — how the FM3 answers a write to an UNKNOWN effect id, with a deliberately invalid write. WRITE.
- * Three mutually-exclusive outcomes, single-sourced from the frames actually seen:
+ * Q5 — how long a REFUSED write takes to come back, with two arms (see the header). WRITE.
+ *
+ * ARM 1 (bogus eid) — three mutually-exclusive outcomes, single-sourced from the frames actually seen:
  *   refused  — a 0x64 arrived → latency measured to THAT frame;
  *   accepted — a non-0x64 reply arrived → the write was NOT refused; elapsed to the reply;
  *   silent   — nothing arrived → the FM3 ignored the unknown eid; NO latency is reported (a timeout is
- *              not a latency). This is the observed real-hardware behaviour.
+ *              not a latency). This is the measured real-hardware behaviour, and it is WHY arm 2 exists.
+ *
+ * ARM 2 (a real param, an out-of-range value) — the arm that can actually provoke a refusal. Same three
+ * outcomes, and here `refused` is the answer the 250 ms window depends on. If the device CLAMPS the
+ * value instead, the read-back proves the setting changed and the original is restored and re-verified.
+ *
+ * `outcome`/`latencyMs` report the arm that produced A FRAME, preferring arm 2 (the refusal-provoking
+ * one) — never a poll timeout dressed up as a device latency. Both arms are always in the observation.
  */
 async function probeRejectLatency(s: ProbeSession, log: (l: string) => void, dryRun: boolean): Promise<ProbeResult> {
   const TIMEOUT_MS = 2000;
+  /** A value far outside any three-option enum: the write must be refused, not silently clamped. */
+  const OUT_OF_RANGE = 900;
+  const cabEid = eidForSlug('cab');
+  const cabPid = paramId(s.model, 'CABINET', 'CABINET_MUTE2');
+  const arm2Available = cabEid !== undefined && cabPid !== undefined && s.driver.blockParams !== undefined && s.driver.setParam !== undefined;
+  const arm2Name = arm2Available ? `CABINET_MUTE2 (eid ${cabEid}, pid ${cabPid})` : 'CABINET_MUTE2 (absent from this profile)';
   const base: Omit<ProbeResult, 'status' | 'verdict' | 'observation' | 'restores' | 'restoreFailures'> = {
     id: 'Q5',
-    question: 'A write to an unknown effect id is refused with a 0x64 rejection (not accepted, not silently ignored)',
+    question: 'A write the FM3 REFUSES is answered with a 0x64, and the rejection arrives inside the 250 ms write-confirm window',
     kind: 'write',
-    humanCheck: 'Nothing on the unit should change (the bogus eid touches no real setting) — confirm no setting changed.'
+    humanCheck: 'Cab 2 Mute/Solo should be back at its original state — check the Cab 2 mute/solo LED on the unit.'
   };
-  // A write to a bogus effect id — the device must refuse (or ignore) it, so nothing on the unit changes
-  // and there is nothing to restore. resultCode 0x05 = invalid effect id.
+  const restores: RestoreRecord[] = [];
+  const restoreFailures: { param: string; original: string }[] = [];
+  const restoreUnproven: { param: string; original: string; readPath: string; note: string }[] = [];
+  // ARM 1: a write to a bogus effect id — nothing on the unit changes, so there is nothing to restore.
+  // resultCode 0x05 = invalid effect id.
   const BOGUS_EID = 0x3ffe;
   const frame = s.codec.buildSetParameter(BOGUS_EID, 0, 0);
 
   if (dryRun) {
-    const plan: WritePlan = { id: 'Q5', param: `unknown effect id (eid ${BOGUS_EID}, pid 0)`, eid: BOGUS_EID, pid: 0, original: '(none — a refused write changes nothing)', wouldWrite: `the set-parameter frame ${hex(frame)}`, wouldRestore: '(none — a refused write changes nothing)' };
-    log(`  [Q5] DRY-RUN  WOULD send a deliberately invalid write to unknown eid ${BOGUS_EID} (tx ${hex(frame)}); nothing to restore — nothing written.`);
-    return { ...base, status: 'indeterminate', verdict: 'cannot determine', observation: `dry-run: would send a deliberately invalid write to unknown eid ${BOGUS_EID} (${hex(frame)}); it changes nothing and there is nothing to restore. Nothing was written.`, plan, restores: [], restoreFailures: [] };
+    const plan: WritePlan = { id: 'Q5', param: `unknown effect id (eid ${BOGUS_EID}, pid 0); then ${arm2Name} ← ${OUT_OF_RANGE} (restored)`, eid: BOGUS_EID, pid: 0, original: '(none for arm 1 — a refused write changes nothing)', wouldWrite: `arm 1 ${hex(frame)}; arm 2 an out-of-range set-parameter frame`, wouldRestore: `arm 2: the original ${arm2Name} value` };
+    log(`  [Q5] DRY-RUN  WOULD send arm 1 (bogus eid ${BOGUS_EID}, tx ${hex(frame)}) and arm 2 (${arm2Name} ← ${OUT_OF_RANGE}, which would be verified and restored); nothing written.`);
+    return { ...base, status: 'indeterminate', verdict: 'cannot determine', observation: `dry-run: would send arm 1 (bogus eid ${BOGUS_EID}, ${hex(frame)} — changes nothing) and arm 2 (${arm2Name} ← ${OUT_OF_RANGE}, verified by read-back and restored). Nothing was written.`, plan, restores, restoreFailures, restoreUnproven };
   }
 
-  log(`  [Q5] INVALID WRITE  eid ${BOGUS_EID} (bogus; changes nothing, nothing to restore)  tx ${hex(frame)}`);
-  const t0 = Date.now();
+  type ArmOutcome = 'refused' | 'not-refused' | 'silent';
+  type Arm = { outcome: ArmOutcome; latencyMs?: number; text: string };
+  /**
+   * Frame ARRIVAL timestamps, measured by the probe itself. `request()` resolves on a QUIET GAP and the
+   * transport does not timestamp frames, so the time it returns is when the POLL GAVE UP — not when the
+   * device answered. A reply that arrived in 5 ms would otherwise be reported as "arrived by 250 ms";
+   * that is the one number Q5 exists to get right, so it is measured rather than inferred.
+   */
+  let sentAt = 0;
+  let arrivals: number[] = [];
+  const offArrivals = s.transport.onFrame?.((_f) => { if (sentAt) arrivals.push(Date.now() - sentAt); });
+  const ARRIVAL_NOTE = 'arrival measured by the probe (onFrame); the transport resolves on a quiet gap and does not timestamp frames';
+  /** Describe one arm from the frames actually seen. A latency is attached ONLY to an arrival that was
+   *  measured — a poll timeout is never dressed up as a device latency. */
+  const armFrom = (label: string, fset: number[][], resolvedMs: number, arrivalMs: number | undefined, timeoutMs: number): Arm => {
+    const at = arrivalMs === undefined ? undefined : `the frame arrived ${arrivalMs} ms after the write`;
+    const rej = fset.find((f) => f[5] === 0x64);
+    if (rej) {
+      const code = rej[7]; // the 0x64 body is [echoedFn, resultCode] (write-protocol.md) → code is byte 7.
+      const codeText = code !== undefined ? describeMultipurposeResultCode(code) : 'unknown result code';
+      const when = at !== undefined ? `${at} (request resolved at ${resolvedMs} ms; ${ARRIVAL_NOTE})` : `no arrival was timed; the request resolved at ${resolvedMs} ms, which is a poll resolution, not a device latency`;
+      return { outcome: 'refused', latencyMs: arrivalMs, text: `${label} REFUSED — ${when} — ${hex(rej)} (resultCode 0x${(code ?? 0).toString(16).padStart(2, '0')}: ${codeText})` };
+    }
+    if (fset.length === 0) return { outcome: 'silent', text: `${label} SILENT: no frame within ${timeoutMs} ms — nothing to time (a poll timeout is not a device latency)` };
+    const when = at !== undefined ? `${at}` : 'its arrival was NOT timed';
+    // NOT "accepted": no 0x64 means only that the write was not REFUSED. Nothing in the reply says the
+    // value was stored — on this device a write to an unknown eid is answered with a frame that is not an
+    // echo of what was sent, and an out-of-range value can be silently replaced (see arm 2's read-back).
+    return { outcome: 'not-refused', latencyMs: arrivalMs, text: `${label} NOT REFUSED: no 0x64; ${fset.length} reply frame(s), ${when} (request resolved at ${resolvedMs} ms) — ${fset.map((f) => hex(f)).join(' | ')} (a non-refusal reply is NOT evidence the value was stored)` };
+  };
+  log(`  [Q5] ARM 1 INVALID WRITE  eid ${BOGUS_EID} (bogus; changes nothing, nothing to restore)  tx ${hex(frame)}`);
+  sentAt = Date.now();
+  arrivals = [];
+  const t0 = sentAt;
   const frames = await s.transport.request(frame, { timeoutMs: TIMEOUT_MS, quietMs: 250, match: (fs) => fs.some((f) => f[5] === 0x64) });
   const elapsed = Date.now() - t0;
-  const reject = frames.find((f) => f[5] === 0x64);
+  const arrival1 = arrivals.length ? Math.min(...arrivals) : undefined;
+  sentAt = 0;
 
-  // 1) REFUSED — a 0x64 arrived. The transport resolves the instant a matching frame arrives, so
-  //    `elapsed` IS the time to the 0x64 itself (not the poll timeout).
-  if (reject) {
-    const code = reject[7]; // the 0x64 body is [echoedFn, resultCode] (write-protocol.md) → code is byte 7.
-    const codeText = code !== undefined ? describeMultipurposeResultCode(code) : 'unknown result code';
-    const observation = `refused: a 0x64 arrived after ${elapsed} ms — ${hex(reject)} (resultCode 0x${(code ?? 0).toString(16).padStart(2, '0')}: ${codeText})`;
-    return { ...base, status: 'determinate', verdict: 'matches the expectation', outcome: 'refused', latencyMs: elapsed, observation, restores: [], restoreFailures: [] };
+  const arm1 = armFrom(`arm 1 (unknown eid ${BOGUS_EID})`, frames, elapsed, arrival1, TIMEOUT_MS);
+
+  // ── ARM 2 — a REAL param written OUT OF RANGE. This is the arm that must provoke a refusal, and the
+  //    reason Q5 was re-framed: an unknown eid measures nothing (arm 1 came back silent on hardware). ──
+  let arm2: Arm | undefined;
+  let arm2Note: string;
+  /** Whether arm 2's read-back PROVED the setting changed. This is a second, independent signal about the
+   *  write's fate: a device that clamps an out-of-range value can be entirely silent on the wire, so
+   *  silence alone would read as "ignored" when the write in fact LANDED. */
+  let arm2Effective = false;
+  if (!arm2Available) {
+    arm2Note = 'arm 2 NOT RUN: this profile has no CABINET_MUTE2 param (or no block-params read)';
+  } else {
+    const eid2 = cabEid!;
+    const pid2 = cabPid!;
+    const readMute = async (): Promise<number | undefined> => {
+      try { return (await s.driver.blockParams!(eid2))?.enums.find((e) => e.id === pid2)?.value; } catch { return undefined; }
+    };
+    const before = await readMute();
+    if (before === undefined) {
+      arm2Note = `arm 2 NOT RUN: no reply to the Cab bulk read (is a Cab block placed at eid ${eid2}?)`;
+    } else {
+      const rFrame = s.codec.buildSetParameter(eid2, pid2, OUT_OF_RANGE);
+      log(`  [Q5] ARM 2 OUT-OF-RANGE WRITE  ${arm2Name}: ${before} -> ${OUT_OF_RANGE}  tx ${hex(rFrame)}  (will restore to ${before})`);
+      sentAt = Date.now();
+      arrivals = [];
+      const t1 = sentAt;
+      const rFrames = await s.transport.request(rFrame, { timeoutMs: TIMEOUT_MS, quietMs: 250, match: (fs) => fs.some((f) => f[5] === 0x64) });
+      const resolved2 = Date.now() - t1;
+      const arrival2 = arrivals.length ? Math.min(...arrivals) : undefined;
+      sentAt = 0;
+      arm2 = armFrom(`arm 2 (${arm2Name} <- ${OUT_OF_RANGE}, a 3-option enum)`, rFrames, resolved2, arrival2, TIMEOUT_MS);
+      // Arm 2 writes a REAL setting, so it is held to the Q1/Q2 contract: read, write, READ BACK, restore,
+      // re-read. A device that CLAMPS the out-of-range value instead of refusing it has CHANGED the
+      // setting, and the read-back is what proves it rather than a guess from the arm's outcome.
+      const after = await readMute();
+      arm2Note = `arm 2 read-back: value ${before} -> ${after === undefined ? '(no read)' : after}`;
+      if (after !== before) {
+        arm2Effective = true;
+        await s.driver.setParam!(eid2, pid2, before, false);
+        const back = await readMute();
+        const matches = back === before;
+        restores.push({
+          param: arm2Name,
+          originalSource: `Cab block bulk read on eid ${eid2}, fresh device read`,
+          original: String(before),
+          wroteBack: String(before),
+          readBack: back === undefined ? '(none)' : String(back),
+          readPath: `Cab block bulk read on eid ${eid2}, fresh device read`,
+          matchesOriginal: matches,
+          independentlyConfirmed: false,
+          restored: false
+        });
+        if (!matches) restoreFailures.push({ param: arm2Name, original: String(before) });
+        arm2Note += ` (the device stored/clamped it) — restored to ${before}${matches ? ' and verified' : ', RESTORE NOT VERIFIED'}`;
+      } else {
+        arm2Note += ' (unchanged — the write changed nothing, so there was nothing to restore)';
+      }
+    }
   }
 
-  // 2) SILENT — nothing arrived at all. The elapsed time is the POLL TIMEOUT, not a device latency, so
-  //    no latency number is reported.
-  if (frames.length === 0) {
-    const observation = `silent: no frame arrived within ${TIMEOUT_MS} ms — the FM3 ignored the unknown eid ${BOGUS_EID} (no refusal, no reply); no latency was measured`;
-    return { ...base, status: 'determinate', verdict: 'silent (no reply)', outcome: 'silent', observation, restores: [], restoreFailures: [] };
-  }
-
-  // 3) ACCEPTED — a reply arrived, but none was a 0x64 → the device did NOT refuse the write.
-  const observation = `accepted: no 0x64; ${frames.length} reply frame(s) arrived by ${elapsed} ms — ${frames.map((f) => hex(f)).join(' | ')} (the write was not refused); no rejection to time`;
-  return { ...base, status: 'determinate', verdict: 'does NOT match', outcome: 'accepted', latencyMs: elapsed, observation, restores: [], restoreFailures: [] };
+  // The reported outcome is the arm that actually produced a frame — the refusal if there was one (the
+  // measurement the 250 ms window depends on), else the acceptance, else silence. Arm 2 wins ties: it is
+  // the arm that can be refused for a reason that is about the WRITE rather than about the address.
+  const arms = [arm2, arm1].filter((a): a is Arm => a !== undefined);
+  const primary = arms.find((a) => a.outcome === 'refused') ?? arms.find((a) => a.outcome === 'not-refused') ?? arm1;
+  // The verdict combines the wire with the read-back. A refusal is a refusal; but an arm 2 that produced
+  // NO REFUSAL while its read-back proves the setting CHANGED was not ignored — the write landed, so it
+  // does not match the refusal expectation whatever the wire said (including when it said nothing).
+  const verdict: Verdict = primary.outcome === 'refused'
+    ? 'matches the expectation'
+    : arm2Effective
+      ? 'does NOT match'
+      : primary.outcome === 'silent'
+        ? 'silent (no reply)'
+        : 'does NOT match';
+  const effectiveness = arm2Effective ? ' — and the read-back proves the write LANDED (the value changed), so this is NOT silence-as-ignored' : '';
+  const observation = `${arm2 ? `${arm1.text}; ${arm2.text}` : arm1.text}; ${arm2Note}${effectiveness}`;
+  const restoresFailed = restoreFailures.length > 0;
+  offArrivals?.();
+  return {
+    ...base,
+    status: restoresFailed ? 'indeterminate' : 'determinate',
+    verdict: restoresFailed ? 'cannot determine' : verdict,
+    outcome: primary.outcome,
+    latencyMs: primary.latencyMs,
+    observation: restoresFailed ? `${observation} — RESTORE FAILED, a human must fix ${restoreFailures.map((r) => `${r.param} (= ${r.original})`).join(', ')} by hand` : observation,
+    restores,
+    restoreFailures,
+    ...(restoreUnproven.length ? { restoreUnproven } : {})
+  };
 }
 
 /**
@@ -515,7 +641,7 @@ export async function runDeviceProbes(session: ProbeSession | null, opts: RunOpt
   const mode = dryRun ? 'DRY-RUN (read-only plan)' : opts.writes ? 'WRITES ENABLED' : 'READ-ONLY';
   log(`device: ${session.label} (model 0x${session.model.toString(16)}), mode: ${mode}`);
   if (dryRun) log('DRY-RUN — the read half of every probe runs, the mutating probes PRINT what they would write/restore, and NOTHING is written. This is NOT a completed run.');
-  else if (opts.writes) log('WRITES ENABLED — Q1/Q2 will change one value, verify it, and restore it; Q5 sends a refused frame.');
+  else if (opts.writes) log('WRITES ENABLED — Q1/Q2 will change one value, verify it, and restore it; Q5 arm 1 sends a bogus-eid frame, arm 2 writes an out-of-range value (read back, then restored).');
 
   const results: ProbeResult[] = [];
   const skipped = (id: string, question: string, kind: 'read' | 'write'): ProbeResult => ({
@@ -537,7 +663,7 @@ export async function runDeviceProbes(session: ProbeSession | null, opts: RunOpt
   } else {
     results.push(skipped('Q1', 'FM3 accepts a GLOBAL write and reads back what we wrote (GLOBAL_FS_BRIGHTNESS 7115)', 'write'));
     results.push(skipped('Q2', 'Cab 2 Mute/Solo write is accepted and reads back (CABINET_MUTE2)', 'write'));
-    results.push(skipped('Q5', 'A write to an unknown effect id is refused with a 0x64 rejection (not accepted, not silently ignored)', 'write'));
+    results.push(skipped('Q5', 'A write the FM3 REFUSES is answered with a 0x64, and the rejection arrives inside the 250 ms write-confirm window', 'write'));
   }
 
   // Dry-run is emphatically NOT a completed run: nothing was written, so it must never report success.
@@ -628,7 +754,19 @@ export interface MockOptions {
   invalidWrite?: 'refuse' | 'ignore' | 'accept';
   /** Delay (ms) before a scripted 0x64 refusal, so the measured latency is non-zero (default 0). */
   rejectDelayMs?: number;
+  /** How the scripted device answers an OUT-OF-RANGE discrete value on a REAL param (Q5 arm 2):
+   *  'refuse' (a 0x64 — the default and the behaviour Q5 is testing for), 'clamp' (the value is stored at
+   *  the enum's max, i.e. the write SUCCEEDS and the setting changes), or 'ignore' (no reply). */
+  outOfRangeWrite?: 'refuse' | 'clamp' | 'ignore';
 }
+
+/**
+ * The result code the scripted device attaches to a refused out-of-range write. MODELLED, not measured:
+ * the result-code table offers no "invalid value" label (the nearest are 0x03 bad argument and 0x06
+ * invalid parameter ID), and the table is not trustworthy anyway — so this is the placeholder the offline
+ * run uses, and the hardware run's own code is what gets recorded. Q5 prints whatever the device says.
+ */
+const OUT_OF_RANGE_WRITE_CODE = 0x03;
 
 /**
  * A scripted FM3 over MockTransport: answers the reads each probe needs, reflects writes back, and
@@ -720,7 +858,17 @@ export function createMockSession(model = 0x11, mockOpts: MockOptions = {}): { s
           return mockOpts.rejectDelayMs ? new Promise<number[][]>((res) => setTimeout(() => res([refusal]), mockOpts.rejectDelayMs)) : [refusal];
         }
         if (eid === 1 && pid === globalPid) { globalNorm = Math.max(0, Math.min(1, value)); return []; }
-        if (eid === cabEid && pid === cabMutePid) { cabMute = Math.round(value); return []; }
+        if (eid === cabEid && pid === cabMutePid) {
+          const ordinal = Math.round(value);
+          if (ordinal < 0 || ordinal > 2) { // outside the 3-option enum — the Q5 arm 2 write
+            const mode = mockOpts.outOfRangeWrite ?? 'refuse';
+            if (mode === 'ignore') return [];
+            if (mode === 'clamp') { cabMute = 2; return []; }
+            const refusal = sysex(model, 0x64, [0x01, OUT_OF_RANGE_WRITE_CODE]);
+            return mockOpts.rejectDelayMs ? new Promise<number[][]>((res) => setTimeout(() => res([refusal]), mockOpts.rejectDelayMs)) : [refusal];
+          }
+          cabMute = ordinal; return [];
+        }
         return [];
       }
       return [];
@@ -816,6 +964,38 @@ export type OpenResult = { ok: true; session: ProbeSession } | { ok: false; fail
  *   not-openable — a port was resolved but open() failed (names the port + errno);
  *   unresponsive — the port opened but the device never answered a handshake.
  */
+/**
+ * HARD GUARD (added after the 2026-10-08 incident): refuse to send a FIRMWARE-FAMILY function byte from a
+ * probe unless the run opts in explicitly with --allow-firmware-family. A blind probe of that family left
+ * the unit sitting in its bootloader ("Updating Firmware / Transfer Error") needing a power cycle. Wrapping
+ * the transport HERE means every probe script that opens a session through this function is covered, not
+ * just the one that erred — a guard at the call site would have missed the next caller.
+ */
+export function guardFirmwareFamily(transport: Transport, argv: readonly string[] = process.argv): void {
+  const allow = argv.includes('--allow-firmware-family');
+  const t = transport as unknown as {
+    request: (b: readonly number[], o?: RequestOpts) => Promise<number[][]>;
+    send: (b: readonly number[]) => void;
+  };
+  const check = (bytes: readonly number[]): void => {
+    const fn = frameFn(bytes);
+    if (fn === undefined || !isFirmwareFamilyFn(fn)) return;
+    if (allow) {
+      console.log(`!! FIRMWARE-FAMILY FRAME SENT (fn=0x${fn.toString(16)}) — --allow-firmware-family is set; this is on you.`);
+      return;
+    }
+    throw new Error(
+      `REFUSING to send fn=0x${fn.toString(16)}: that is a FIRMWARE-UPDATE function, not a runtime one. ` +
+        'Probing this family blindly left the unit in its bootloader on 2026-10-08. If you truly mean it ' +
+        '(a sacrificial unit, never one holding a library), pass --allow-firmware-family.'
+    );
+  };
+  const origRequest = t.request.bind(transport);
+  const origSend = t.send.bind(transport);
+  t.request = (b, o) => { check(b); return origRequest(b, o); };
+  t.send = (b) => { check(b); origSend(b); };
+}
+
 export async function openProbeSession(model: number, port?: string): Promise<OpenResult> {
   let conn: Conn | null;
   try {
@@ -826,10 +1006,19 @@ export async function openProbeSession(model: number, port?: string): Promise<Op
   if (!conn) {
     return { ok: false, failure: { cls: 'no-ports', detail: 'looked for FORGEFX_SERIAL, a Fractal by-id if03 node, then /dev/ttyACM0 — none present' } };
   }
+  // Every hardware probe leaves a frame trace. Without one, an incident on the unit is unfalsifiable —
+  // which is exactly the position the 2026-10-08 bootloader incident left us in (nothing had been tapped).
+  if (!process.env.FORGEFX_TAP) {
+    const tap = `/home/insn/.hermes/cache/scratch/probe-tap-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    process.env.FORGEFX_TAP = tap;
+    console.log(`capture tap: ${tap}  (unset FORGEFX_TAP to disable; every frame in and out is logged)`);
+  }
+
   let transport: Transport;
   try {
     transport = openConn(conn);
     await transport.open();
+    guardFirmwareFamily(transport);
   } catch (e) {
     return { ok: false, failure: classifyOpenError(conn.id, e) };
   }

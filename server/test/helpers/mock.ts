@@ -39,7 +39,11 @@ export class MockTransport implements Transport {
   async sendPaced(bytes: readonly number[], _chunk?: number, _delayMs?: number): Promise<void> { this.sent.push([...bytes]); }
   async request(bytes: readonly number[], _opts?: RequestOpts): Promise<number[][]> {
     this.sent.push([...bytes]);
-    return this.reply(bytes);
+    const frames = await this.reply(bytes);
+    // The transport contract is ADDITIVE fan-out: a frame collected by a request() waiter also reaches
+    // every onFrame subscriber (that is how a probe can time an arrival while still using request()).
+    for (const f of frames) for (const h of this.frameHandlers) h([...f]);
+    return frames;
   }
   onFrame(handler: (frame: number[]) => void): () => void {
     this.frameHandlers.add(handler);

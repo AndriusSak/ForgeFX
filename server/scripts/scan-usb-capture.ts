@@ -53,7 +53,7 @@ function septetText(b: readonly number[], start = 0): string {
 }
 
 /** Parse a pcapng byte stream into (timestamp, endpoint, payload) chunks. */
-function readChunks(buf: Buffer): { linktypes: number[]; chunks: { ts: number; ep: number; info: number; payload: Buffer }[] } {
+export function readChunks(buf: Buffer): { linktypes: number[]; chunks: { ts: number; ep: number; info: number; payload: Buffer }[] } {
   const linktypes: number[] = [];
   const chunks: { ts: number; ep: number; info: number; payload: Buffer }[] = [];
   let off = 0;
@@ -84,7 +84,7 @@ function readChunks(buf: Buffer): { linktypes: number[]; chunks: { ts: number; e
 }
 
 /** Split each endpoint's reassembled, timestamp-ordered stream into F0..F7 frames. */
-function framesOf(chunks: { ts: number; ep: number; payload: Buffer }[]): { frames: Frame[]; perEndpoint: Map<number, number> } {
+export function framesOf(chunks: { ts: number; ep: number; payload: Buffer }[]): { frames: Frame[]; perEndpoint: Map<number, number> } {
   const byEp = new Map<number, { ts: number; bytes: number[] }[]>();
   for (const c of chunks) {
     if (!byEp.has(c.ep)) byEp.set(c.ep, []);

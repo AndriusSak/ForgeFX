@@ -21,7 +21,8 @@ import {
   errnoName,
   DEVICE_PROBE_MODEL_DEFAULT,
   type ProbeReport,
-  type ConnFailure
+  type ConnFailure,
+  guardFirmwareFamily
 } from '../../scripts/probe-device.js';
 import { decode5SeptetFloat32 } from 'forgefx-midi/gen3/axe-fx-iii';
 import { assert, assertEqual } from '../helpers/mock.js';
@@ -106,9 +107,13 @@ export async function runDeviceProbeRunbookTests(): Promise<void> {
     assertEqual(q2.restores[0]!.restored, false, 'Q2 restore is NOT claimed as verified');
     assertEqual(q2.restores[0]!.matchesOriginal, true, 'Q2 read-back matches the original');
     assert((q2.restoreUnproven ?? []).length === 1, 'Q2 is flagged in the UNPROVEN-RESTORE list');
-    const muteWrites = mock.sent.filter((f) => wrote(f, 62, 25));
+    // Q5 arm 2 writes this same param afterwards (deliberately out of range), so this cannot assert on the
+    // LAST cab-mute write any more — it asserts on Q2's own pair: the new ordinal, then the restore.
+    const muteWrites = mock.sent.filter((f) => wrote(f, 62, 25)).map((f) => Math.round(valueOf(f)));
     assert(muteWrites.length >= 2, 'Q2 sent at least a write + a restore');
-    assertEqual(Math.round(valueOf(muteWrites[muteWrites.length - 1]!)), 0, 'Q2 last write RESTORES the original ordinal 0');
+    const wroteNew = muteWrites.indexOf(1);
+    assert(wroteNew >= 0, 'Q2 wrote the new ordinal');
+    assertEqual(muteWrites[wroteNew + 1], 0, 'Q2 RESTORES the original ordinal 0 right after its write');
 
     // case 9: the printed report says what it actually established — never a bare "restore verified".
     const text = formatReport(report);
@@ -121,7 +126,10 @@ export async function runDeviceProbeRunbookTests(): Promise<void> {
     assert(text.includes('human check: Cab 2 Mute/Solo should be back'), 'Q2 lists its human check');
   }
 
-  // ── Q5 three outcomes: refused (0x64) with a MEASURED latency ──────────────────────────────────
+  // ── Q5: a REFUSED write is answered with a 0x64, and the latency to it is MEASURED ─────────────
+  // The question is framed on the refusal the 250 ms write-confirm window must cover, so arm 2 (a real
+  // param written out of range) is the arm that answers it — arm 1 (a bogus eid) is kept because "the FM3
+  // ignores an unknown eid" is itself a measured fact, and because it is exactly why the framing changed.
   {
     const { session } = createMockSession(MODEL, { rejectDelayMs: 30 });
     const report = await runDeviceProbes(session, { writes: true, log: noop });
@@ -130,35 +138,100 @@ export async function runDeviceProbeRunbookTests(): Promise<void> {
     assertEqual(q5.outcome, 'refused', 'Q5 reports the refused outcome');
     assertEqual(q5.verdict, 'matches the expectation', 'Q5 refusal matches the expectation');
     assert(typeof q5.latencyMs === 'number' && q5.latencyMs! >= 25, `Q5 measures the latency to the 0x64 (got ${q5.latencyMs})`);
-    assert(q5.observation.startsWith('refused:'), 'Q5 observation starts with the outcome');
-    assert(/after \d+ ms/.test(q5.observation), 'Q5 observation reports the elapsed time to the 0x64');
+    // The ARRIVAL is what a confirmation window must cover, and it is measured by the probe: the
+    // transport resolves on a quiet gap, so its own timing is when the poll gave up, not when the device
+    // answered — reporting the latter as the latency would be exactly the fabrication Q5 guards against.
+    assert(/arrived \d+ ms after the write/.test(q5.observation), 'Q5 observation reports the measured ARRIVAL of the 0x64');
+    assert(q5.observation.includes('arrival measured by the probe'), 'Q5 says how the arrival was measured');
+    assert(q5.observation.includes('arm 1') && q5.observation.includes('arm 2'), 'Q5 observation reports BOTH arms');
+    assert(q5.question.includes('250 ms'), 'Q5 asks the question the confirmation window depends on');
   }
 
-  // ── Q5: the device stays SILENT to the invalid write (the real FM3 behaviour) ───────────────────
+  // ── Q5 arm 1 SILENT (the real FM3 behaviour for a bogus eid) — arm 2 still answers the question ──
   {
-    const { session } = createMockSession(MODEL, { invalidWrite: 'ignore' });
+    const { session } = createMockSession(MODEL, { invalidWrite: 'ignore', rejectDelayMs: 30 });
     const report = await runDeviceProbes(session, { writes: true, log: noop });
-    // case 12: nothing arrives → the distinct silent outcome, NOT a match and NOT a fabricated latency.
+    // case 12: arm 1 measures nothing, and is REPORTED as having measured nothing — while arm 2's refusal
+    // is the measurement the probe carries.
+    const q5 = byId(report, 'Q5');
+    assert(q5.observation.includes('arm 1 (unknown eid') && /arm 1 \(unknown eid \d+\) SILENT/.test(q5.observation), 'Q5 reports arm 1 as silent, not as a latency');
+    assert(!/arm 1 \(unknown eid \d+\) REFUSED/.test(q5.observation), 'Q5 does not claim arm 1 was refused');
+    assertEqual(q5.outcome, 'refused', 'Q5 carries arm 2\'s refusal as THE outcome when arm 1 was silent');
+    assert(typeof q5.latencyMs === 'number' && q5.latencyMs! >= 25, 'Q5 latency comes from the arm that produced a frame');
+  }
+
+  // ── Q5: BOTH arms silent → the distinct silent outcome, NOT a match and NOT a fabricated latency ──
+  {
+    const { session } = createMockSession(MODEL, { invalidWrite: 'ignore', outOfRangeWrite: 'ignore' });
+    const report = await runDeviceProbes(session, { writes: true, log: noop });
+    // case 13: nothing arrived in either arm → silence is a definite finding, and it is not a pass.
     const q5 = byId(report, 'Q5');
     assertEqual(q5.outcome, 'silent', 'Q5 reports the distinct silent outcome');
     assertEqual(q5.verdict, 'silent (no reply)', 'Q5 verdict is the distinct silent verdict, not a match');
     assert(q5.verdict !== 'matches the expectation', 'Q5 silent verdict is not a match');
     assertEqual(q5.latencyMs, undefined, 'Q5 reports NO latency when nothing was measured');
-    assert(q5.observation.startsWith('silent:'), 'Q5 observation starts with the silent outcome');
     assert(!/\blatency \d/.test(q5.observation), 'Q5 observation carries no fabricated latency number');
-    // case 13: the silent outcome is a definite finding — it does not become a false pass.
     assertEqual(q5.status, 'determinate', 'Q5 silent is a definite observation');
+  }
+
+  // ── Q5 arm 2 CLAMPED: the write SUCCEEDS and the setting changes — the read-back must prove it ────
+  {
+    const { session } = createMockSession(MODEL, { invalidWrite: 'ignore', outOfRangeWrite: 'clamp' });
+    const report = await runDeviceProbes(session, { writes: true, log: noop });
+    // case 14: the device stored the out-of-range value instead of refusing → that is NOT a match, the
+    // read-back is what says so, and the original is restored (with the restore recorded, not assumed).
+    const q5 = byId(report, 'Q5');
+    assertEqual(q5.outcome, 'silent', 'Q5 reports the WIRE truth: nothing arrived in arm 2');
+    assertEqual(q5.verdict, 'does NOT match', 'the read-back overrides wire silence: a stored value was NOT a refusal');
+    assert(q5.observation.includes('stored/clamped'), 'Q5 observation states the value was stored/clamped');
+    assert(q5.observation.includes('NOT silence-as-ignored'), 'Q5 says why wire silence is not "ignored" here');
+    assertEqual(q5.restores.length, 1, 'Q5 records the restore of the changed real setting');
+    assertEqual(q5.restores[0]!.matchesOriginal, true, 'Q5 restores the original value and reads it back');
   }
 
   // ── Q5: a non-0x64 reply arrives → accepted (the write was NOT refused) ─────────────────────────
   {
-    const { session } = createMockSession(MODEL, { invalidWrite: 'accept' });
+    const { session } = createMockSession(MODEL, { invalidWrite: 'accept', outOfRangeWrite: 'clamp' });
     const report = await runDeviceProbes(session, { writes: true, log: noop });
-    // case 14: a reply arrived but it was not a refusal.
+    // case 15: a reply arrived but it was not a refusal, in either arm.
     const q5 = byId(report, 'Q5');
-    assertEqual(q5.outcome, 'accepted', 'Q5 reports the accepted (non-refusal) outcome');
-    assertEqual(q5.verdict, 'does NOT match', 'Q5 accepted does NOT match the refusal expectation');
-    assert(q5.observation.startsWith('accepted:'), 'Q5 observation starts with the accepted outcome');
+    // "not-refused", never "accepted": no 0x64 says only that the write was not refused, and this repo's
+    // own lesson is that the absence of a refusal is not an acceptance.
+    assertEqual(q5.outcome, 'not-refused', 'Q5 reports the not-refused (no 0x64) outcome');
+    assertEqual(q5.verdict, 'does NOT match', 'Q5 not-refused does NOT match the refusal expectation');
+    assert(q5.observation.includes('NOT REFUSED'), 'Q5 observation names the not-refused arm');
+    assert(q5.observation.includes('NOT evidence the value was stored'), 'Q5 does not let a non-refusal reply read as acceptance');
+  }
+
+  // ── the FIRMWARE-FAMILY guard: a blind probe of this family left the unit in its bootloader ─────
+  {
+    // case 15a: the guard refuses by DEFAULT. This is the regression test for the 2026-10-08 incident —
+    // fn 0x7D/0x7E/0x7F/0x79 are firmware-update opcodes, not runtime ones, and probing them left the unit
+    // showing "Updating Firmware / Transfer Error" until it was power-cycled.
+    const sent: number[][] = [];
+    const fake = {
+      label: 'fake', kind: 'serial' as const, slow: false, isOpen: true,
+      open: async () => {}, close: async () => {}, sendQueued: async () => {}, onFrame: () => () => {},
+      send: (b: readonly number[]) => { sent.push([...b]); },
+      request: async (b: readonly number[]) => { sent.push([...b]); return []; }
+    };
+    guardFirmwareFamily(fake as never, []);
+    let refused = false;
+    try { await fake.request([0xf0, 0x00, 0x01, 0x74, 0x11, 0x7e, 0x00, 0xf7]); } catch { refused = true; }
+    assert(refused, 'the guard REFUSES a firmware-family fn by default');
+    assertEqual(sent.length, 0, 'a refused frame is not sent at all');
+    let refusedSend = false;
+    try { fake.send([0xf0, 0x00, 0x01, 0x74, 0x11, 0x7d, 0x00, 0xf7]); } catch { refusedSend = true; }
+    assert(refusedSend, 'the guard also covers the fire-and-forget send path');
+    // case 15b: an ordinary runtime function is NOT blocked — the guard must not break normal probing.
+    await fake.request([0xf0, 0x00, 0x01, 0x74, 0x11, 0x01, 0x4b, 0x00, 0xf7]);
+    assertEqual(sent.length, 1, 'a normal fn=0x01 frame passes the guard untouched');
+    // case 15c: the explicit override allows it, and says so out loud.
+    const sent2: number[][] = [];
+    const fake2 = { ...fake, send: (b: readonly number[]) => { sent2.push([...b]); }, request: async (b: readonly number[]) => { sent2.push([...b]); return []; } };
+    guardFirmwareFamily(fake2 as never, ['--allow-firmware-family']);
+    await fake2.request([0xf0, 0x00, 0x01, 0x74, 0x11, 0x7e, 0x00, 0xf7]);
+    assertEqual(sent2.length, 1, '--allow-firmware-family lets the frame through');
   }
 
   // ── (c) a missing device exits NON-ZERO ─────────────────────────────────────────────────────────
