@@ -53,6 +53,7 @@ import { runEditBurstUnresolvedTests, EDIT_BURST_UNRESOLVED_CASE_COUNT } from '.
 import { runGetPathTests, GET_PATH_CASE_COUNT } from './drivers/get-path.test.js';
 import { runSetParamUnitsTests, SETPARAM_UNITS_CASE_COUNT } from './drivers/setparam-units.test.js';
 import { runEditBurstStrideTests, EDIT_BURST_STRIDE_CASE_COUNT } from './drivers/edit-burst-stride.test.js';
+import { runPerformPageTests, PERFORM_PAGE_CASE_COUNT } from './drivers/perform-page.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -103,7 +104,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a pid-indexed GLOBAL edit emits its real norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests },
   { name: `drivers/get-path (${GET_PATH_CASE_COUNT} cases, the dead per-pid GET never hands a caller a denormal 0.0000)`, run: runGetPathTests },
   { name: `drivers/setparam-units (${SETPARAM_UNITS_CASE_COUNT} cases, units are per-opcode: the driver converts nothing; value bytes decoded from the sent frame)`, run: runSetParamUnitsTests },
-  { name: `drivers/edit-burst-stride (${EDIT_BURST_STRIDE_CASE_COUNT} cases, the edit poll diffs by body extent, not catalogue stride; a pid past the body stays skipped)`, run: runEditBurstStrideTests }
+  { name: `drivers/edit-burst-stride (${EDIT_BURST_STRIDE_CASE_COUNT} cases, the edit poll diffs by body extent, not catalogue stride; a pid past the body stays skipped)`, run: runEditBurstStrideTests },
+  { name: `drivers/perform-page (${PERFORM_PAGE_CASE_COUNT} cases, per-preset performance page read-back from a real FM3 dump; unassigned slots stay unassigned)`, run: runPerformPageTests }
 ];
 
 let failures = 0;

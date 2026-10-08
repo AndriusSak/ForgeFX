@@ -30,7 +30,8 @@ import {
   CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
   CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
   buildBlankCabIrContainer,
-  type DecodedBlock, type Gen3Modifier
+  parsePerformPage,
+  type DecodedBlock, type Gen3Modifier, type PerformPage
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
 import { ENV } from './env.js';
@@ -543,6 +544,17 @@ class Gen3Driver implements DeviceDriver {
     const frames = await this.#dumpFrames(EDIT_BUFFER);
     const decoded = decodeDump(frames, this.#prof);
     return { modifiers: this.#decodeModifiers(decoded) };
+  }
+
+  /** Per-preset PERFORMANCE PAGE of the CURRENT edit buffer (§2.2) — the ten assigned controls with
+   *  their effect/param ids and labels (GET /preset/perform). READ-ONLY: one preset dump, decoded
+   *  through the SAME body path as the modifier read-back. `undefined` when the decompressed body has
+   *  no page (the codec refuses to guess), never a synthesised page. */
+  async performPage(): Promise<PerformPage | undefined> {
+    const frames = await this.#dumpFrames(EDIT_BUFFER);
+    const parsed = parsePresetDump(dumpBytesFromFrames(frames), 0, this.#prof.model);
+    const { body } = decodeRawPatch(parsed.chunkPayloads);
+    return parsePerformPage(body);
   }
 
   /** Decode every placed block's full params from the preset body, table-driven via the universal

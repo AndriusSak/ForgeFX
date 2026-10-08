@@ -2,7 +2,7 @@
 // pre-driver Device/Am4Device modules — their JSON shapes are the HTTP contract Axis consumes and
 // must not drift. `DeviceDriver` is the per-device surface the routes call; methods a device lacks
 // are optional and mirrored by `DriverCapabilities` so routes can answer 501 instead of guessing.
-import type { DecodedBlock } from 'forgefx-midi/devices/gen3';
+import type { DecodedBlock, PerformPage } from 'forgefx-midi/devices/gen3';
 import type { TypeModel, DeviceLayout, DeviceProfile } from '../devices.js';
 import type { Transport } from '../transport/types.js';
 import type { TelemetryMode, CadenceProfile } from './telemetryProfiles.js';
@@ -365,6 +365,10 @@ export interface DeviceDriver {
   /** Decoded modifier assignments for the CURRENT edit buffer (source → target block+param, plus the
    *  pre-chain slot when known) — the modifier editor's read-back source. Gen-3 only. */
   presetModifiers?(): Promise<{ modifiers: PresetModifier[] }>;
+  /** Per-preset PERFORMANCE PAGE of the CURRENT edit buffer (§2.2) — the ten assigned controls with
+   *  their effect/param ids and labels. READ-ONLY, one preset dump; `undefined` when the body has no
+   *  page (never a guess). Gen-3 only. */
+  performPage?(): Promise<PerformPage | undefined>;
   presetBodyHex?(): Promise<{ len: number; hex: string }>;
   placedBlocks?(): Promise<PresetBlockDTO[]>;
 

@@ -79,7 +79,7 @@ export async function buildApp(
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes
+    decodeH, decodeBytes, performPageH
   } = createUnifiedHandlers(registry);
 
   // ── write-safety gates (docs/write-protocol.md:37-39 is the authority; Axis/docs/ROADMAP.md is
@@ -245,6 +245,10 @@ export async function buildApp(
       return await d.presetModifiers();
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   });
+  // Per-preset Performance Page of the CURRENT edit buffer (§2.2) — READ-ONLY. The ten assigned
+  // controls (effectId/paramId + their labels) decoded from one preset dump. 501 when the device
+  // can't; a slot with effectId 0 is UNASSIGNED and its label text is stale (see the codec).
+  app.get('/preset/perform', (_req, reply) => performPageH(reply));
   // ── persistent store: documents (Axis config · library metadata · layouts) ──
   app.get<{ Params: { c: string } }>('/store/:c', (req) => ({ docs: store.listDocs(req.params.c) }));
   app.get<{ Params: { c: string; id: string } }>('/store/:c/:id', (req, reply) => {

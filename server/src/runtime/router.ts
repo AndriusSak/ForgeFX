@@ -307,6 +307,8 @@ export function createRouter(deps: RuntimeDeps): {
       return await d.presetModifiers();
     } catch (e) { c.reply.code(503); return { error: (e as Error).message }; }
   });
+  // Per-preset Performance Page of the CURRENT edit buffer (§2.2) — READ-ONLY (see app.ts).
+  on('GET', '/preset/perform', (c) => h.performPageH(c.reply));
   on('GET', '/presets/:n/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/blocks', (c) => h.blocksH(c.reply));

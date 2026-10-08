@@ -542,6 +542,18 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
   };
 
+  /** Per-preset PERFORMANCE PAGE of the CURRENT edit buffer (§2.2) — READ-ONLY, one preset dump.
+   *  Capability-gated (a device without `performPage` answers 501 unsupported). A dump/decode failure
+   *  is surfaced as 503 with the real message, never a fabricated empty page. */
+  const performPageH = async (reply: StatusSink) => {
+    const d = await driver();
+    if (!d.performPage) return unsupported(reply, 'performPage');
+    // undefined (no page in the body) is coerced to null so BOTH surfaces answer a JSON body
+    // (`null`), never an empty payload a client would fail to parse.
+    try { return (await d.performPage()) ?? null; }
+    catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+
   return {
     driver, unsupported, decodeFail,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
@@ -551,6 +563,6 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes
+    decodeH, decodeBytes, performPageH
   };
 }
