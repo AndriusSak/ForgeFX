@@ -90,10 +90,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `api/write-safety (${WRITE_SAFETY_CASE_COUNT} cases, ?dryRun=true + --writes false, mocked FM3)`, run: runWriteSafetyTests },
   { name: `api/param-default (${PARAM_DEFAULT_CASE_COUNT} cases, omitted continuous → discrete frame, mocked FM3)`, run: runParamDefaultTests },
   { name: `drivers/layout-param-coverage (${LAYOUT_PARAM_COVERAGE_CASE_COUNT} guards, every FM3 layout knob/dropdown served in its owning family)`, run: runLayoutParamCoverageTests },
-  { name: `drivers/global-bulk-read (${GLOBAL_BULK_READ_CASE_COUNT} cases, a non-positional family must never serve a fabricated value)`, run: runGlobalBulkReadTests },
+  { name: `drivers/global-bulk-read (${GLOBAL_BULK_READ_CASE_COUNT} cases, a pid-indexed body resolves its own record; a genuinely out-of-range pid stays null)`, run: runGlobalBulkReadTests },
   { name: `api/route-parity (${ROUTE_PARITY_CASE_COUNT} cases, app↔runtime route-table drift guard + bad-param 400s)`, run: runRouteParityTests },
   { name: `drivers/device-probe-runbook (${DEVICE_PROBE_RUNBOOK_CASE_COUNT} cases, one-command device probe: read-only default, --writes restore, no-device non-zero, mocked)`, run: runDeviceProbeRunbookTests },
-  { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a non-positional family emits no fabricated edit-burst norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests }
+  { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a pid-indexed GLOBAL edit emits its real norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests }
 ];
 
 let failures = 0;

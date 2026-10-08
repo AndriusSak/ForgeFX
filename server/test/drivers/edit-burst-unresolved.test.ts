@@ -1,27 +1,20 @@
-// P11 — the device-edit-poll hole, and its two siblings.
+// P13 — REVERSES the GLOBAL half of P9/P11. The fn=0x1F body IS positional and pid-indexed: MEASURED
+// on the real FM3 2026-10-07, the eid-1 GLOBAL body is 14,880 records and body[7115] tracked the front
+// panel (100% → 65534, 70% → 45874 = 0.70 x 65534). So a GLOBAL param's own record IS addressable and
+// a front-panel move on GLOBAL IS decodable.
 //
-// P9 made blockParams refuse to index a family whose catalog pids are NOT record ordinals (GLOBAL:
-// stride 186 with 91 pids up to 65522 — device WIRE ADDRESSES, not positions): it serves `value: null`
-// + an `unresolved` reason instead of a fabricated 0. But `#bulkUnresolvedReason` was consulted at only
-// ONE place (blockParams). The FM3 device-edit POLL ran unguarded:
+// P9 nulled every GLOBAL value and P11 made decodeEditBurst refuse the whole family, so a swept/open
+// GLOBAL block emitted NO param event — and its controls stayed inert. That refusal was built on the
+// refuted "pids up to 65522 prove the body is not positional" story; it is removed here.
 //
-//   openVirtual(GLOBAL) → blockParams(1) primed #editSnapshot with the positional slice and set
-//   #watchedEid = 1; the poll then ran readDeviceEditState → #readEditBlock(1) → decodeEditBurst, which
-//   for every GLOBAL pid < stride whose record changed emitted `{ paramId, norm: cur[id]/65534 }`.
-//   `cur[id]` for a sub-stride GLOBAL pid is whatever UNRELATED record shares its ordinal — Axis applies
-//   that norm verbatim (`p.norm = e.norm`) and its `knobUnknown` needs BOTH norm and value null, so a
-//   front-panel edit flipped an inert "unknown" tile into a LIVE, WRITABLE knob showing a reading the
-//   device never reported (and the write guard, which tests `p.norm == null`, then passed).
+// What the reversal KEEPS is per-pid honesty: the diff loop skips `id >= stride` and a record the body
+// does not carry (`cur[id] === undefined`), so an unreadable PID emits no event — never a fabricated 0.
+// (A genuinely short/torn body therefore still yields no bogus move.)
 //
-// The server must never emit that fabricated norm. The honest reflection of a move we cannot read is NO
-// event: decodeEditBurst now refuses any unresolved family, and neither blockParams nor the sweep's
-// quiet prime will seed #editSnapshot from one.
-//
-// The same positional-decode class appears twice more, both fixed here:
-//   • cabState() swallowed ANY failed/torn read in a `catch {}` and served a ZEROED cab state (mode 0 /
-//     bank 0 / IR 0) with HTTP 200 — a fabricated state, the class P1.3 closed for the torn block read;
-//   • meters() had no torn-read guard and `?? 0` for a client-requested id past the body — a meter
-//     pinned to its minimum, presented as a real reading.
+// The other two positional-decode fixes in this file are UNCHANGED and still asserted:
+//   • cabState() must not swallow a failed/torn read and serve a ZEROED cab state (mode 0 / bank 0 /
+//     IR 0) with HTTP 200 — a fabricated state (P1.3's class, closed for the torn block read);
+//   • meters() must not `?? 0` a client-requested id past the body — a meter pinned to its minimum.
 //
 // Mocked transport + the REAL static FM3 profile: no hardware.
 import { createGen3Driver } from '../../src/drivers/gen3.js';
@@ -104,28 +97,29 @@ class Sink implements StatusSink {
 }
 
 export async function runEditBurstUnresolvedTests(): Promise<void> {
-  // ── 1. THE HOLE: a device-edit burst for the unresolved GLOBAL family emits NO param event. ──
-  // The recorded defect: a front-panel move surfaced as a fabricated norm for a pid resolved through
-  // an unrelated record's ordinal. A non-zero fixture makes a fabrication visible (0 vs the fixture).
+  // ── 1. A device-edit burst for GLOBAL NOW emits the real move. The body is pid-indexed, so a change
+  // to GLOBAL_REVERBMIX (pid 1 < stride) is decoded from pid 1's own record: norm = 30000/65534.
+  // (P11 emitted nothing here — the family-wide refusal this branch removes.)
   {
     const baseA = new Array(GLOBAL_STRIDE * 4).fill(0);
-    baseA[GLOBAL_SUBSTRIDE_PID] = 100; // the baseline record at that ordinal
+    baseA[GLOBAL_SUBSTRIDE_PID] = 100; // the baseline record at pid 1
     let current = burst(GLOBAL_EID, baseA);
     const { driver } = makeDriver(() => current);
-    await driver.blockParams(GLOBAL_EID); // opens GLOBAL: arms the watch + (old code) primes the baseline
+    await driver.blockParams(GLOBAL_EID); // opens GLOBAL: arms the watch + primes the baseline
     const changed = baseA.slice();
-    changed[GLOBAL_SUBSTRIDE_PID] = 30000; // the "move" — old code emitted norm 30000/65534 here
+    changed[GLOBAL_SUBSTRIDE_PID] = 30000; // the move
     current = burst(GLOBAL_EID, changed);
     const res = driver.decodeEditBurst(current);
-    assertEqual(res.events.length, 0,
-      'case 1: a GLOBAL edit burst emits NO param event (its sub-stride pid would resolve to an unrelated record)');
-    assert(!res.events.some((e) => e.paramId === GLOBAL_SUBSTRIDE_PID && e.norm > 0),
-      'case 1: no fabricated norm is emitted for a sub-stride GLOBAL pid');
-    assertEqual(res.reload, false, 'case 1: an unresolved family does not ask for a reload either (nothing changed we can read)');
+    const moved = res.events.find((e) => e.paramId === GLOBAL_SUBSTRIDE_PID);
+    assert(!!moved, 'case 1: a GLOBAL edit burst emits the real param event (its pid IS its record)');
+    assert(Math.abs(moved!.norm - 30000 / 65534) < 1e-6,
+      `case 1: the emitted norm is the moved record over 65534 (got ${moved!.norm})`);
+    assert(moved!.norm > 0, 'case 1: the emitted norm is the real move, not a fabricated 0');
+    assertEqual(res.reload, false, 'case 1: the primed baseline lets blockParams diff without a reload');
   }
 
-  // ── 2. The same through the POLL path: after opening GLOBAL, readDeviceEditState emits no fabricated ──
-  // param event (this is exactly what Axis consumed and applied as `p.norm = e.norm`).
+  // ── 2. The same through the POLL path: after opening GLOBAL, readDeviceEditState emits the real param
+  // event (this is exactly what Axis consumes and applies as `p.norm = e.norm`).
   {
     const baseA = new Array(GLOBAL_STRIDE * 4).fill(0);
     let current = burst(GLOBAL_EID, baseA);
@@ -136,13 +130,13 @@ export async function runEditBurstUnresolvedTests(): Promise<void> {
     changed[GLOBAL_SUBSTRIDE_PID] = 30000;
     current = burst(GLOBAL_EID, changed);
     await driver.readDeviceEditState();
-    assert(!events.some((e) => e.type === 'param' && e.effectId === GLOBAL_EID),
-      'case 2: the device-edit poll emits no param event for the unresolved GLOBAL family');
+    const moved = events.find((e) => e.type === 'param' && e.effectId === GLOBAL_EID && e.paramId === GLOBAL_SUBSTRIDE_PID);
+    assert(!!moved, 'case 2: the device-edit poll emits the real GLOBAL param event');
+    assert((moved as { norm: number }).norm > 0, 'case 2: the emitted norm is the real move, not a fabricated 0');
   }
 
-  // ── 3. The sweep prime must not seed a positional baseline for an unresolved family. ──
-  // A status dump places GLOBAL, so the round-robin sweep targets it. The quiet prime must be a no-op:
-  // a seeded baseline would let the NEXT sweep diff unrelated records into a fabricated param event.
+  // ── 3. The sweep prime DOES seed the positional baseline for GLOBAL, and the NEXT sweep diffs the real
+  // move out of it. (P11's quiet prime refused GLOBAL, so no event ever surfaced from a sweep.)
   {
     const profile = PROFILES[MODEL]!;
     const codec = createModernFractalCodec(profile.model);
@@ -158,13 +152,13 @@ export async function runEditBurstUnresolvedTests(): Promise<void> {
       return [];
     };
     const driver = createGen3Driver(profile, { transport: async () => mock, emit: (e) => events.push(e), getCadence: () => cadenceFor(profile.model, 'balanced') });
-    await driver.readDeviceEditState(); // sweep visit 1: quiet-prime (must be refused for GLOBAL)
+    await driver.readDeviceEditState(); // sweep visit 1: quiet-prime the GLOBAL baseline
     const changed = baseA.slice();
     changed[GLOBAL_SUBSTRIDE_PID] = 30000;
     current = burst(GLOBAL_EID, changed);
-    await driver.readDeviceEditState(); // sweep visit 2: a seeded baseline would now emit a fabricated param
-    assert(!events.some((e) => e.type === 'param' && e.effectId === GLOBAL_EID),
-      'case 3: a swept unresolved family never emits a fabricated param event');
+    await driver.readDeviceEditState(); // sweep visit 2: the seeded baseline yields the real move
+    assert(events.some((e) => e.type === 'param' && e.effectId === GLOBAL_EID && e.paramId === GLOBAL_SUBSTRIDE_PID),
+      'case 3: a swept GLOBAL family emits the real param event after its baseline is primed');
   }
 
   // ── 4. DENSE-FAMILY REGRESSION: the burst diff still works where pid == ordinal. ──
