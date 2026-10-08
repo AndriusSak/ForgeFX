@@ -385,7 +385,8 @@ export function createRouter(deps: RuntimeDeps): {
     h.typeH(c.reply, Number(c.params.eid), (c.body as { value: number }).value));
   // raw param values for an effect (for FC eid 199 / Modifier eid 3, whose params have no display range)
   on('GET', '/preset/blocks/:eid/raw', (c) => h.rawBlockH(c.reply, Number(c.params.eid)));
-  // read specific paramIds via per-pid fn 0x01 GET (FC current state — the 0x1F bulk path doesn't cover FC)
+  // read specific paramIds, NORMALIZED 0..1 (per-pid range read, sub 0x1a — the plain 01 00 GET is
+  // dead on fw13: it answers a canned template → denormal 0.0000; the fn=0x1F bulk path doesn't cover FC)
   on('POST', '/preset/blocks/:eid/read', (c) =>
     h.readParamsH(c.reply, Number(c.params.eid), (c.body as { pids?: number[] } | undefined)?.pids));
   // FC read path: sub 0x1a range-read returning the normalized (0..1) value per pid

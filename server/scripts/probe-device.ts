@@ -247,9 +247,11 @@ async function probeGlobalWrite(s: ProbeSession, log: (l: string) => void, dryRu
   const pid = paramId(s.model, 'GLOBAL', 'GLOBAL_FS_BRIGHTNESS') ?? 7115;
   const EID = 1; // the GLOBAL virtual effect
   const name = `GLOBAL_FS_BRIGHTNESS (eid ${EID}, pid ${pid})`;
-  // The one read path this probe has: a fresh per-pid GET through the driver (fn 0x01 sub 01). The
-  // restore read-back uses the SAME path, so it CANNOT catch an original that was itself misread.
-  const READ_PATH = `per-pid GET (fn 0x01 sub 01) on eid ${EID}, fresh device read`;
+  // The one read path this probe has: a fresh per-pid read through the driver. It routes to the sub-0x1a
+  // range op (NORMALIZED 0..1) — the plain 01 00 per-pid GET is dead on fw13 (it answers a canned
+  // template → denormal 0.0000, which is exactly how a fabricated 0 could be "restored" over a real
+  // value). The restore read-back uses the SAME path, so it CANNOT catch an original that was misread.
+  const READ_PATH = `per-pid range read (fn 0x01 sub 0x1a, normalized 0..1) on eid ${EID}, fresh device read`;
 
   const readBack = async (): Promise<number | undefined> => (await s.driver.readParams?.(EID, [pid]))?.[pid];
   const before = await readBack();
@@ -659,12 +661,20 @@ export function createMockSession(model = 0x11, mockOpts: MockOptions = {}): { s
       sysex(model, 0x76, [])
     ];
   };
-  /** A per-pid GET reply carrying a 5-septet float32 at bytes 12-16 (the shape readParams unpacks). */
+  /** A per-pid read reply carrying a 5-septet float32 at bytes 12-16 (the shape the per-pid range
+   *  read, sub 0x1a, unpacks). */
   const getReply = (req: readonly number[], value: number): number[] => {
     const f = new Float32Array([value]);
     const bits = new Uint32Array(f.buffer)[0]!;
     return [...req.slice(0, 12), ...pack5Septet32(bits), 0x00, 0x00, 0x00, 0x00, 0xf7];
   };
+  /** The FM3 fw13 canned per-pid GET reply (sub 01 00): a compiled-record template whose value field is
+   *  the constant septets 20 74 00 00 00 → the denormal 2.085e-41 (reads as 0.0000). Captured on a real
+   *  FM3 — only the echoed address (bytes 8-11) and the checksum differ between requests. The driver no
+   *  longer sends this op (it is dead; see readParams), but the mock models it faithfully so a reader
+   *  re-adding the path would see the value get omitted rather than fabricated. */
+  const cannedGetReply = (req: readonly number[]): number[] =>
+    [...req.slice(0, 12), 0x20, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x40, ...new Array(36).fill(0), 0x00, 0xf7];
 
   mock.reply = (req) => {
     if (mockOpts.silent) return [];
@@ -691,7 +701,10 @@ export function createMockSession(model = 0x11, mockOpts: MockOptions = {}): { s
     }
     if (fn === 0x01) {
       const sub = req[6];
-      if (sub === 0x01) { // per-pid GET (sub 01 00)
+      if (sub === 0x01) { // dead per-pid GET (sub 01 00) — fw13 answers the canned template, not a value
+        return [cannedGetReply(req)];
+      }
+      if (sub === 0x1a) { // per-pid range read — the driver's live read path (normalized 0..1)
         if (eid === 1 && pid === globalPid) return [getReply(req, globalNorm)];
         return [];
       }

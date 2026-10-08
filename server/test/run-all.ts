@@ -48,6 +48,7 @@ import { runGlobalBulkReadTests, GLOBAL_BULK_READ_CASE_COUNT } from './drivers/g
 import { runRouteParityTests, ROUTE_PARITY_CASE_COUNT } from './api/route-parity.test.js';
 import { runDeviceProbeRunbookTests, DEVICE_PROBE_RUNBOOK_CASE_COUNT } from './drivers/device-probe-runbook.test.js';
 import { runEditBurstUnresolvedTests, EDIT_BURST_UNRESOLVED_CASE_COUNT } from './drivers/edit-burst-unresolved.test.js';
+import { runGetPathTests, GET_PATH_CASE_COUNT } from './drivers/get-path.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -93,7 +94,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/global-bulk-read (${GLOBAL_BULK_READ_CASE_COUNT} cases, a pid-indexed body resolves its own record; a genuinely out-of-range pid stays null)`, run: runGlobalBulkReadTests },
   { name: `api/route-parity (${ROUTE_PARITY_CASE_COUNT} cases, app↔runtime route-table drift guard + bad-param 400s)`, run: runRouteParityTests },
   { name: `drivers/device-probe-runbook (${DEVICE_PROBE_RUNBOOK_CASE_COUNT} cases, one-command device probe: read-only default, --writes restore, no-device non-zero, mocked)`, run: runDeviceProbeRunbookTests },
-  { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a pid-indexed GLOBAL edit emits its real norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests }
+  { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a pid-indexed GLOBAL edit emits its real norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests },
+  { name: `drivers/get-path (${GET_PATH_CASE_COUNT} cases, the dead per-pid GET never hands a caller a denormal 0.0000)`, run: runGetPathTests }
 ];
 
 let failures = 0;

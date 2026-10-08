@@ -548,7 +548,8 @@ export async function buildApp(
     modBindH(reply, req.body));
   // raw param values for an effect (for FC eid 199 / Modifier eid 3, whose params have no display range)
   app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/raw', (req, reply) => rawBlockH(reply, Number(req.params.eid)));
-  // read specific paramIds via per-pid fn 0x01 GET (FC current state — the 0x1F bulk path doesn't cover FC)
+  // read specific paramIds, NORMALIZED 0..1 (per-pid range read, sub 0x1a — the plain 01 00 GET is
+  // dead on fw13: it answers a canned template → denormal 0.0000; the fn=0x1F bulk path doesn't cover FC)
   app.post<{ Params: { eid: string }; Body: { pids: number[] } }>('/preset/blocks/:eid/read', (req, reply) =>
     readParamsH(reply, Number(req.params.eid), req.body?.pids));
   // FC read path: sub 0x1a range-read returning the normalized (0..1) value per pid

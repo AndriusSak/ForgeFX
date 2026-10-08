@@ -87,6 +87,25 @@ function dumpBytesFromFrames(frames: readonly (readonly number[])[]): Uint8Array
   return Uint8Array.from(keep);
 }
 
+/** Float32 from the 5×7-bit septets a per-pid read carries at body bytes 12-16.
+ *
+ *  Returns `null` for anything that could not be a real param value: non-finite, or a SUBNORMAL
+ *  (`0 < |v| < 2^-126`). On FM3 firmware 13.0 the plain per-pid GET (fn 0x01 sub `01 00`) answers
+ *  EVERY request — a virtual GLOBAL eid and a real block alike — with the same canned compiled-record
+ *  template (identical bytes bar the echoed address in 8-11 and the checksum). Its value field is the
+ *  constant septets `20 74 00 00 00`, which decode to the denormal 2.0851321149153278e-41; printed at
+ *  four places that reads as `0.0000`, and a caller took it for the original value and "restored"
+ *  it, turning the user's footswitch LED rings off (docs/decisions/0004, 0005). A subnormal is never
+ *  a param value, so it is refused here rather than served. A genuine wire 0.0 is NOT subnormal and
+ *  passes through — the guard must not mistrust a real read of zero. */
+function paramF32FromSeptets(b: number[]): number | null {
+  const v = (((b[0] ?? 0) | ((b[1] ?? 0) << 7) | ((b[2] ?? 0) << 14) | ((b[3] ?? 0) << 21) | ((b[4] ?? 0) << 28)) >>> 0);
+  const f = new Float32Array(new Uint32Array([v]).buffer)[0]!;
+  if (!Number.isFinite(f)) return null;
+  if (f !== 0 && Math.abs(f) < 2 ** -126) return null; // subnormal — the canned-template signature
+  return f;
+}
+
 // Pre-chain modifier table geometry — MUST mirror forgefx-midi/src/devices/gen3/presetBody.ts
 // (extractPreChainModifiers). Used only to recover each decoded modifier's 1-based slot; if the codec's
 // offsets ever move, the modifier-readback suite's cross-check fails loudly.
@@ -845,56 +864,32 @@ class Gen3Driver implements DeviceDriver {
     return { block: blockName, slug, page, named, enums, type, layout };
   }
 
-  /** Read specific paramIds of an effect via per-pid fn 0x01 GET (sub 01 00) — the path FM3-Edit
-   *  uses to load FC state. Returns {pid: float value}. The RX value is a 5×7-bit packed float32 at
-   *  byte 12 of the response frame (after F0 00 01 74 <model> 01 | 01 00 | eid:2 | pid:2). */
+  /** Read specific paramIds of an effect as **normalized 0..1** values, keyed by pid.
+   *
+   *  The plain per-pid GET (fn 0x01, sub `01 00`) this method once used is **dead on FM3 fw13**: the
+   *  device answers every such request with a canned compiled-record template whose value field is the
+   *  constant septets `20 74 00 00 00` → the denormal 2.085e-41, which reads as `0.0000` (measured on a
+   *  real FM3, fw 13.0, for a virtual GLOBAL eid AND a real block — docs/decisions/0005). It is not
+   *  merely wrong for GLOBAL; it is unusable on this firmware generally, so it is not sent any more.
+   *
+   *  Reads through the **sub-0x1a range op** instead — the opcode FM3-Edit uses, which addresses by
+   *  (eid, pid) and returns the value. UNIT CONTRACT: the value is the device's own NORMALIZED 0..1
+   *  wire fraction, NOT a raw 16-bit count; a caller that needs a raw count must use the fn=0x1F bulk
+   *  read. A pid the device does not answer, or answers with a non-value (a subnormal / non-finite —
+   *  the canned-template signature), is OMITTED from the result — never fabricated as a number. */
   async readParams(eid: number, pids: number[]): Promise<Record<number, number>> {
-    const dev = await this.#conn();
-    const out: Record<number, number> = {};
-    const enc14 = (n: number) => [n & 0x7f, (n >> 7) & 0x7f];
-    const unpackF32 = (b: number[]): number => {
-      const v = ((b[0] ?? 0) | ((b[1] ?? 0) << 7) | ((b[2] ?? 0) << 14) | ((b[3] ?? 0) << 21) | ((b[4] ?? 0) << 28)) >>> 0;
-      return new Float32Array(new Uint32Array([v]).buffer)[0]!;
-    };
-    // Proper gen-3 GET: fn 0x01 with sub 01 00 + EMPTY value (NOT buildGetParameter, which uses the
-    // SET-typed sub 09 00 and therefore WRITES 0). Frame: F0 00 01 74 <model> 01 01 00 <eid> <pid> 0*9 cs F7.
-    const buildGet = (e: number, p: number): number[] => {
-      const f = [0xf0, 0x00, 0x01, 0x74, this.#prof.model, 0x01, 0x01, 0x00, ...enc14(e), ...enc14(p), 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      let cs = 0;
-      for (const b of f) cs ^= b;
-      f.push(cs & 0x7f, 0xf7);
-      return f;
-    };
-    for (const pid of pids) {
-      try {
-        const frames = await dev.request(buildGet(eid, pid), {
-          timeoutMs: 800,
-          quietMs: 50,
-          match: (fs) => fs.some((f) => f[5] === 0x01 && f[6] === 0x01 && f[7] === 0x00 && (f[8]! | (f[9]! << 7)) === eid && (f[10]! | (f[11]! << 7)) === pid)
-        });
-        const f = frames.find((fr) => fr[5] === 0x01 && fr[6] === 0x01 && fr[7] === 0x00 && (fr[8]! | (fr[9]! << 7)) === eid && (fr[10]! | (fr[11]! << 7)) === pid);
-        if (f) {
-          if (ENV.FORGEFX_GETDUMP) console.log(`GETDUMP eid=${eid} pid=${pid} raw=${f.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
-          out[pid] = unpackF32(f.slice(12, 17));
-        }
-      } catch {
-        /* skip unreadable pid */
-      }
-    }
-    return out;
+    return this.readRange(eid, pids);
   }
 
-  /** FC read path: sub 0x1a range-read (the opcode FM3-Edit uses on FC-page entry; the plain 01 00 GET
-   *  returns junk for eid 199). The 60-byte response carries a NORMALIZED float32 at byte 12 (0..1 over
-   *  the param's range). Returns {pid: norm}; logs the raw frame when FORGEFX_GETDUMP is set (calibration). */
+  /** Per-pid range-read (sub 0x1a — the opcode FM3-Edit uses; the plain 01 00 GET returns junk, and
+   *  is dead on fw13 — see `readParams`). The ~60-byte response carries a NORMALIZED 0..1 float32 at
+   *  byte 12 (over the param's range). Returns {pid: norm}; logs the raw frame when FORGEFX_GETDUMP is
+   *  set (calibration). A reply whose value is a subnormal / non-finite (the canned-template signature,
+   *  `20 74 00 00 00` → 2.085e-41) is OMITTED — never served as a value. */
   async readRange(eid: number, pids: number[]): Promise<Record<number, number>> {
     const dev = await this.#conn();
     const out: Record<number, number> = {};
     const enc14 = (n: number) => [n & 0x7f, (n >> 7) & 0x7f];
-    const unpackF32 = (b: number[]): number => {
-      const v = ((b[0] ?? 0) | ((b[1] ?? 0) << 7) | ((b[2] ?? 0) << 14) | ((b[3] ?? 0) << 21) | ((b[4] ?? 0) << 28)) >>> 0;
-      return new Float32Array(new Uint32Array([v]).buffer)[0]!;
-    };
     const buildGet = (e: number, p: number): number[] => {
       const f = [0xf0, 0x00, 0x01, 0x74, this.#prof.model, 0x01, 0x1a, 0x00, ...enc14(e), ...enc14(p), 0, 0, 0, 0, 0, 0, 0, 0, 0];
       let cs = 0;
@@ -909,7 +904,8 @@ class Gen3Driver implements DeviceDriver {
         const f = frames.find(match);
         if (f) {
           if (ENV.FORGEFX_GETDUMP) console.log(`RANGEDUMP eid=${eid} pid=${pid} raw=${f.map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
-          out[pid] = unpackF32(f.slice(12, 17));
+          const v = paramF32FromSeptets(f.slice(12, 17));
+          if (v !== null) out[pid] = v; // a non-value (subnormal / non-finite) is OMITTED, never served
         }
       } catch {
         /* skip */
