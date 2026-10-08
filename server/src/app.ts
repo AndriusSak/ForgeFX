@@ -22,7 +22,7 @@ import cors from '@fastify/cors';
 import { existsSync, statSync, createReadStream } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import type { DeviceRegistry } from './drivers/registry.js';
-import type { CabIrUploadOptions } from './drivers/types.js';
+import type { CabIrUploadOptions, CabSlotQueryOptions } from './drivers/types.js';
 import { cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
 import * as backups from './services/backups.js';
 import * as convert from './services/convert.js';
@@ -528,6 +528,33 @@ export async function buildApp(
       if (d.cabIrs) return d.cabIrs(true);
     }
     return registry.profile.cabIrs();
+  });
+
+  // Per-slot cab STATE read-back (READ-ONLY, one device query per slot). This is what makes an IR
+  // upload verifiable: the reply carries a populated/empty flag and a content-derived region that two
+  // slots holding the same IR share byte for byte. It is NOT a name — see `queryCabSlots`.
+  //   ?user=N          → the single user slot N (1..512)
+  //   ?page=&from=&to= → a range of slot INDICES in that page (0-based; 0x10-0x13 user, 0x20 scratchpad)
+  app.get<{ Querystring: { user?: string; page?: string; from?: string; to?: string } }>('/cab/slots', async (req, reply) => {
+    const q = req.query;
+    try {
+      const d = await driver();
+      if (!d.queryCabSlots) return unsupported(reply, 'queryCabSlots');
+      const opts: CabSlotQueryOptions = {};
+      if (q.user != null) {
+        const n = Number(q.user);
+        if (!Number.isInteger(n) || n < 1 || n > 512) { reply.code(400); return { error: `user slot ${q.user} is outside 1..512` }; }
+        const dest = cabIrUserSlot(n);
+        opts.page = dest.page;
+        opts.from = dest.index;
+        opts.to = dest.index;
+      } else if (q.page != null) {
+        opts.page = Number(q.page);
+        opts.from = q.from != null ? Number(q.from) : 0;
+        opts.to = q.to != null ? Number(q.to) : opts.from;
+      }
+      return await d.queryCabSlots(opts);
+    } catch (e) { reply.code(400); return { error: (e as Error).message }; }
   });
 
   // Foot Controller + Modifier address models (field bases + config formula + enums). FM3-decoded;

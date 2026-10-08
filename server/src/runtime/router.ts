@@ -15,7 +15,7 @@
 //     → the unconfigured telemetryStatus shape and the 503 upload error.
 // NO fastify/node:/transport imports here or in anything this pulls in — must bundle for the browser.
 import type { DeviceRegistry } from '../drivers/registryCore.js';
-import type { DeviceEvent, CabIrUploadOptions } from '../drivers/types.js';
+import type { DeviceEvent, CabIrUploadOptions, CabSlotQueryOptions } from '../drivers/types.js';
 import { cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
 import * as backups from '../services/backups.js';
 import * as convert from '../services/convert.js';
@@ -219,6 +219,32 @@ export function createRouter(deps: RuntimeDeps): {
       return r.body;
     });
   }
+  // Per-slot cab STATE read-back (READ-ONLY): populated flag + content region. ?user=N or ?page=&from=&to=
+  on('GET', '/cab/slots', async (c) => {
+    const d = await driver();
+    if (!d.queryCabSlots) { c.reply.code(501); return { error: 'unsupported', capability: 'queryCabSlots' }; }
+    const opts: CabSlotQueryOptions = {};
+    const user = c.query.get('user');
+    const page = c.query.get('page');
+    if (user != null) {
+      const n = Number(user);
+      if (!Number.isInteger(n) || n < 1 || n > 512) { c.reply.code(400); return { error: `user slot ${user} is outside 1..512` }; }
+      const dest = cabIrUserSlot(n);
+      opts.page = dest.page;
+      opts.from = dest.index;
+      opts.to = dest.index;
+    } else if (page != null) {
+      opts.page = Number(page);
+      const from = c.query.get('from');
+      const to = c.query.get('to');
+      opts.from = from != null ? Number(from) : 0;
+      opts.to = to != null ? Number(to) : opts.from;
+    }
+    try {
+      return await d.queryCabSlots(opts);
+    } catch (e) { c.reply.code(400); return { error: (e as Error).message }; }
+  });
+
   // cab IR names per bank (Factory 1/2, Legacy, Scratchpad) — refresh lets a driver merge live per-device banks.
   on('GET', '/cab/irs', async (c) => {
     if (c.query.get('refresh') === '1') {

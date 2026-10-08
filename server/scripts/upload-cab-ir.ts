@@ -31,12 +31,16 @@
 // to look at. A `{ok:true}` here means the frames were SENT, never that the IR is installed.
 //
 // USAGE
-//   npx tsx scripts/upload-cab-ir.ts <file.syx>                     # DRY RUN: prints the plan, exits 4
-//   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --allow-unverified   # send it (verbatim; REQUIRED)
-//   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --rename "X"   # send with a new name (32 chars max)
-//   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --select-scratchpad 1   # aim the cab block at scratchpad 1 first
-//   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --scratchpad 1   # MEASURED destination: scratchpad 1
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13           # DRY RUN: prints the plan
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13 --go      # send it to user slot 13 (verbatim)
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13 --go --rename "X" --allow-unverified
+//                                                                   # rename — gated, never run on hardware
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --dest 16:0 --go    # explicit [page,index]
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --port /dev/ttyACM0
+//
+// A destination is REQUIRED and the scratchpad is NOT one: the unit refused page 0x20 in every probe,
+// so `--scratchpad N` sends nothing the device will take. To confirm a slot afterwards, read it back
+// with scripts/probe-cab-slot-state.ts (occupancy + content region — NOT a name).
 //
 // EXIT CODES  0 sent (with --go) · 2 the file was refused before anything was sent · 3 no device
 //             4 dry run: a plan was printed and NOTHING was written.
@@ -145,23 +149,25 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
     for (const p of selPlan) log(`  eid 62 pid ${String(p.paramId).padStart(4)} = ${p.value}   ${p.what}`);
   }
 
-  if (go && !allowUnverified) {
+  // A VERBATIM send to a user slot is MEASURED-ACCEPTED (2026-10-08: the export's frames with the
+  // destination written drew the same acks FM3-Edit's own upload draws), so it needs no opt-in. The
+  // only unverified path left is a RENAME — the name lives in the first data frame while the 0x7C
+  // value is carried verbatim, and whether that value covers the name has never been run on hardware.
+  if (go && rename && !allowUnverified) {
     log('');
-    log('REFUSING to send: this wire path is measured-REFUSED on fw 13 — replaying an FM3-Edit IR export');
-    log('verbatim drew a 0x64 on every frame (fn=0x7A → result 0x16, fn=0x7B → result 0x10 bad message');
-    log('length, fn=0x7C likewise). The container is not accepted as-is and the real IR-upload opcodes are');
-    log('still uncaptured. Re-run with --allow-unverified only to measure that, and watch the inbound');
-    log('stream this script prints — the refusals are the evidence.');
+    log('REFUSING a RENAME: the name sits in the first data frame, but the close frame\'s 0x7C value is');
+    log('carried verbatim and whether it covers the name is untested on hardware. A verbatim send needs no');
+    log('opt-in (measured-accepted). Re-run with --allow-unverified to try the rename and watch the acks.');
     await s.close();
     return 2;
   }
 
   if (!go) {
     log('');
-    log('DRY RUN — nothing was written. Re-run with --go to apply the selection and send these frames.');
+    log('DRY RUN — nothing was written. Re-run with --go to send these frames.');
     if (!selPlan.length) {
-      log('human check: the IR lands where the UNIT has its cab slot selected — add --select-scratchpad N');
-      log('             to point slot 1 at the experimentation memories first.');
+      log('the destination above is written INTO the 0x7A start frame — it does not depend on what the');
+      log('unit has selected. Afterwards, read the slot back with probe-cab-slot-state.ts to confirm it.');
     }
     await s.close();
     return 4;
@@ -241,11 +247,13 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
   await s.close();
 
   log('');
-  log('SENT — that is all this establishes. There is no cab-name read-back on this firmware');
-  log('(fn=0x12 is refused), so nothing here proves the unit stored the IR.');
-  log(`human check: on the FM3 (or FM3-Edit) select Cab block slot 1 → Bank SCRATCHPAD → IR 1; its name`);
-  log(`             should read ${JSON.stringify(rename ?? parsed.name)}. If it still shows the old/blank name, the`);
-  log('             upload was NOT accepted — report that rather than re-running.');
+  log('SENT — the unit acknowledged every frame, which is what this script establishes.');
+  log('to CONFIRM the slot, read its state back (read-only):');
+  const slotArg = dest && dest.page >= 0x10 && dest.page <= 0x13 ? `--slots ${(dest.page - 0x10) * 128 + dest.index + 1}` : dest && dest.page === 0x20 ? `--slots ${512 + dest.index + 1}` : '--slots <n>';
+  log(`  npx tsx scripts/probe-cab-slot-state.ts ${slotArg}`);
+  log('  → "populated" plus a content region; two slots holding the same IR share it byte for byte.');
+  log('  It is NOT a name (the region is not decoded), so this proves occupancy and identity-by-content,');
+  log('  never "the slot holds <name>".');
   if (original.length) log(`             (the cab block selection itself was put back${restored ? '' : ' — CHECK IT, a restore was refused'})`);
   return 0;
 }

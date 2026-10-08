@@ -214,6 +214,30 @@ export interface DriverCtx {
  * one (e.g. the AM4 has no grid edit / gen-3 telemetry / FC) simply doesn't implement it, and the
  * route answers `501 {error:'unsupported', capability}`.
  */
+/** Which slots `queryCabSlots` should read, and how far it may go. */
+export interface CabSlotQueryOptions {
+  /** Bank page: `0x10`–`0x13` user banks, `0x20` scratchpad. Defaults to `0x10`. */
+  page?: number;
+  /** First slot INDEX (0-based within the page). Defaults to 0. */
+  from?: number;
+  /** Last slot INDEX, inclusive. Defaults to `from`. */
+  to?: number;
+}
+
+/** One slot's state, as read back from the unit. */
+export interface CabSlotStateResult {
+  index: number;
+  page: number;
+  /** `true` populated · `false` empty · `null` the unit's reply did not parse (NEVER read as empty). */
+  populated: boolean | null;
+  /** The raw flag byte, so an unparsed/unknown reading is still inspectable. */
+  flag: number | null;
+  /** The content-derived region — identical for slots holding the same IR. NOT a name; not decoded. */
+  contentRegion: number[];
+  /** Why `populated` is null, when it is. */
+  note?: string;
+}
+
 /** Options for `uploadCabIr`. `dest` is REQUIRED: the export sentinel is measured-refused. */
 export interface CabIrUploadOptions {
   /**
@@ -319,6 +343,20 @@ export interface DeviceDriver {
   rawBlock?(eid: number): Promise<{ eid: number; values: Record<number, number> }>;
   cabIrs?(refresh?: boolean): Promise<Record<string, string[]>>;
   cabState?(eid: number): Promise<unknown>;
+  /**
+   * Per-slot cab STATE for the user banks and the scratchpad — the device's own `fn=0x01 sub=0x4B`
+   * query, one request per slot, READ-ONLY.
+   *
+   * This is the read-back the IR upload was missing: fw 13 refuses the documented cab-NAME read
+   * (`fn=0x12`), so an upload's own acks were the only evidence it landed. The state reply gives an
+   * independent answer — a populated/empty flag plus a content-derived region that two slots holding
+   * the same IR share byte for byte.
+   *
+   * It is NOT a name oracle: the region's encoding is undecoded and no simple scheme yields a name.
+   * Consumers must render "populated", never "holds <name>". A slot whose reply does not parse is
+   * reported as `state: null` — never as empty.
+   */
+  queryCabSlots?(opts: CabSlotQueryOptions): Promise<CabSlotStateResult[]>;
   meters?(wants?: Record<string, number[]>): Promise<
     { effectId: number; slug: string; defaultId: number; defaultName: string; typeName: string; vals: Record<number, MeterVal> }[]
   >;

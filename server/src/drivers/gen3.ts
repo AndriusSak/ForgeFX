@@ -26,7 +26,8 @@ import {
   effectRoster, blockRefForEid, slugForEffectId, blockInstances,
   retargetPresetDumpToEditBuffer,
   parseCabIrSyx, buildCabIrSyx, interpretCabIrAcks,
-  CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA,
+  buildCabSlotQuery, parseCabSlotState,
+  CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -35,12 +36,23 @@ import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
   PresetGridDTO, PresetBlockDTO, PresetSummary, NamedParam, EnumParam, MeterVal,
   FcSwitchState, FcReadState, PresetModifier,
-  CabIrUploadOptions, CabIrUploadResult
+  CabIrUploadOptions, CabIrUploadResult,
+  CabSlotQueryOptions, CabSlotStateResult
 } from './types.js';
 
 /** How long to keep listening for the device's frame-by-frame acks to an IR upload.
  *  Measured: the editor's own upload was acked within ~2 ms per frame, so this is generous. */
 const ACK_WINDOW_MS = 1500;
+
+/** Cap on a single `queryCabSlots` sweep. A user bank is 128 slots (one request each); the cap keeps a
+ *  route call from turning into an unbounded device conversation. */
+const MAX_CAB_SLOT_SWEEP = 128;
+
+/** Per-query wait for a slot-state reply. The unit answers within a few ms (the editor's own refresh
+ *  is acked ~2 ms per frame), so the settle window dominates the cost of a sweep: measured 8.0 s for
+ *  128 slots at `quietMs: 60` — a full user bank would then take 32 s and outlive the client's 12 s
+ *  request ceiling. These values keep one 128-slot call well inside that ceiling. */
+const CAB_SLOT_QUERY_OPTS = { timeoutMs: 400, quietMs: 15 } as const;
 
 // slug → { name, page=base effect id } from the authoritative codec base table (replaces the old
 // defs.js pack lookup; block names + base ids are codec facts, not editor-cache definitions).
@@ -1107,6 +1119,75 @@ class Gen3Driver implements DeviceDriver {
     }
   }
 
+  /**
+   * Read back the unit's OWN per-slot cab state (`fn=0x01 sub=0x4B`), one request per slot.
+   *
+   * WHY this is the honest answer to "did my IR land": fw 13 refuses the documented cab-name read
+   * (`fn=0x12`), so an upload's acks were the only evidence available. This query gives an independent
+   * one — a populated/empty flag plus a content-derived region that two slots holding the same IR share
+   * byte for byte (measured: a fresh upload to slot 13 matched slots 1 and 12 exactly).
+   *
+   * READ-ONLY: it only ever sends this query, and it never writes a slot. A slot whose reply does not
+   * parse is reported with `populated: null` — the caller must NOT read that as empty.
+   *
+   * A full user bank is 128 requests; the sweep is paced and bounded by `MAX_CAB_SLOT_SWEEP`.
+   */
+  async queryCabSlots(opts: CabSlotQueryOptions = {}): Promise<CabSlotStateResult[]> {
+    const page = opts.page ?? CAB_IR_PAGE_USER_BANKS[0]!;
+    const from = opts.from ?? 0;
+    const to = opts.to ?? from;
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from) {
+      throw new Error(`queryCabSlots: bad range ${from}..${to} (indices are 0-based within a page)`);
+    }
+    if (to - from + 1 > MAX_CAB_SLOT_SWEEP) {
+      throw new Error(`queryCabSlots: range ${from}..${to} is ${to - from + 1} slots; the sweep is capped at ${MAX_CAB_SLOT_SWEEP} per call`);
+    }
+    if (page !== CAB_IR_PAGE_SCRATCHPAD && !CAB_IR_PAGE_USER_BANKS.includes(page)) {
+      throw new Error(`queryCabSlots: page 0x${page.toString(16)} is not a user bank (0x10-0x13) or the scratchpad (0x20)`);
+    }
+    const dev = await this.#conn();
+    const out: CabSlotStateResult[] = [];
+    for (let index = from; index <= to; index++) {
+      const q = buildCabSlotQuery(this.#prof.model, index, page);
+      let frames: number[][] = [];
+      try {
+        frames = await dev.request(q, CAB_SLOT_QUERY_OPTS);
+      } catch (e) {
+        out.push({ index, page, populated: null, flag: null, contentRegion: [], note: `transport error: ${(e as Error).message}` });
+        continue;
+      }
+      const reply = frames.find((f) => f.length >= 30 && f[5] === 0x01 && f[6] === 0x4b);
+      const state = reply ? parseCabSlotState(reply, index, page) : null;
+      if (!state) {
+        out.push({ index, page, populated: null, flag: null, contentRegion: [], note: reply ? 'reply did not parse' : 'no state reply (SILENT — not the same as empty)' });
+        continue;
+      }
+      out.push({
+        index,
+        page,
+        populated: state.populated,
+        flag: state.flag,
+        contentRegion: state.contentRegion,
+        ...(state.populated === null ? { note: `unrecognised flag byte 0x${state.flag.toString(16)}` } : {}),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Live cab-bank names — still NOT obtainable, now for a measured reason rather than an oversight.
+   *
+   * The cab/IR bank name tables are the device's "special table records" (param ids >= 0xff00), and
+   * those are NOT param-addressable: a definition query for 0xfff0 (FACTORY 1) or 0xfff3 (USER) at the
+   * CABINET block answers nothing (probed live 2026-10-08), which is exactly what the cache walker's
+   * coverage note documents ("absent from a live walk by design"). They exist only in the device's
+   * `.cache` byte dump — and the user banks are deliberately excluded from the shipped cache because
+   * they are the donor unit's own IR library, not firmware content.
+   *
+   * So a user slot has NO name source in this stack, while FM3-Edit displays one: the name is stored
+   * inside the slot's data (the same 32-char field the .syx container carries), and nothing in either
+   * captured session reads it back. `queryCabSlots` is what CAN be read — occupancy, not names.
+   */
   async #liveCabIrs(): Promise<Record<string, string[]>> {
     return {};
   }
