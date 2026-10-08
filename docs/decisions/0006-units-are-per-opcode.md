@@ -18,6 +18,32 @@ default, so the call fell through to the **discrete** branch — which takes PER
 was then misread as "the app writes GLOBAL values 100x too small". The app never did: Axis's knob writes pass
 `continuous: true` with a 0..1 value (`editor.svelte.ts:1684`).
 
+### MEASURED, second device session (2026-10-08) — the wire value is the param's DISPLAY value
+
+The first measurement above used pid 7115, whose display range is **0..100** — where percent, display value
+and a 0-based ordinal all coincide. Two measurements that CAN separate them:
+
+| what | written on the DISCRETE opcode | device | conclusion |
+|---|---|---|---|
+| `GLOBAL/110` (float, range **25..100**) | `50` | raw 21845 → display **50.0** | the wire number IS the display value (a percentage would give raw 32767 → display 62.5) |
+| `GLOBAL/110` restore | `100` | raw 65534 = 100% | restore verified through the bulk body |
+| `GLOBAL/7389` selector, options `["1 SECOND","2 SECONDS",…]` | (read only) | body raw **2**, panel shows **2 SECONDS** | the stored/wire value is the DISPLAY value (1-based), NOT a 0-based ordinal (which would be 1) |
+| `GLOBAL/7113` selector, options `"CC #1"…"CC #128"` | (read only) | body raw **128** | same — the value is the display number |
+
+**So the rule is: the discrete set takes the parameter's DISPLAY value, in its own range.** "Percent 0..100"
+was a special case of that, and stating it as the general rule was wrong. The `7389` row is worth keeping:
+the panel's own reading ("2 SECONDS") is what pinned it, which is the cheapest oracle available.
+
+**No off-by-one in the app, verified:** for a scale-1 enum `ordMax === max`, so the served value equals the
+raw, and Axis writes the served value straight back (`blockOps.ts`, `blockLibrary.ts` → `continuous: false`).
+Offset selectors like "2 SECONDS" / "CC #128" therefore round-trip correctly.
+
+**STILL OPEN — the scaled enum.** `PHASER_ORDER` (display = ordinal × 2, options 0/2/4/6/8/10) is the one
+case neither measurement covers, and the code has a `raw > max` unscale branch that implies it expects the
+raw in display space. Measuring it needs a preset containing a Phaser block (the preset used for the
+measurements above has none) — then it is a 30-second read-only comparison of the body record against the
+panel. Do not "fix" scaled enums before that measurement exists.
+
 ## What the device actually does (measured 2026-10-08, raw floats sent straight to the codec, body read back)
 
 | opcode | value sent | `body[7115]` | unit |
