@@ -38,11 +38,18 @@ the panel's own reading ("2 SECONDS") is what pinned it, which is the cheapest o
 raw, and Axis writes the served value straight back (`blockOps.ts`, `blockLibrary.ts` → `continuous: false`).
 Offset selectors like "2 SECONDS" / "CC #128" therefore round-trip correctly.
 
-**STILL OPEN — the scaled enum.** `PHASER_ORDER` (display = ordinal × 2, options 0/2/4/6/8/10) is the one
-case neither measurement covers, and the code has a `raw > max` unscale branch that implies it expects the
-raw in display space. Measuring it needs a preset containing a Phaser block (the preset used for the
-measurements above has none) — then it is a 30-second read-only comparison of the body record against the
-panel. Do not "fix" scaled enums before that measurement exists.
+**The scaled enum — MEASURED 2026-10-08, and the app is correct.** With a Phaser placed (eid 90), `PHASER/1`
+(ORDER) has body raw **1**, the app serves value **1**, and its option list is
+`[{0:"2"},{1:"4"},{2:"6"},{3:"8"},{4:"10"},{5:"12"}]`. Every display label is **even**, so a raw of `1` cannot
+be a display value — **the raw is the ORDINAL** for a scaled row, and the app's ordinal-indexed list plus
+verbatim write-back is the correct handling. This is also why the `raw > max` unscale branch never fires here
+(raw 1 ≤ max 10): do not "simplify" it away without re-measuring.
+
+**One latent caveat, recorded rather than fixed.** A scale-1 OFFSET enum stores the *display* value:
+`GLOBAL/7389` has body raw `2` while the unit shows **"2 SECONDS"** (its list starts `"1 SECOND"`), so the
+stored value is not a 0-based index. The client renders the label at the served value's index, so a served `2`
+would show the *third* option. It is unserved today — nothing misbehaves — and closing it is a
+serving-contract decision, with the panel as the oracle.
 
 ## What the device actually does (measured 2026-10-08, raw floats sent straight to the codec, body read back)
 
