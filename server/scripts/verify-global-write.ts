@@ -15,6 +15,16 @@
 // It reads the original raw via the BODY, writes, re-reads via the BODY, then restores the original raw and
 // re-reads to confirm — and it reports honestly if the restore cannot be shown to have taken.
 // LOOK AT THE UNIT: the mini-displays and footswitch LED rings should visibly change and then return.
+//
+// UNITS ARE PER-OPCODE — measured 2026-10-08 by sending raw floats straight to the codec (no driver in
+// between) and reading the body:
+//     continuous  0.25 -> 25.0%   => the CONTINUOUS opcode takes the normalized 0..1
+//     continuous  40   -> 100.0% (clamped)   => (consistent: 40 is far above 1.0)
+//     discrete    0.25 -> 0.3%    |  discrete 40 -> 40.0%  => the DISCRETE opcode takes PERCENT 0..100
+// This matches the app: Axis's knob writes pass `continuous: true` with a 0..1 value (editor.svelte.ts:532,634),
+// which is correct as-is. ALWAYS PASS `continuous` EXPLICITLY — an earlier version of this script omitted it,
+// silently took the DISCRETE (percent) opcode with a norm value, and produced a false "0.40 -> 0.4%" reading
+// that was misread as a unit bug in the app.
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
 
@@ -69,7 +79,8 @@ async function main(): Promise<number> {
     console.log('── writing ────────────────────────────────────────────────────────────────────────');
     // MEASURED 2026-10-07: this parameter takes DISPLAY UNITS (0..100), not a normalized 0..1 float.
     // Writing 0.40 on the continuous path set 0.4% (raw 262), not 40% — so the value is the percentage.
-    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, toPct);
+    // Represent the REAL UI path: a normalized value on the CONTINUOUS opcode (Axis editor.svelte.ts:532,634).
+    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, toPct / 100, true);
     await new Promise((r) => setTimeout(r, 400));
     const after = (await readRawBody(s))[BRIGHTNESS_PID];
     console.log(`  after write : raw ${after}  (${pct(after)})  <- read from the BODY, not the GET`);
@@ -89,7 +100,7 @@ async function main(): Promise<number> {
       return 2;
     }
     // Restore in DISPLAY UNITS too (before is raw 16-bit; convert to the 0..100 the param expects).
-    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, (before / RAW_MAX) * 100);
+    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, before / RAW_MAX, true); // continuous, like every caller
     await new Promise((r) => setTimeout(r, 400));
     const restored = (await readRawBody(s))[BRIGHTNESS_PID];
     console.log(`  after restore: raw ${restored}  (${pct(restored)})   original was ${before} (${pct(before)})`);
