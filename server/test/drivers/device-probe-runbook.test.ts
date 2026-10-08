@@ -84,11 +84,8 @@ export async function runDeviceProbeRunbookTests(): Promise<void> {
     assert(brightnessWrites.length >= 2, 'Q1 sent at least a write + a restore');
     const firstVal = valueOf(brightnessWrites[0]!);
     const lastVal = valueOf(brightnessWrites[brightnessWrites.length - 1]!);
-    // P14: GLOBAL's CONTINUOUS wire value is in DISPLAY units (0..100), so the probe's norm nudge 0.6
-    // and its norm restore 0.5 leave the host as the display values 60 and 50 (the driver converts;
-    // the client/probe currency stays norm — the plan below still prints 0.6000).
-    assert(Math.abs(firstVal - 60) < 0.02, `Q1 first write is the nudge, as display units (wrote ${firstVal})`);
-    assert(Math.abs(lastVal - 50) < 0.02, `Q1 last write RESTORES the original 0.5, as display units (wrote ${lastVal})`);
+    assert(Math.abs(firstVal - 0.6) < 0.02, `Q1 first write is the nudge (wrote ${firstVal})`);
+    assert(Math.abs(lastVal - 0.5) < 0.02, `Q1 last write RESTORES the original 0.5 (wrote ${lastVal})`);
 
     // case 6: the restore record carries the FULL evidence and does NOT claim an independent restore —
     // the only read-back shares the write path, so `restored` is false and it is reported UNPROVEN.

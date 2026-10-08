@@ -20,10 +20,6 @@ import {
   type ModernFractalCodec
 } from 'forgefx-midi/gen3/axe-fx-iii';
 import { wireToDisplay } from 'forgefx-midi/shared';
-// The FM3 catalogue's hand-maintained DISPLAY-unit marker: the GLOBAL family's CONTINUOUS SET
-// value is the DISPLAY value (0..100), not the default 0..1 normalized fraction. Honoured on the
-// FM3's continuous write path only (see #continuousWireValue). P14, measured 2026-10-08.
-import { FM3_DISPLAY_UNIT_FAMILIES } from 'forgefx-midi/gen3/fm3';
 import {
   parsePresetDump, decodeRawPatch, decodeGen3Body,
   readBlockParamsForModel, modelsFromBlocks,
@@ -48,7 +44,6 @@ const BLOCK_META: Record<string, { name: string; page: number }> = (() => {
 })();
 
 const EDIT_BUFFER = 0x3fff; // preset number sentinel = current edit buffer
-const FM3_MODEL = 0x11; // FM3 sysEx model byte — the device whose catalogue marks DISPLAY-unit continuous writes
 
 // ── preset-dump decode (forgefx-midi devices/gen3 pipeline) ──
 // Adapter producing the exact DTO the pre-Phase-4 server-local codec (fm3PresetGrid.ts
@@ -1526,28 +1521,6 @@ class Gen3Driver implements DeviceDriver {
   }
 
   // ── writes (all address the exact placed instance by effect id) ──
-  /**
-   * The value the CONTINUOUS SET should carry for (eid, paramId) given the client's normalized
-   * 0..1 knob position. Default: the norm itself (the gen-3 continuous contract — float32(norm);
-   * the device maps the fraction through the param's display range). For a family the device-true
-   * catalogue marks as DISPLAY-unit wire (FM3 GLOBAL — forgefx-midi FM3_DISPLAY_UNIT_FAMILIES,
-   * measured 2026-10-08: setParam(1, 7115, 70) → 70%, 0.70 → 0.7%), the wire value IS the DISPLAY
-   * value, so convert norm → display via the param's device-true range:
-   *   display = displayMin + norm · (displayMax − displayMin).
-   * TOTAL: a different model, an unknown family/pid, a non-float range, or a zero-width range
-   * returns the norm UNCHANGED — exactly the pre-existing behaviour, so nothing new can throw or
-   * shift an unmarked family. Only the FM3 carries the marker today; FM9/III are unmeasured.
-   */
-  #continuousWireValue(eid: number, paramId: number, norm: number): number {
-    if (this.#prof.model !== FM3_MODEL) return norm;
-    const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
-    if (!family || !FM3_DISPLAY_UNIT_FAMILIES.has(family)) return norm;
-    const range = this.#prof.ranges[family]?.[paramId];
-    if (!range || range.kind !== 'float' || !Number.isFinite(range.displayMin) || !Number.isFinite(range.displayMax) || range.displayMin === range.displayMax) {
-      return norm; // no usable display range → leave the wire as-is (never guess)
-    }
-    return range.displayMin + norm * (range.displayMax - range.displayMin);
-  }
   async setParam(eid: number, paramId: number, value: number, continuous: boolean) {
     // continuous knob writes stream at high frequency → fire-and-forget (instant);
     // a discrete write (enum) is rarer + worth confirming, so reject-watch it.
@@ -1556,9 +1529,7 @@ class Gen3Driver implements DeviceDriver {
     // poll could run mid-wait and echo our own write back. Stamping first also means a write that THROWS
     // still pauses the poll (the frame may have reached the device before the throw).
     this.#lastLocalEditAt = Date.now(); // pause the FM3 device-edit poll briefly so it doesn't echo our own write mid-drag
-    const r = continuous
-      ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, this.#continuousWireValue(eid, paramId, clamp01(value))))
-      : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
+    const r = continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
     // W1.2: the `param` event's `norm` is the 0..1 NORMALIZED value (drivers/types.ts). A discrete
     // write's `value` is the enum/model ORDINAL, so broadcasting it as a norm handed every other
     // window a value far outside 0..1 (Axis applies `p.norm = e.norm` verbatim). The event has no
