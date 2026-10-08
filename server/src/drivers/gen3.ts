@@ -29,6 +29,7 @@ import {
   buildCabSlotQuery, parseCabSlotState,
   CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
   CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
+  buildBlankCabIrContainer,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -38,12 +39,25 @@ import type {
   PresetGridDTO, PresetBlockDTO, PresetSummary, NamedParam, EnumParam, MeterVal,
   FcSwitchState, FcReadState, PresetModifier,
   CabIrUploadOptions, CabIrUploadResult,
-  CabSlotQueryOptions, CabSlotStateResult
+  CabSlotQueryOptions, CabSlotStateResult, CabSlotClearResult
 } from './types.js';
 
 /** How long to keep listening for the device's frame-by-frame acks to an IR upload.
  *  Measured: the editor's own upload was acked within ~2 ms per frame, so this is generous. */
 const ACK_WINDOW_MS = 1500;
+
+/** Count the data frames in a built container (for the ack expectation). */
+function countDataFrames(bytes: readonly number[]): number {
+  let n = 0;
+  for (let i = 0; i + 1 < bytes.length; i++) {
+    if (bytes[i] !== 0xf0) continue;
+    const end = bytes.indexOf(0xf7, i);
+    if (end < 0) break;
+    if (bytes[i + 5] === CAB_IR_FN_DATA) n++;
+    i = end;
+  }
+  return n;
+}
 
 /** Cap on a single `queryCabSlots` sweep. A user bank is 128 slots (one request each); the cap keeps a
  *  route call from turning into an unbounded device conversation. */
@@ -1173,6 +1187,73 @@ class Gen3Driver implements DeviceDriver {
       });
     }
     return out;
+  }
+
+  /**
+   * CLEAR a user cab slot — the device's DELETE, and it needs no new opcode.
+   *
+   * Sends the BLANK container (every chunk byte `0x7F`, Fractal's own loader asset geometry) and then
+   * VERIFIES the result through the slot-state read-back. MEASURED 2026-10-08: the unit accepts it
+   * (close-ack `0x00`) and the slot reads `empty` afterwards — on an empty slot and on seven slots that
+   * held real IRs. DESTRUCTIVE: the slot's IR is gone.
+   *
+   * Fail-closed twice over: the `0x00` close answer is required (a `0x13` means the unit DISCARDED the
+   * blank container, so nothing changed), AND the post-read must say `empty`. A slot that still reads
+   * populated — or cannot be read — is NOT reported as cleared.
+   */
+  async clearCabSlot(opts: CabSlotQueryOptions = {}): Promise<CabSlotClearResult> {
+    const page = opts.page ?? CAB_IR_PAGE_USER_BANKS[0]!;
+    const index = opts.from ?? 0;
+    if (opts.to != null && opts.to !== index) {
+      throw new Error(`clearCabSlot: clearing is one slot at a time (got from ${index} to ${opts.to})`);
+    }
+    if (!Number.isInteger(index) || index < 0) throw new Error(`clearCabSlot: bad slot index ${index}`);
+    if (page !== CAB_IR_PAGE_SCRATCHPAD && !CAB_IR_PAGE_USER_BANKS.includes(page)) {
+      throw new Error(`clearCabSlot: page 0x${page.toString(16)} is not a user bank (0x10-0x13)`);
+    }
+    const before = (await this.queryCabSlots({ page, from: index, to: index }))[0]!;
+    const bytes = buildBlankCabIrContainer(this.#prof.model, { index, page }); // throws on unmeasured geometry
+    const dev = await this.#conn();
+    const inbound: number[][] = [];
+    const off = dev.onFrame((f) => inbound.push([...f]));
+    try {
+      if (dev.sendPaced) await dev.sendPaced(bytes);
+      else await dev.sendQueued(bytes);
+      await new Promise((r) => setTimeout(r, ACK_WINDOW_MS));
+    } finally {
+      off();
+    }
+    const expectedData = countDataFrames(bytes);
+    const acks = interpretCabIrAcks(inbound, expectedData);
+    const closeCode = acks.codes.find((c) => c.fn === CAB_IR_FN_END)?.code ?? null;
+    const base = { index, page, wasPopulated: before.populated, closeCode, nowPopulated: null as boolean | null };
+    if (closeCode !== CAB_IR_CLOSE_ACCEPTED) {
+      return {
+        ...base,
+        ok: false,
+        reason: closeCode === CAB_IR_CLOSE_MISMATCH
+          ? 'the unit DISCARDED the blank container (close-ack 0x13) — the slot is unchanged'
+          : `the blank container was not accepted (close answered ${closeCode === null ? 'nothing' : `0x${closeCode.toString(16)}`}, data acks ${acks.data}/${acks.expectedData}) — treat the slot as unchanged`,
+      };
+    }
+    const after = (await this.queryCabSlots({ page, from: index, to: index }))[0]!;
+    const nowPopulated = after.populated;
+    if (nowPopulated === false) {
+      return {
+        ...base,
+        nowPopulated,
+        ok: true,
+        reason: `cleared: the slot reads EMPTY after the blank container${before.populated === true ? ' (it held an IR before)' : ' (it was already empty)'}`,
+      };
+    }
+    return {
+      ...base,
+      nowPopulated,
+      ok: false,
+      reason: nowPopulated === true
+        ? 'NOT cleared: the slot still reads POPULATED after an accepted blank container'
+        : `NOT confirmed: the slot state could not be read back (${after.note ?? 'unparsed reply'}) — do not assume it was cleared`,
+    };
   }
 
   /**

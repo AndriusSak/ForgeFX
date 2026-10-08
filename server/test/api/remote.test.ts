@@ -40,6 +40,7 @@ const REJECTED: [string, string][] = [
   ['POST', '/firmware/validate'],     // flash-adjacent byte mover
   ['POST', '/preset/load'],           // raw .syx import
   ['POST', '/cab/ir/upload'],         // writes the unit's user-cab storage — never remote
+  ['POST', '/cab/slots/clear'],       // ERASES a user-cab slot — never remote
   ['POST', '/backup/preset/5'],
   ['POST', '/backup/device'],
   ['POST', '/version/x/restore'],

@@ -24,7 +24,7 @@ import * as deviceCache from '../services/deviceCache.js';
 import * as editorCacheImport from '../services/editorCacheImport.js';
 import * as cloudProfiles from '../services/cloudProfiles.js';
 import { blockHelpBySlug, helpIndex } from '../help.js';
-import { createUnifiedHandlers, type RawQuery } from './handlers.js';
+import { createUnifiedHandlers, cabSlotTargetFromQuery, type RawQuery } from './handlers.js';
 import { putStoreDoc } from './services.js';
 import { createLocalService } from './localService.js';
 import type { FolderAdapter } from './folderAdapter.js';
@@ -252,6 +252,21 @@ export function createRouter(deps: RuntimeDeps): {
     }
     try {
       return await d.queryCabSlots(opts);
+    } catch (e) { c.reply.code(400); return { error: (e as Error).message }; }
+  });
+
+  // CLEAR a user cab slot (DESTRUCTIVE): blank container + slot-state verification. ?user=N | ?page=&index=
+  on('POST', '/cab/slots/clear', async (c) => {
+    const d = await driver();
+    if (!d.clearCabSlot) { c.reply.code(501); return { error: 'unsupported', capability: 'clearCabSlot' }; }
+    const target = cabSlotTargetFromQuery({
+      user: c.query.get('user') ?? undefined,
+      page: c.query.get('page') ?? undefined,
+      index: c.query.get('index') ?? undefined,
+    });
+    if ('error' in target) { c.reply.code(400); return { error: target.error }; }
+    try {
+      return await d.clearCabSlot(target);
     } catch (e) { c.reply.code(400); return { error: (e as Error).message }; }
   });
 

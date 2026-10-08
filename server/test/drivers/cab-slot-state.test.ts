@@ -18,7 +18,7 @@ import { CAB_SLOT_SUB } from 'forgefx-midi/devices/gen3';
 
 const MODEL = 0x11; // FM3
 
-export const CAB_SLOT_STATE_DRIVER_CASE_COUNT = 6;
+export const CAB_SLOT_STATE_DRIVER_CASE_COUNT = 10;
 
 const hex = (s: string): number[] => s.trim().split(/\s+/).map((h) => parseInt(h, 16));
 /** Measured payloads (52 bytes each, incl. the sub echo). */
@@ -44,6 +44,11 @@ class SlotTransport implements Transport {
   readonly requests: number[][] = [];
   populated = new Set<number>();
   silent = new Set<number>();
+  /** The code the unit answers the CLOSE frame with (0x00 accepted, 0x13 discarded). */
+  closeCode = 0x00;
+  /** Emulate the unit APPLYING an accepted write: every slot becomes empty once a container lands. */
+  clearOnAcceptedWrite = false;
+  #handlers = new Set<(f: number[]) => void>();
 
   constructor(populated: number[] = []) {
     this.populated = new Set(populated);
@@ -52,17 +57,37 @@ class SlotTransport implements Transport {
   async close(): Promise<void> {
     this.isOpen = false;
   }
+  /** Like the unit: acknowledge every frame; the CLOSE frame carries the measured close code. */
+  #ack(blob: readonly number[]): void {
+    const bytes = [...blob];
+    for (let i = 0; i < bytes.length; i++) {
+      if (bytes[i] !== 0xf0) continue;
+      const end = bytes.indexOf(0xf7, i);
+      if (end < 0) break;
+      const fn = bytes[i + 5]!;
+      const code = fn === 0x7c ? this.closeCode : 0x00;
+      const body = [0xf0, 0x00, 0x01, 0x74, MODEL, 0x64, fn, code, fn & 0x0f];
+      for (const h of this.#handlers) h([...body, fractalChecksum(body), 0xf7]);
+      i = end;
+    }
+  }
   send(): void {}
-  async sendQueued(): Promise<void> {}
-  async sendPaced(): Promise<void> {}
+  async sendQueued(bytes: readonly number[]): Promise<void> {
+    this.#ack(bytes);
+  }
+  async sendPaced(bytes: readonly number[]): Promise<void> {
+    this.#ack(bytes);
+    if (this.clearOnAcceptedWrite && this.closeCode === 0x00) this.populated.clear();
+  }
   async request(bytes: readonly number[], _opts?: RequestOpts): Promise<number[][]> {
     this.requests.push([...bytes]);
     const index = bytes[12]!;
     if (this.silent.has(index)) return [];
     return [replyFrame(this.populated.has(index) ? PAY_POPULATED : PAY_EMPTY)];
   }
-  onFrame(): () => void {
-    return () => {};
+  onFrame(h: (f: number[]) => void): () => void {
+    this.#handlers.add(h);
+    return () => this.#handlers.delete(h);
   }
 }
 
@@ -135,6 +160,50 @@ export async function runCabSlotStateDriverTests(): Promise<void> {
     }
     assert(/is not a user bank/.test(msg), `expected a page refusal, got: ${msg || '(no throw)'}`);
     assert(t.requests.length === 0, 'a refused sweep sends NOTHING');
+  }
+
+  // 7 — CLEAR: an accepted blank container plus a post-read of empty IS a clear
+  {
+    const t = new SlotTransport([0]); // slot 0 starts populated
+    t.clearOnAcceptedWrite = true;    // the landed blank container empties the slot (measured behaviour)
+    const d = makeDriver(t);
+    const res = await d.clearCabSlot!({ page: 0x10, from: 0, to: 0 });
+    assert(res.ok === true, `an accepted blank + empty post-read is a clear, got: ${res.reason}`);
+    assert(res.wasPopulated === true && res.nowPopulated === false, 'it reports the transition');
+    assert(res.closeCode === 0x00, 'and the close answer');
+  }
+
+  // 8 — CLEAR is fail-closed: an accepted blank whose slot STILL reads populated is NOT a clear
+  {
+    const t = new SlotTransport([0]); // stays populated throughout
+    const d = makeDriver(t);
+    const res = await d.clearCabSlot!({ page: 0x10, from: 0, to: 0 });
+    assert(res.ok === false, 'a slot that still reads populated must NOT be reported cleared');
+    assert(res.nowPopulated === true, 'and the state is reported');
+    assert(/still reads POPULATED/.test(res.reason), `reason: ${res.reason}`);
+  }
+
+  // 9 — CLEAR: a DISCARDED blank container (close 0x13) changes nothing and says so
+  {
+    const t = new SlotTransport([0]);
+    t.closeCode = 0x13;
+    const d = makeDriver(t);
+    const res = await d.clearCabSlot!({ page: 0x10, from: 0, to: 0 });
+    assert(res.ok === false && /DISCARDED/.test(res.reason), `reason: ${res.reason}`);
+    assert(res.wasPopulated === true, 'the slot is untouched');
+  }
+
+  // 10 — CLEAR refuses an UNMEASURED geometry rather than writing an unknown container
+  {
+    const t = new SlotTransport();
+    const d = createGen3Driver(PROFILES[0x12]!, { transport: async () => t, emit: () => {}, getCadence: () => cadenceFor(0x12, 'balanced') });
+    let msg = '';
+    try {
+      await d.clearCabSlot!({ page: 0x10, from: 0, to: 0 });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert(/geometry for model 0x12 has not been measured/.test(msg), `expected a geometry refusal, got: ${msg || '(no throw)'}`);
   }
 
   // 6 — a sweep beyond the cap is refused (a route call cannot become unbounded)

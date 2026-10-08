@@ -32,7 +32,7 @@ import * as editorCacheImport from './services/editorCacheImport.js';
 import * as editorCacheDiscovery from './services/editorCacheDiscovery.js';
 import * as cloudProfiles from './services/cloudProfiles.js';
 import * as store from './store.js';
-import { createUnifiedHandlers, type RawQuery } from './runtime/handlers.js';
+import { createUnifiedHandlers, cabSlotTargetFromQuery, type RawQuery } from './runtime/handlers.js';
 import { putStoreDoc } from './runtime/services.js';
 import { registerLocalRoutes } from './localStore.js';
 import { registerHelpRoutes } from './help.js';
@@ -554,6 +554,19 @@ export async function buildApp(
         opts.to = q.to != null ? Number(q.to) : opts.from;
       }
       return await d.queryCabSlots(opts);
+    } catch (e) { reply.code(400); return { error: (e as Error).message }; }
+  });
+
+  // CLEAR a user cab slot (DESTRUCTIVE device write). Sends the BLANK container and VERIFIES through the
+  // slot-state read-back; `ok` needs the 0x00 close AND a post-read of `empty`. ?user=N (1..512), or
+  // ?page=&index= for a raw slot. There is no remove opcode — the blank container IS the delete.
+  app.post<{ Querystring: { user?: string; page?: string; index?: string } }>('/cab/slots/clear', async (req, reply) => {
+    try {
+      const d = await driver();
+      if (!d.clearCabSlot) return unsupported(reply, 'clearCabSlot');
+      const target = cabSlotTargetFromQuery(req.query);
+      if ('error' in target) { reply.code(400); return { error: target.error }; }
+      return await d.clearCabSlot(target);
     } catch (e) { reply.code(400); return { error: (e as Error).message }; }
   });
 

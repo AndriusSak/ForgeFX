@@ -40,6 +40,7 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
   // user-cab IR upload writes to the unit's cab storage (§2.5) — a device write, so a read-only
   // server must refuse it rather than push frames at the unit.
   ['POST', '/cab/ir/upload'],
+  ['POST', '/cab/slots/clear'],
   ['POST', '/scene'],
   ['POST', '/scene/name'],
   ['POST', '/tempo'],

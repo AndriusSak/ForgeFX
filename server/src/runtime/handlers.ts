@@ -33,6 +33,32 @@ function singleQuery(reply: StatusSink, name: string, raw: RawQuery):
   return { ok: true, value: raw };
 }
 
+/**
+ * Resolve a `?user=N` / `?page=&index=` query into a cab-slot target, or an error string.
+ *
+ * Shared by BOTH surfaces so a clear request cannot be interpreted differently by them (the same
+ * divergence class the repeated-query-key guard closed). `user` is 1..512 across the four user banks;
+ * `page`/`index` address a raw slot for the scratchpad or an explicit bank.
+ */
+export function cabSlotTargetFromQuery(q: { user?: string; page?: string; index?: string }): { page: number; from: number; to: number } | { error: string } {
+  if (q.user != null && q.user !== '') {
+    const n = Number(q.user);
+    if (!Number.isInteger(n) || n < 1 || n > 512) return { error: `user slot ${q.user} is outside 1..512` };
+    const page = 0x10 + Math.floor((n - 1) / 128);
+    const index = (n - 1) % 128;
+    return { page, from: index, to: index };
+  }
+  if (q.page != null && q.page !== '') {
+    const page = Number(q.page);
+    const index = q.index != null && q.index !== '' ? Number(q.index) : 0;
+    if (!Number.isInteger(page) || !Number.isInteger(index) || index < 0) {
+      return { error: `page/index must be non-negative integers (got page=${q.page} index=${q.index ?? 0})` };
+    }
+    return { page, from: index, to: index };
+  }
+  return { error: 'a destination is required: ?user=N (1..512) or ?page=&index=' };
+}
+
 export function createUnifiedHandlers(registry: DeviceRegistry) {
   const driver = () => registry.driver();
 

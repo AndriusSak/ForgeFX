@@ -238,6 +238,22 @@ export interface CabSlotStateResult {
   note?: string;
 }
 
+/** What a slot CLEAR established. */
+export interface CabSlotClearResult {
+  /** True only when the unit accepted the blank container AND the slot now reads EMPTY. */
+  ok: boolean;
+  index: number;
+  page: number;
+  /** The flag the slot reported BEFORE the clear: true/false/null (null = unreadable, never "empty"). */
+  wasPopulated: boolean | null;
+  /** The flag after: the clear is confirmed only on `false`. */
+  nowPopulated: boolean | null;
+  /** The close frame's reply code for the blank container: `0x00` accepted, `0x13` discarded. */
+  closeCode: number | null;
+  /** One line naming what was established, for logs and UI. */
+  reason: string;
+}
+
 /** Options for `uploadCabIr`. `dest` is REQUIRED: the export sentinel is measured-refused. */
 export interface CabIrUploadOptions {
   /**
@@ -381,6 +397,20 @@ export interface DeviceDriver {
    * reported as `state: null` — never as empty.
    */
   queryCabSlots?(opts: CabSlotQueryOptions): Promise<CabSlotStateResult[]>;
+  /**
+   * CLEAR a user cab slot: send the BLANK container (every chunk byte `0x7F` — Fractal's own loader
+   * asset) and confirm the slot reads EMPTY afterwards. DESTRUCTIVE: the slot's IR is gone.
+   *
+   * MEASURED 2026-10-08: the unit ACCEPTS the blank container (close-ack `0x00`, because all 2048 words
+   * are identical so their XOR is 0) and the slot then reads `empty`, indistinguishable from a
+   * never-written slot — verified on an empty slot and on seven slots that held real IRs. This is how a
+   * slot is cleared; there is no remove opcode. Contrast zeroed SAMPLES, which are stored and read
+   * `populated` (a silent IR, not an empty slot).
+   *
+   * The result is fail-closed: `ok` requires BOTH the `0x00` close answer AND a post-read of `empty`.
+   * A slot that still reads populated — or that cannot be read at all — is NOT reported as cleared.
+   */
+  clearCabSlot?(opts: CabSlotQueryOptions): Promise<CabSlotClearResult>;
   meters?(wants?: Record<string, number[]>): Promise<
     { effectId: number; slug: string; defaultId: number; defaultName: string; typeName: string; vals: Record<number, MeterVal> }[]
   >;
