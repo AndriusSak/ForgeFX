@@ -719,7 +719,11 @@ export function createMockSession(model = 0x11, mockOpts: MockOptions = {}): { s
           const refusal = sysex(model, 0x64, [0x01, 0x05]); // 0x05 = invalid effect id
           return mockOpts.rejectDelayMs ? new Promise<number[][]>((res) => setTimeout(() => res([refusal]), mockOpts.rejectDelayMs)) : [refusal];
         }
-        if (eid === 1 && pid === globalPid) { globalNorm = Math.max(0, Math.min(1, value)); return []; }
+        // GLOBAL's CONTINUOUS wire value is in DISPLAY units (0..100), not the default 0..1 norm — the
+        // P14 measurement (setParam(1,7115,70) → 70%, 0.70 → 0.7%). The driver converts norm→display
+        // before the frame, so this scripted device inverts that (display → norm) to store the value the
+        // probe's normalized range read (sub 0x1a) will hand back — keeping write and read consistent.
+        if (eid === 1 && pid === globalPid) { globalNorm = Math.max(0, Math.min(1, value / 100)); return []; }
         if (eid === cabEid && pid === cabMutePid) { cabMute = Math.round(value); return []; }
         return [];
       }
