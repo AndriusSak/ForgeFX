@@ -1,26 +1,28 @@
-// User-cab IR upload (§2.5) — the driver path, over a fake transport that records what went out.
+// User-cab IR upload (§2.5) — the driver path, over a fake transport that records what went out AND
+// plays the device's acknowledgements back, because the upload now listens for them.
 //
-// What this suite is FOR: pinning the two properties that make the upload honest.
-//   1. The default path REPLAYS the container's bytes verbatim. The sample payload is not decoded
-//      and the 0x7C value is never recomputed, so any "helpful" transformation here would be an
-//      invention — the assertion is byte equality with the input, not "a plausible frame sequence".
-//   2. Anything the codec does not fully understand is REFUSED before a single byte is sent: a
-//      wrong-model container, a preset envelope (the exact confusion that already happened once), a
-//      bad checksum. A refusal that still pushed frames at the unit would be the failure mode.
+// The properties that matter, and why:
+//   1. The frames are the editor's own stream: verbatim data frames, with ONLY the 0x7A destination
+//      field written. (Measured: the export's `7F 7F` sentinel is refused by the unit; a real
+//      destination is accepted.)
+//   2. `ok` is ACK-BACKED, not "handed to the transport". Silence must NOT read as acceptance.
+//   3. Anything not run on hardware is refused before a byte goes out: no destination, a scratchpad
+//      destination (measured-refused by the unit), a rename without the explicit opt-in, a wrong-model
+//      container, a preset envelope, a bad checksum.
 // The wire geometry itself is golden-tested in forgefx-midi (test/gen3/fm3/cab-ir-syx.test.ts) against
-// the measured FM3-Edit export; this suite only checks the driver honours it.
+// the measured FM3-Edit export; this suite only checks the driver honours it and reports honestly.
 import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { PROFILES } from '../../src/devices.js';
 import type { Transport, RequestOpts, ConnKind } from '../../src/transport/types.js';
 import { assert } from '../helpers/mock.js';
 import { fractalChecksum } from 'forgefx-midi/shared';
-import { parseCabIrSyx } from 'forgefx-midi/devices/gen3';
+import { parseCabIrSyx, cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
 import { pack5Septet32 } from 'forgefx-midi/gen3/axe-fx-iii';
 
 const MODEL = 0x11; // FM3
 
-export const CAB_IR_UPLOAD_CASE_COUNT = 9;
+export const CAB_IR_UPLOAD_CASE_COUNT = 11;
 
 function frame(model: number, fn: number, payload: readonly number[]): number[] {
   const body = [0xf0, 0x00, 0x01, 0x74, model, fn, ...payload];
@@ -43,33 +45,60 @@ function synthIr(name = 'LT TV Mix 7', model = MODEL): number[] {
   return out;
 }
 
-/** Records every outgoing blob; `paced` says whether sendPaced (not sendQueued) was used. */
-class RecorderTransport implements Transport {
-  readonly label = 'serial-recorder';
+/**
+ * Records every outgoing blob and, like the real unit, answers each frame of an IR transfer with the
+ * measured ack shape (`F0 00 01 74 11 64 <fn> 00 <fn&0x0f> F7`). `silent` suppresses the acks so a test
+ * can prove silence is not reported as acceptance.
+ */
+class AckTransport implements Transport {
+  readonly label = 'serial-ack';
   readonly kind: ConnKind = 'serial';
   readonly slow = false;
   isOpen = true;
   readonly blobs: number[][] = [];
   paced = false;
+  silent = false;
+  #handlers = new Set<(f: number[]) => void>();
+
   async open(): Promise<void> {}
   async close(): Promise<void> {
     this.isOpen = false;
   }
+  #emit(f: number[]): void {
+    for (const h of this.#handlers) h([...f]);
+  }
+  /** Split a multi-frame blob and ack each frame the way the unit does. */
+  #ack(blob: readonly number[]): void {
+    if (this.silent) return;
+    const bytes = [...blob];
+    let i = 0;
+    while (i < bytes.length) {
+      const end = bytes.indexOf(0xf7, i);
+      if (end < 0) break;
+      const fn = bytes[i + 5]!;
+      this.#emit(frame(MODEL, 0x64, [fn, 0x00, fn & 0x0f]));
+      i = end + 1;
+    }
+  }
   send(bytes: readonly number[]): void {
     this.blobs.push([...bytes]);
+    this.#ack(bytes);
   }
   async sendQueued(bytes: readonly number[]): Promise<void> {
     this.blobs.push([...bytes]);
+    this.#ack(bytes);
   }
   async sendPaced(bytes: readonly number[]): Promise<void> {
     this.paced = true;
     this.blobs.push([...bytes]);
+    this.#ack(bytes);
   }
   async request(_bytes: readonly number[], _opts?: RequestOpts): Promise<number[][]> {
     return [];
   }
-  onFrame(): () => void {
-    return () => {};
+  onFrame(h: (f: number[]) => void): () => void {
+    this.#handlers.add(h);
+    return () => this.#handlers.delete(h);
   }
 }
 
@@ -82,136 +111,56 @@ function makeDriver(t: Transport) {
 }
 
 const f0Count = (bytes: readonly number[]) => bytes.filter((b) => b === 0xf0).length;
+const DEST_USER1 = cabIrUserSlot(1);
 
 export async function runCabIrUploadTests(): Promise<void> {
-  // 1 — the default path is a VERBATIM replay
+  // 1 — the editor's own stream: verbatim, with ONLY the destination field written
   {
-    const t = new RecorderTransport();
+    const t = new AckTransport();
     const d = makeDriver(t);
     const ir = synthIr();
-    const r = await d.uploadCabIr(Uint8Array.from(ir), { allowUnverified: true });
+    const r = await d.uploadCabIr(Uint8Array.from(ir), { dest: DEST_USER1 });
     assert(t.blobs.length === 1, 'exactly one paced blob goes out (not one send per frame)');
     assert(t.paced, 'the upload uses sendPaced (a flooded CDC write is dropped)');
-    assert(t.blobs[0]!.join(',') === ir.join(','), 'the bytes on the wire are byte-identical to the container');
-    assert(f0Count(t.blobs[0]!) === 10, `expected 10 frames on the wire, got ${f0Count(t.blobs[0]!)}`);
-    assert(r.frames === 10 && r.bytes === ir.length, 'the result reports the stream it sent');
-    assert(r.sampleSlots === 2040, `expected 2040 sample slots, got ${r.sampleSlots}`);
-    assert(r.renamed === false, 'a verbatim replay is not reported as a rename');
-    assert(r.name === 'LT TV Mix 7', `name from the container, got ${JSON.stringify(r.name)}`);
-  }
-
-  // 2 — a rename rewrites the name slots and nothing else
-  {
-    const t = new RecorderTransport();
-    const d = makeDriver(t);
-    const ir = synthIr();
-    const r = await d.uploadCabIr(Uint8Array.from(ir), { name: 'RENAMED IR', allowUnverified: true });
     const sent = t.blobs[0]!;
+    assert(f0Count(sent) === 10, `expected 10 frames on the wire, got ${f0Count(sent)}`);
+    assert(sent.length === ir.length, 'the stream length is unchanged by writing the destination');
     const parsed = parseCabIrSyx(sent);
-    assert(parsed.name === 'RENAMED IR', `wire name should be the rename, got ${JSON.stringify(parsed.name)}`);
-    assert(r.renamed === true && r.name === 'RENAMED IR', 'the result reports the rename');
-    assert(sent.length === ir.length, 'a rename does not change the stream length');
-    // the 0x7C value is carried verbatim (its coverage is unverified — never recomputed)
-    assert(parsed.endPayload.join(',') === [0x4d, 0x12, 0x08, 0x5d, 0x03].join(','), 'the end payload stays verbatim');
-    // every frame but the first data frame is untouched
+    assert(parsed.startPayload.join(',') === [0x00, 0x10, 0x00, 0x10].join(','), `destination field written as [index,page], got ${parsed.startPayload.join(',')}`);
+    // every frame except the start frame is byte-identical to the container
     const before = parseCabIrSyx(ir);
     const changed = parsed.frames.map((f, i) => (f.join(',') === before.frames[i]!.join(',') ? null : i)).filter((x) => x !== null);
-    assert(changed.join(',') === '1', `only data frame 1 may change, changed: ${changed.join(',')}`);
+    assert(changed.join(',') === '0', `only the start frame may differ, changed: ${changed.join(',')}`);
+    assert(r.dest.page === DEST_USER1.page && r.dest.index === DEST_USER1.index, 'the result names the destination');
+    assert(r.frames === 10 && r.sampleSlots === 2040 && r.renamed === false, 'the result reports what was sent');
   }
 
-  // 3 — a wrong-model container is refused, and NOTHING is sent
+  // 2 — `ok` is ACK-BACKED: the measured ack shapes must be seen and reported
   {
-    const t = new RecorderTransport();
+    const t = new AckTransport();
     const d = makeDriver(t);
-    let msg = '';
-    try {
-      await d.uploadCabIr(Uint8Array.from(synthIr('FM9 IR', 0x12)), { allowUnverified: true });
-    } catch (e) {
-      msg = (e as Error).message;
-    }
-    assert(/model byte 0x12/.test(msg), `expected a wrong-model refusal, got: ${msg || '(no throw)'}`);
-    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
+    const r = await d.uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1 });
+    assert(r.ok === true, 'a fully acknowledged upload reports ok');
+    assert(r.acks.start && r.acks.end, 'start and end acks are reported');
+    assert(r.acks.data === 8 && r.acks.expectedData === 8, `all 8 data frames acknowledged, got ${r.acks.data}/${r.acks.expectedData}`);
+    assert(r.acks.complete === true, 'complete is true only when every expected frame was acked');
+    assert(r.acks.codes.some((c) => c.fn === 0x7a && c.code === 0x00), 'the raw [fn, code] pairs are reported');
   }
 
-  // 4 — a preset envelope is refused (the confusion that already happened once)
+  // 3 — SILENCE is not acceptance
   {
-    const t = new RecorderTransport();
+    const t = new AckTransport();
+    t.silent = true;
     const d = makeDriver(t);
-    const presetish = [...frame(MODEL, 0x77, [0x00, 0x00, 0x00, 0x00, 0x01]), ...frame(MODEL, 0x79, [0x00, 0x00, 0x00])];
-    let msg = '';
-    try {
-      await d.uploadCabIr(Uint8Array.from(presetish), { allowUnverified: true });
-    } catch (e) {
-      msg = (e as Error).message;
-    }
-    assert(/starts with 0x7a/.test(msg), `expected a wrong-envelope refusal, got: ${msg || '(no throw)'}`);
-    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
+    const r = await d.uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1 });
+    assert(t.blobs.length === 1, 'the frames were still sent');
+    assert(r.ok === false, 'with no acks at all, ok MUST be false');
+    assert(r.acks.complete === false && r.acks.data === 0, 'and the ack report says so');
   }
 
-  // 5 — a corrupted checksum is refused, and NOTHING is sent
+  // 4 — no destination: refused, nothing sent (the export sentinel is measured-refused by the unit)
   {
-    const t = new RecorderTransport();
-    const d = makeDriver(t);
-    const ir = synthIr();
-    ir[ir.indexOf(0xf7, 0) - 1] = 0x00;
-    let msg = '';
-    try {
-      await d.uploadCabIr(Uint8Array.from(ir), { allowUnverified: true });
-    } catch (e) {
-      msg = (e as Error).message;
-    }
-    assert(/invalid checksum/.test(msg), `expected a checksum refusal, got: ${msg || '(no throw)'}`);
-    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
-  }
-
-  // 6 — the retarget EXPERIMENT patches the start frame and says so in the result
-  {
-    const t = new RecorderTransport();
-    const d = makeDriver(t);
-    const r = await d.uploadCabIr(Uint8Array.from(synthIr()), { target: 1, targetOrder: 'msb', allowUnverified: true });
-    const parsed = parseCabIrSyx(t.blobs[0]!);
-    assert(parsed.startPayload.join(',') === [0x00, 0x01, 0x00, 0x10].join(','), `msb target encoding, got ${parsed.startPayload.join(',')}`);
-    assert(r.retargeted?.target === 1 && r.retargeted?.order === 'msb', 'the result discloses the retarget');
-    const t2 = new RecorderTransport();
-    await makeDriver(t2).uploadCabIr(Uint8Array.from(synthIr()), { target: 1, targetOrder: 'lsb', allowUnverified: true });
-    assert(parseCabIrSyx(t2.blobs[0]!).startPayload.join(',') === [0x01, 0x00, 0x00, 0x10].join(','), 'lsb target encoding');
-  }
-
-  // 7 — an out-of-range target is refused before any byte goes out
-  {
-    const t = new RecorderTransport();
-    const d = makeDriver(t);
-    let msg = '';
-    try {
-      await d.uploadCabIr(Uint8Array.from(synthIr()), { target: 0x4000, allowUnverified: true });
-    } catch (e) {
-      msg = (e as Error).message;
-    }
-    assert(/14-bit range/.test(msg), `expected a range refusal, got: ${msg || '(no throw)'}`);
-    assert(t.blobs.length === 0, 'a refused target sends NOTHING');
-  }
-
-  // 8 — an over-long rename is refused before any byte goes out
-  {
-    const t = new RecorderTransport();
-    const d = makeDriver(t);
-    let msg = '';
-    try {
-      await d.uploadCabIr(Uint8Array.from(synthIr()), { name: 'X'.repeat(33), allowUnverified: true });
-    } catch (e) {
-      msg = (e as Error).message;
-    }
-    assert(/33 characters/.test(msg), `expected a length refusal, got: ${msg || '(no throw)'}`);
-    assert(t.blobs.length === 0, 'a refused rename sends NOTHING');
-  }
-
-  // 9 — FAIL CLOSED: without the explicit opt-in, nothing is sent at all.
-  // This is the load test's result turned into a guard. Replaying a real FM3-Edit export on fw 13 drew a
-  // 0x64 refusal on EVERY frame (fn=0x7A → result 0x16, fn=0x7B → result 0x10 bad message length), so
-  // the container is not accepted as-is. The default must therefore refuse — a caller that does not know
-  // that would otherwise push refused frames at a unit and read `{ok:true}` as success.
-  {
-    const t = new RecorderTransport();
+    const t = new AckTransport();
     const d = makeDriver(t);
     let msg = '';
     try {
@@ -219,9 +168,110 @@ export async function runCabIrUploadTests(): Promise<void> {
     } catch (e) {
       msg = (e as Error).message;
     }
-    assert(/measured-REFUSED/.test(msg), `expected the fail-closed refusal, got: ${msg || '(no throw)'}`);
-    assert(/0x10 bad message length/.test(msg), 'the refusal must carry the MEASURED reason, not a vague one');
-    assert(/capture of FM3-Edit/.test(msg), 'the refusal must name what closing it requires');
-    assert(t.blobs.length === 0, 'the fail-closed path sends NOTHING');
+    assert(/destination is required/.test(msg), `expected a destination refusal, got: ${msg || '(no throw)'}`);
+    assert(t.blobs.length === 0, 'a refused upload sends NOTHING');
+  }
+
+  // 5 — scratchpad destination: refused, nothing sent (the unit refuses page 0x20)
+  {
+    const t = new AckTransport();
+    const d = makeDriver(t);
+    let msg = '';
+    try {
+      await d.uploadCabIr(Uint8Array.from(synthIr()), { dest: cabIrScratchpad(1) });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert(/REFUSES IR uploads to the scratchpad/.test(msg), `expected a scratchpad refusal, got: ${msg || '(no throw)'}`);
+    assert(t.blobs.length === 0, 'a refused upload sends NOTHING');
+  }
+
+  // 6 — a rename is gated, then applied when opted in
+  {
+    const t = new AckTransport();
+    const d = makeDriver(t);
+    let msg = '';
+    try {
+      await d.uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1, name: 'RENAMED IR' });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert(/refusing a RENAME/.test(msg), `expected a rename refusal, got: ${msg || '(no throw)'}`);
+    assert(t.blobs.length === 0, 'a gated rename sends NOTHING');
+
+    const t2 = new AckTransport();
+    const r = await makeDriver(t2).uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1, name: 'RENAMED IR', allowUnverified: true });
+    const parsed = parseCabIrSyx(t2.blobs[0]!);
+    assert(parsed.name === 'RENAMED IR', `wire name should be the rename, got ${JSON.stringify(parsed.name)}`);
+    assert(r.renamed === true && r.name === 'RENAMED IR', 'the result reports the rename');
+    assert(t2.blobs[0]!.length === synthIr().length, 'a rename does not change the stream length');
+  }
+
+  // 7 — a rename preserves the name slot flag bits, and only the first data frame changes
+  {
+    const t = new AckTransport();
+    const ir = synthIr();
+    await makeDriver(t).uploadCabIr(Uint8Array.from(ir), { dest: DEST_USER1, name: 'FLAGS', allowUnverified: true });
+    const sent = parseCabIrSyx(t.blobs[0]!);
+    const flags = sent.nameSlotFlags.map((f, i) => (f ? i : -1)).filter((i) => i >= 0);
+    assert(flags.join(',') === '31', `the specimen's flag bit must survive a rename, got ${flags.join(',')}`);
+    assert(sent.endPayload.join(',') === [0x4d, 0x12, 0x08, 0x5d, 0x03].join(','), 'the end payload stays verbatim (never recomputed)');
+    const before = parseCabIrSyx(ir);
+    const changed = sent.frames.map((f, i) => (f.join(',') === before.frames[i]!.join(',') ? null : i)).filter((x) => x !== null);
+    assert(changed.join(',') === '0,1', `only the start frame and data frame 1 may change, changed: ${changed.join(',')}`);
+  }
+
+  // 8 — a wrong-model container is refused, and NOTHING is sent
+  {
+    const t = new AckTransport();
+    const d = makeDriver(t);
+    let msg = '';
+    try {
+      await d.uploadCabIr(Uint8Array.from(synthIr('FM9 IR', 0x12)), { dest: DEST_USER1 });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert(/model byte 0x12/.test(msg), `expected a wrong-model refusal, got: ${msg || '(no throw)'}`);
+    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
+  }
+
+  // 9 — a preset envelope is refused (the confusion that already happened once)
+  {
+    const t = new AckTransport();
+    const d = makeDriver(t);
+    const presetish = [...frame(MODEL, 0x77, [0x00, 0x00, 0x00, 0x00, 0x01]), ...frame(MODEL, 0x79, [0x00, 0x00, 0x00])];
+    let msg = '';
+    try {
+      await d.uploadCabIr(Uint8Array.from(presetish), { dest: DEST_USER1 });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert(/starts with 0x7a/.test(msg), `expected a wrong-envelope refusal, got: ${msg || '(no throw)'}`);
+    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
+  }
+
+  // 10 — a corrupted checksum is refused, and NOTHING is sent
+  {
+    const t = new AckTransport();
+    const d = makeDriver(t);
+    const ir = synthIr();
+    ir[ir.indexOf(0xf7, 0) - 1] = 0x00;
+    let msg = '';
+    try {
+      await d.uploadCabIr(Uint8Array.from(ir), { dest: DEST_USER1 });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert(/invalid checksum/.test(msg), `expected a checksum refusal, got: ${msg || '(no throw)'}`);
+    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
+  }
+
+  // 11 — a user slot destination round-trips through the same encoding the editor used
+  {
+    const t = new AckTransport();
+    await makeDriver(t).uploadCabIr(Uint8Array.from(synthIr()), { dest: cabIrUserSlot(12) });
+    const parsed = parseCabIrSyx(t.blobs[0]!);
+    // the capture's second upload targeted user slot 12 as `0B 10`, i.e. index 0x0b on page 0x10
+    assert(parsed.startPayload.join(',') === [0x0b, 0x10, 0x00, 0x10].join(','), `user slot 12 must encode as the capture shows, got ${parsed.startPayload.join(',')}`);
   }
 }

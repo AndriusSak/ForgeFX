@@ -214,50 +214,60 @@ export interface DriverCtx {
  * one (e.g. the AM4 has no grid edit / gen-3 telemetry / FC) simply doesn't implement it, and the
  * route answers `501 {error:'unsupported', capability}`.
  */
-/** Options for `uploadCabIr`. Every field is optional; the default is a VERBATIM replay. */
+/** Options for `uploadCabIr`. `dest` is REQUIRED: the export sentinel is measured-refused. */
 export interface CabIrUploadOptions {
-  /** Rewrite the 32 name slots before sending (flag bits preserved). */
+  /**
+   * Where the IR goes. MEASURED to be a `[index, page]` pair in the 0x7A start frame:
+   * page `0x10`–`0x13` are the 512 user banks (128 slots each); page `0x20` is the 16 scratchpad
+   * memories. Use `cabIrUserSlot(n)` / `cabIrScratchpad(n)` from the codec.
+   *
+   * ⚠ The unit REFUSED page `0x20` (scratchpad) in every probe, so this driver refuses it too rather
+   * than sending frames the device discards. A user slot is a REAL write to that member of the user
+   * cab bank — overwriting whatever is there.
+   */
+  dest?: { page: number; index: number };
+  /** Rewrite the 32 name slots before sending (flag bits preserved). Gated — see `allowUnverified`. */
   name?: string;
   /**
-   * ⚠️ UNVERIFIED — patch the 0x7A start frame's 14-bit slot field. The single measured specimen
-   * carries `7F 7F` (the "no explicit target" sentinel), which cannot distinguish the septet orders,
-   * so this is an experiment to run on hardware, not a known-good path. Omit it and the container is
-   * replayed exactly as it came off disk — which is what Fractal's own tools send.
-   */
-  target?: number;
-  /** Septet order for `target`; defaults to `'msb'`, matching the sibling preset-dump header. */
-  targetOrder?: 'msb' | 'lsb';
-  /**
-   * Opt IN to an UNVERIFIED wire path. Required, because the measured result is a refusal: replaying an
-   * FM3-Edit IR export verbatim drew a `0x64` on every frame (`0x7A` → 0x16, `0x7B` → **0x10 bad message
-   * length**), so the container is not accepted as-is and the real IR-upload opcodes are still
-   * uncaptured. Without this flag the driver refuses with that reason and sends nothing — a caller
-   * cannot push refused frames at a unit by accident. Set it only to run the next measurement round.
+   * Opt IN to a path that has NOT been run on hardware. Required only for `name`, because a rename
+   * changes the name chunks while the 0x7C value is carried verbatim and whether that value covers the
+   * name is unverified. A verbatim replay to an explicit destination is NOT gated: it was measured
+   * accepted (the unit acked start + all 8 data frames + end, with the same `0x64` codes the editor's
+   * own upload drew).
    */
   allowUnverified?: boolean;
 }
 
 /**
- * What an IR upload ACTUALLY established. Read this before telling anyone the IR is on the unit.
+ * What an IR upload established.
  *
- * - `ok` means the frames were handed to the transport — nothing more. The device's answer is not
- *   observed (the upload path is a paced send, like a preset dump); there is no cab-name read-back
- *   oracle on this firmware (`fn=0x12` is refused), so confirmation is a HUMAN observable: the slot's
- *   name on the front panel / in the editor.
- * - `renamed` and `retargeted` say what the caller changed. A rename leaves the 0x7C value verbatim —
- *   whether that value covers the name is unverified.
+ * `ok` is now evidence-backed rather than "the frames were handed over": the upload LISTENS and
+ * `ok === true` means the unit acknowledged the start frame, every data frame and the close with the
+ * same reply shapes the editor's own upload drew. That is the strongest signal available — the editor
+ * relies on exactly the same acks — but it is still NOT proof the IR was stored correctly or sounds
+ * right; nothing on this firmware reads a slot's name back. Say "acknowledged", not "installed".
  */
 export interface CabIrUploadResult {
   ok: boolean;
   /** The name as sent. */
   name: string;
   modelId: number;
-  /** Frame count and total byte length of the stream sent (for the dry-run preview too). */
   frames: number;
   bytes: number;
   sampleSlots: number;
   renamed: boolean;
-  retargeted?: { target: number; order: 'msb' | 'lsb' };
+  /** The destination actually written into the 0x7A start frame. */
+  dest: { page: number; index: number };
+  /** Frame-by-frame acks, and whether every expected frame was acknowledged. */
+  acks: {
+    start: boolean;
+    data: number;
+    expectedData: number;
+    end: boolean;
+    complete: boolean;
+    /** Raw `[echoed fn, code]` pairs seen. Do NOT read these through the MIDI_ERROR_* label table. */
+    codes: { fn: number; code: number }[];
+  };
 }
 
 export interface DeviceDriver {

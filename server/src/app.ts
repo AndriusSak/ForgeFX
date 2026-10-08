@@ -23,6 +23,7 @@ import { existsSync, statSync, createReadStream } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
 import type { DeviceRegistry } from './drivers/registry.js';
 import type { CabIrUploadOptions } from './drivers/types.js';
+import { cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
 import * as backups from './services/backups.js';
 import * as convert from './services/convert.js';
 import type { ConverterPreset } from 'forgefx-midi/convert';
@@ -314,7 +315,7 @@ export async function buildApp(
   // request without ?force=1 is answered 400 with that reason and NOTHING is sent. Even with it,
   // `{ok:true}` means the frames were sent — not that the unit stored them: there is no cab-name
   // read-back on this firmware, so confirmation is the slot name on the unit.
-  app.post<{ Querystring: { name?: string; target?: string; order?: string; force?: string } }>('/cab/ir/upload', async (req, reply) => {
+  app.post<{ Querystring: { name?: string; page?: string; index?: string; force?: string } }>('/cab/ir/upload', async (req, reply) => {
     const q = req.query;
     const body = req.body as Buffer | { bytes?: number[] } | undefined;
     const bytes = Buffer.isBuffer(body) ? new Uint8Array(body) : Array.isArray(body?.bytes) ? Uint8Array.from(body.bytes) : null;
@@ -323,14 +324,16 @@ export async function buildApp(
       const d = await driver();
       if (!d.uploadCabIr) return unsupported(reply, 'uploadCabIr');
       const opts: CabIrUploadOptions = {};
-      if (q.force === '1' || q.force === 'true') opts.allowUnverified = true; // the ONLY way past the fail-closed gate
+      if (q.force === '1' || q.force === 'true') opts.allowUnverified = true; // only needed for a RENAME
       if (q.name != null) opts.name = q.name;
-      if (q.target != null) {
-        const target = Number(q.target);
-        if (!Number.isInteger(target) || target < 0 || target > 0x3fff) { reply.code(400); return { error: `target ${q.target} is not a 14-bit slot number` }; }
-        opts.target = target;
-        if (q.order === 'msb' || q.order === 'lsb') opts.targetOrder = q.order;
-      }
+      // destination is REQUIRED (the export sentinel is measured-refused); page 0x10-0x13 = user banks,
+      // 0x20 = scratchpad (which the unit refuses). Accepts ?user=N / ?scratchpad=N convenience too.
+      const user = (req.query as { user?: string }).user;
+      const scratch = (req.query as { scratchpad?: string }).scratchpad;
+      if (user != null) opts.dest = cabIrUserSlot(Number(user));
+      else if (scratch != null) opts.dest = cabIrScratchpad(Number(scratch));
+      else if (q.page != null && q.index != null) opts.dest = { page: Number(q.page), index: Number(q.index) };
+      else { reply.code(400); return { error: 'a destination is required: ?user=N (1..512), ?scratchpad=N (1..16, refused by the unit) or ?page=&index=' }; }
       return await d.uploadCabIr(bytes, opts);
     } catch (e) { reply.code(400); return { error: (e as Error).message }; }
   });

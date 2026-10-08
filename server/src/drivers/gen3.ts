@@ -25,7 +25,8 @@ import {
   readBlockParamsForModel, modelsFromBlocks,
   effectRoster, blockRefForEid, slugForEffectId, blockInstances,
   retargetPresetDumpToEditBuffer,
-  parseCabIrSyx, buildCabIrSyx, retargetCabIrStart,
+  parseCabIrSyx, buildCabIrSyx, interpretCabIrAcks,
+  CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -36,6 +37,10 @@ import type {
   FcSwitchState, FcReadState, PresetModifier,
   CabIrUploadOptions, CabIrUploadResult
 } from './types.js';
+
+/** How long to keep listening for the device's frame-by-frame acks to an IR upload.
+ *  Measured: the editor's own upload was acked within ~2 ms per frame, so this is generous. */
+const ACK_WINDOW_MS = 1500;
 
 // slug → { name, page=base effect id } from the authoritative codec base table (replaces the old
 // defs.js pack lookup; block names + base ids are codec facts, not editor-cache definitions).
@@ -1755,41 +1760,49 @@ class Gen3Driver implements DeviceDriver {
   /**
    * Upload a user-cab IR `.syx` container to the unit (§2.5 user-cab IR management).
    *
-   * WHAT IS ESTABLISHED: the container geometry (1×0x7A + 8×0x7B + 1×0x7C, 256 five-byte chunks per
-   * data frame, 32-char name in the first 8 chunks, 2040 sample slots) was MEASURED on a real
-   * FM3-Edit export, and the file IS the wire stream Fractal's own tools send — so the default path
-   * REPLAYS THE BYTES VERBATIM and nothing is re-derived. The sample payload is deliberately not
-   * decoded and the 0x7C value is never recomputed (see `forgefx-midi/devices/gen3/cabIrSyx.ts`).
+   * ESTABLISHED (capture + load test, 2026-10-08, FM3-Edit 1.07.16 → FM3 fw 13.0): the container IS the
+   * wire stream. A USBPcap capture of the editor loading an IR shows `0x7A` + 8×`0x7B` (byte-identical to
+   * the .syx) + `0x7C`, each acknowledged. Replaying the file against a destination drew the SAME acks —
+   * start, all 8 data frames, end — so this method now LISTENS and reports them; `ok` means
+   * "acknowledged frame by frame", which is the evidence the editor itself relies on.
    *
-   * WHAT IS NOT ESTABLISHED — and the load test settled it against us: the FM3 **refuses** this replay.
-   * Measured 2026-10-08 on fw 13 (frames verbatim, paced, with the inbound stream listened to): every
-   * one of the 10 frames drew a `0x64` — `fn=0x7A` → result 0x16, all eight `fn=0x7B` → result **0x10
-   * (MIDI_ERROR_BAD_MSG_LENGTH)**, `fn=0x7C` likewise. So the export container is not accepted as-is,
-   * the gen-2 `0x7A/0x7B/0x7C` IR-download family is not what this device listens for, and the real
-   * opcodes remain uncaptured. **This method therefore FAILS CLOSED**: without `allowUnverified` it
-   * throws with that reason and sends nothing, so no caller can push refused frames at a unit by
-   * accident. `allowUnverified` exists only to run the next measurement round.
+   * TWO THINGS THE MEASUREMENTS CHANGED:
+   *   1. The export's start payload is `7F 7F` — a "no destination" sentinel — and the unit REFUSES it
+   *      (code 0x16), where a real destination gets code 0x00. So `dest` is required; there is no
+   *      "send it as it came out of the file" path, because that path is measured-refused.
+   *   2. Page `0x20` (the 16 scratchpad memories) is REFUSED as an upload destination in every probe;
+   *      only the user banks (`0x10`–`0x13`) are accepted. Scratchpad uploads are therefore refused here
+   *      rather than sent to be discarded.
    *
-   * **`{ok:true}` means the frames were handed to a paced send — it is NOT a landing.** There is also
-   * no cab-name read-back on this firmware (`fn=0x12` is refused), so even a successful send would be
-   * confirmed only by a human looking at the slot name on the unit.
-   *
-   * The device's own documented workflow targets the slot selected in the Cab block, so pick the
-   * destination (e.g. Bank `SCRATCHPAD`, IR 1) BEFORE sending; a container whose 0x7A carries the
-   * `7F 7F` sentinel does not name a destination itself.
+   * STILL NOT ESTABLISHED: that the stored IR is correct or audible — nothing on this firmware reads a
+   * slot's name back (`fn=0x12` is refused), so a rename is additionally gated behind `allowUnverified`
+   * (the 0x7C value is carried verbatim and its coverage is unknown). Report "acknowledged", and give a
+   * human the thing to look at.
    */
   async uploadCabIr(
     syx: Uint8Array,
     opts: CabIrUploadOptions = {},
   ): Promise<CabIrUploadResult> {
-    if (opts.allowUnverified !== true) {
+    if (!opts.dest) {
       throw new Error(
-        'uploadCabIr: refusing to send — this wire path is measured-REFUSED, not merely unverified. ' +
-        'Replaying an FM3-Edit IR export verbatim on fw 13 drew a 0x64 for every frame (fn=0x7A → result 0x16, ' +
-        'fn=0x7B → result 0x10 bad message length, fn=0x7C likewise), so the container is not accepted as-is and ' +
-        'the device\'s real IR-upload opcodes are still uncaptured. Closing it needs a capture of FM3-Edit / ' +
-        'Fractal-Bot actually loading an IR onto the unit. Pass { allowUnverified: true } only to run that ' +
-        'measurement round.',
+        'uploadCabIr: a destination is required. The export container carries the 7F 7F "no destination" ' +
+        'sentinel and the unit REFUSES that start frame (measured 2026-10-08: code 0x16, and every data ' +
+        'frame then fails with "bad message length"). Pass dest = cabIrUserSlot(n) — pages 0x10-0x13.',
+      );
+    }
+    if (opts.dest.page === CAB_IR_PAGE_SCRATCHPAD) {
+      throw new Error(
+        'uploadCabIr: the unit REFUSES IR uploads to the scratchpad bank (page 0x20) — probed in every ' +
+        'form on 2026-10-08 and refused while every user-bank page was accepted. Use cabIrUserSlot(n); ' +
+        'if a scratchpad target is wanted, the copy has to be made from a user slot on the unit.',
+      );
+    }
+    if (opts.name !== undefined && opts.allowUnverified !== true) {
+      throw new Error(
+        'uploadCabIr: refusing a RENAME on an unverified path. The name lives in the first data frame and ' +
+        'the close frame\'s 0x7C value is carried verbatim — whether that value covers the name has never ' +
+        'been tested on hardware. Send the container verbatim, or pass { allowUnverified: true } to try it ' +
+        'and watch the acks.',
       );
     }
     const dev = await this.#conn();
@@ -1801,27 +1814,39 @@ class Gen3Driver implements DeviceDriver {
         'replay is exactly the plausible-but-wrong failure this stack refuses to make.',
       );
     }
-    let bytes = buildCabIrSyx(parsed, { name: opts.name });
-    let retargeted: { target: number; order: 'msb' | 'lsb' } | undefined;
-    if (opts.target != null) {
-      const order = opts.targetOrder ?? 'msb';
-      if (!retargetCabIrStart(bytes, opts.target, order)) {
-        throw new Error('uploadCabIr: no 0x7A start frame found to retarget');
-      }
-      retargeted = { target: opts.target, order };
+    const bytes = buildCabIrSyx(parsed, { name: opts.name, dest: opts.dest });
+    const expectedData = parsed.frames.filter((f) => f[5] === CAB_IR_FN_DATA).length;
+
+    // LISTEN while sending. A paced send is fire-and-forget, so the device's answer — the only wire-side
+    // evidence there is — would otherwise be discarded. The editor's own upload was acknowledged frame by
+    // frame; a silent send is NOT acceptance.
+    const inbound: number[][] = [];
+    const off = dev.onFrame((f) => inbound.push([...f]));
+    try {
+      if (dev.sendPaced) await dev.sendPaced(bytes);
+      else await dev.sendQueued(bytes);
+      await new Promise((r) => setTimeout(r, ACK_WINDOW_MS));
+    } finally {
+      off();
     }
-    // paced: the FM3's CDC drops a flooded write (same reason loadPresetBytes paces a preset dump)
-    if (dev.sendPaced) await dev.sendPaced(bytes);
-    else await dev.sendQueued(bytes);
+    const acks = interpretCabIrAcks(inbound, expectedData);
     return {
-      ok: true,
+      ok: acks.complete,
       name: opts.name ?? parsed.name,
       modelId: parsed.modelId,
       frames: parsed.frames.length,
       bytes: bytes.length,
       sampleSlots: parsed.sampleSlots,
       renamed: opts.name !== undefined,
-      ...(retargeted ? { retargeted } : {}),
+      dest: opts.dest,
+      acks: {
+        start: acks.start,
+        data: acks.data,
+        expectedData: acks.expectedData,
+        end: acks.end,
+        complete: acks.complete,
+        codes: acks.codes.map((c) => ({ ...c })),
+      },
     };
   }
 }

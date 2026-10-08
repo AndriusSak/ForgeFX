@@ -35,7 +35,7 @@
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --allow-unverified   # send it (verbatim; REQUIRED)
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --rename "X"   # send with a new name (32 chars max)
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --select-scratchpad 1   # aim the cab block at scratchpad 1 first
-//   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --target 1 --order msb   # EXPERIMENT: patch 0x7A
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --go --scratchpad 1   # MEASURED destination: scratchpad 1
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --port /dev/ttyACM0
 //
 // EXIT CODES  0 sent (with --go) · 2 the file was refused before anything was sent · 3 no device
@@ -44,8 +44,7 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
-import { parseCabIrSyx, buildCabIrSyx, retargetCabIrStart } from 'forgefx-midi/devices/gen3';
-import { describeMultipurposeResultCode } from 'forgefx-midi/gen3/axe-fx-iii';
+import { parseCabIrSyx, buildCabIrSyx, cabIrScratchpad, cabIrUserSlot, interpretCabIrAcks } from 'forgefx-midi/devices/gen3';
 
 const hex = (b: readonly number[]) => b.map((x) => x.toString(16).padStart(2, '0')).join(' ');
 
@@ -53,8 +52,8 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
   let file: string | undefined;
   let go = false;
   let rename: string | undefined;
-  let target: number | undefined;
-  let order: 'msb' | 'lsb' = 'msb';
+  let dest: { page: number; index: number } | undefined;
+  let destLabel = '';
   let port: string | undefined;
   let model = 0x11;
   /** Point the cab block's slot 1 at a SCRATCHPAD IR first (the destination the unit will use). */
@@ -67,15 +66,16 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
     else if (a === '--allow-unverified') allowUnverified = true;
     else if (a === '--rename') rename = argv[++i];
     else if (a === '--select-scratchpad') selectScratchpad = Number(argv[++i]);
-    else if (a === '--target') target = Number(argv[++i]);
-    else if (a === '--order') order = (argv[++i] as 'msb' | 'lsb') ?? 'msb';
+    else if (a === '--dest') { const [pg, ix] = (argv[++i] ?? '').split(':').map(Number); dest = { page: pg ?? 0, index: ix ?? 0 }; destLabel = `page 0x${(pg ?? 0).toString(16)} index ${ix}`; }
+    else if (a === '--scratchpad') { const n = Number(argv[++i]); dest = cabIrScratchpad(n); destLabel = `scratchpad ${n}`; }
+    else if (a === '--user') { const n = Number(argv[++i]); dest = cabIrUserSlot(n); destLabel = `user slot ${n}`; }
     else if (a === '--port') port = argv[++i];
     else if (a === '--model') model = { fm3: 0x11, fm9: 0x12, axe3: 0x10 }[argv[++i] ?? ''] ?? 0x11;
     else if (a === '-h' || a === '--help') { log('see the header of scripts/upload-cab-ir.ts'); return 0; }
     else if (a.startsWith('--')) { log(`unknown argument ${a}`); return 2; }
     else file = a;
   }
-  if (!file) { log('usage: npx tsx scripts/upload-cab-ir.ts <file.syx> [--go] [--rename X] [--target N]'); return 2; }
+  if (!file) { log('usage: npx tsx scripts/upload-cab-ir.ts <file.syx> [--go] [--rename X] [--scratchpad N|--user N|--dest page:index]'); return 2; }
 
   // ── parse + build BEFORE opening the port: a refused container must never reach the device ──
   const raw = Array.from(readFileSync(file));
@@ -92,19 +92,18 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
   }
   let bytes: number[];
   try {
-    bytes = buildCabIrSyx(parsed, { name: rename });
+    bytes = buildCabIrSyx(parsed, { name: rename, dest });
   } catch (e) {
     log(`REFUSED (nothing was sent): ${(e as Error).message}`);
     return 2;
   }
-  if (target != null) {
-    if (!retargetCabIrStart(bytes, target, order)) { log('REFUSED: no 0x7A start frame to retarget'); return 2; }
-  }
+
 
   log(`file        ${file} (${raw.length} bytes)`);
   log(`container   model 0x${parsed.modelId.toString(16)} · ${parsed.frames.length} frames · ${parsed.sampleSlots} sample slots`);
   log(`name        ${JSON.stringify(rename ?? parsed.name)}${rename ? `  (renamed from ${JSON.stringify(parsed.name)})` : ''}`);
-  log(`start frame ${hex(parsed.startPayload)}${target != null ? `  → retargeted to ${target} (${order}) = ${hex(bytes.slice(6, 10))}  ⚠ UNVERIFIED ENCODING` : '  (carries the 7F 7F "no explicit destination" sentinel)'}`);
+  log(`start frame ${hex(parsed.startPayload)}${dest ? `  → destination ${destLabel} (${hex(bytes.slice(6, 10))})` : '  (carries the 7F 7F "no explicit destination" sentinel)'}`);
+  log(`destination  ${dest ? destLabel + ' — MEASURED field: [index, page] in the 0x7A payload' : 'none given: the export sentinel is sent as-is, which the unit REFUSED on 2026-10-08'}`);
   log(`end frame   ${hex(parsed.endPayload)}  (carried verbatim — never recomputed)`);
   log(`wire        ${bytes.length} bytes${bytes.length === raw.length ? ' (identical length to the file)' : ''}`);
 
@@ -209,17 +208,18 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
   await new Promise((r) => setTimeout(r, 1500));
   off();
 
+  const acks = interpretCabIrAcks(inbound, parsed.frames.filter((f) => f[5] === 0x7b).length);
   log('');
   if (!inbound.length) {
-    log('unit answered: NOTHING (no objection on the wire — which is not the same as acceptance)');
+    log('unit answered: NOTHING — no ack at all. On this device that is NOT acceptance:');
+    log('the editor\'s own upload was acknowledged frame by frame, so expect start/data/end acks.');
   } else {
-    log(`unit answered: ${inbound.length} frame(s)`);
-    for (const f of inbound.slice(0, 8)) {
-      const note = f[5] === 0x64
-        ? `  ← 0x64 MULTIPURPOSE: echoed fn 0x${(f[6] ?? 0).toString(16)}, result ${describeMultipurposeResultCode(f[7] ?? 0) ?? `0x${(f[7] ?? 0).toString(16)}`}`
-        : '';
-      log(`  ${hex(f)}${note}`);
-    }
+    log(`unit answered: ${inbound.length} frame(s) — ${acks.complete ? 'START + ALL DATA + END ACKNOWLEDGED' : 'INCOMPLETE'}`);
+    log(`  start acked: ${acks.start} · data acks: ${acks.data}/${acks.expectedData} · end acked: ${acks.end}`);
+    log(`  raw [echoed fn, code] pairs: ${acks.codes.map((c) => `[0x${c.fn.toString(16)}, 0x${c.code.toString(16)}]`).join(' ')}`);
+    log('  NOTE: do NOT read those codes through a label table — the MIDI_ERROR_* names in this codebase');
+    log('  are an ASSUMED index mapping and contradict this device. Measured here: every ACCEPTED frame');
+    log('  (the editor\'s own upload included) is answered with code 0x00.');
   }
 
   // Put the cab selection back. Restoring is reported honestly: the read-back is the same path that

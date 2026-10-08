@@ -16,6 +16,7 @@
 // NO fastify/node:/transport imports here or in anything this pulls in — must bundle for the browser.
 import type { DeviceRegistry } from '../drivers/registryCore.js';
 import type { DeviceEvent, CabIrUploadOptions } from '../drivers/types.js';
+import { cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
 import * as backups from '../services/backups.js';
 import * as convert from '../services/convert.js';
 import type { ConverterPreset } from 'forgefx-midi/convert';
@@ -312,15 +313,16 @@ export function createRouter(deps: RuntimeDeps): {
       const force = q.get('force');
       if (force === '1' || force === 'true') opts.allowUnverified = true; // the ONLY way past the gate
       const name = q.get('name');
-      const targetRaw = q.get('target');
-      const order = q.get('order');
       if (name != null) opts.name = name;
-      if (targetRaw != null) {
-        const target = Number(targetRaw);
-        if (!Number.isInteger(target) || target < 0 || target > 0x3fff) { c.reply.code(400); return { error: `target ${targetRaw} is not a 14-bit slot number` }; }
-        opts.target = target;
-        if (order === 'msb' || order === 'lsb') opts.targetOrder = order;
-      }
+      // destination is REQUIRED (the export sentinel is measured-refused): ?user=N | ?scratchpad=N | ?page=&index=
+      const user = q.get('user');
+      const scratch = q.get('scratchpad');
+      const page = q.get('page');
+      const index = q.get('index');
+      if (user != null) opts.dest = cabIrUserSlot(Number(user));
+      else if (scratch != null) opts.dest = cabIrScratchpad(Number(scratch));
+      else if (page != null && index != null) opts.dest = { page: Number(page), index: Number(index) };
+      else { c.reply.code(400); return { error: 'a destination is required: ?user=N (1..512), ?scratchpad=N (1..16, refused by the unit) or ?page=&index=' }; }
       return await d.uploadCabIr(bytes, opts);
     } catch (e) { c.reply.code(400); return { error: (e as Error).message }; }
   }, { octet: true });

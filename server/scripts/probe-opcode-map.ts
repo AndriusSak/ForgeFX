@@ -86,18 +86,18 @@ function classify(frames: readonly number[][], fn: number): { klass: Klass; resu
 /** 0x7A start-frame shapes: the measured export's, the gen-2 form, and structural variants around them. */
 function startShapes(): { label: string; payload: number[] }[] {
   return [
+    { label: 'EDITOR-CAPTURED 00 10 00 10 (user 1)', payload: [0x00, 0x10, 0x00, 0x10] },
+    { label: 'EDITOR-CAPTURED 0b 10 00 10 (user 12)', payload: [0x0b, 0x10, 0x00, 0x10] },
+    { label: '00 11 00 10 (user 129?)', payload: [0x00, 0x11, 0x00, 0x10] },
+    { label: '00 12 00 10', payload: [0x00, 0x12, 0x00, 0x10] },
+    { label: '00 13 00 10', payload: [0x00, 0x13, 0x00, 0x10] },
+    { label: '00 20 00 10 (scratchpad 1?)', payload: [0x00, 0x20, 0x00, 0x10] },
+    { label: '01 20 00 10', payload: [0x01, 0x20, 0x00, 0x10] },
+    { label: '00 21 00 10', payload: [0x00, 0x21, 0x00, 0x10] },
+    { label: '30 10 00 10 (user 49?)', payload: [0x30, 0x10, 0x00, 0x10] },
+    { label: 'export sentinel 7f 7f 00 10', payload: [0x7f, 0x7f, 0x00, 0x10] },
+    { label: 'swapped 10 00 00 10', payload: [0x10, 0x00, 0x00, 0x10] },
     { label: 'empty', payload: [] },
-    { label: 'gen-2 form 20 00 10', payload: [0x20, 0x00, 0x10] },
-    { label: 'export form 7f 7f 00 10', payload: [0x7f, 0x7f, 0x00, 0x10] },
-    { label: 'export minus tail 7f 7f 00', payload: [0x7f, 0x7f, 0x00] },
-    { label: 'target only 7f 7f', payload: [0x7f, 0x7f] },
-    { label: 'zero target 00 00 00 10', payload: [0x00, 0x00, 0x00, 0x10] },
-    { label: 'slot 1 msb 00 01 00 10', payload: [0x00, 0x01, 0x00, 0x10] },
-    { label: 'slot 1 lsb 01 00 00 10', payload: [0x01, 0x00, 0x00, 0x10] },
-    { label: 'tail only 00 10', payload: [0x00, 0x10] },
-    { label: '0x10 only', payload: [0x10] },
-    { label: 'gen-2 + zero 20 00 10 00', payload: [0x20, 0x00, 0x10, 0x00] },
-    { label: 'gen-2 short 20 00', payload: [0x20, 0x00] },
   ];
 }
 
