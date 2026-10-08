@@ -39,6 +39,8 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['POST', '/preset/restore'],
   // per-preset Performance Page write (§2.2) — mutates the unit's EDIT BUFFER (transient, but a write)
   ['PUT', '/preset/perform/:slot'],
+  // per-preset switch write (§3.8) — same edit-buffer target
+  ['PUT', '/preset/switches/:index'],
   // user-cab IR upload writes to the unit's cab storage (§2.5) — a device write, so a read-only
   // server must refuse it rather than push frames at the unit.
   ['POST', '/cab/ir/upload'],
@@ -67,7 +69,8 @@ export function isDeviceWrite(method: string, pathname: string): boolean {
  *  preview. Such a request is REFUSED with 400 rather than run against the real unit — a "preview" must
  *  never fall through to a live write, and a guaranteed decode failure is not a useful answer. */
 const NOT_DRY_RUNNABLE: ReadonlyArray<readonly [string, string]> = [
-  ['PUT', '/preset/perform/:slot'] // dump → patch → re-send: the dump is the thing that has no preview
+  ['PUT', '/preset/perform/:slot'], // dump → patch → re-send: the dump is the thing that has no preview
+  ['PUT', '/preset/switches/:index'] // same shape
 ];
 
 /** The body served when `?dryRun=true` is asked of a write that cannot be previewed. Identical on both

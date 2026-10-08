@@ -313,6 +313,10 @@ export function createRouter(deps: RuntimeDeps): {
   // Write ONE slot of the performance page (§2.2) — the WRITE side (mirrors app.ts). Device write.
   on('PUT', '/preset/perform/:slot', (c) =>
     h.performSlotH(c.reply, Number(c.params.slot), c.body as { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } | undefined));
+  // Per-preset SWITCH definitions (§3.8) — read-only, then the PP#1-only write (mirrors app.ts).
+  on('GET', '/preset/switches', (c) => h.perPresetSwitchesH(c.reply));
+  on('PUT', '/preset/switches/:index', (c) =>
+    h.perPresetSwitchH(c.reply, Number(c.params.index), c.body as { actionCode?: number; targetIndex?: number } | undefined));
   on('GET', '/presets/:n/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/blocks', (c) => h.blocksH(c.reply));

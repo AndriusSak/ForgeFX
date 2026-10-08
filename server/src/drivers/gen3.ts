@@ -31,8 +31,9 @@ import {
   CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
   buildBlankCabIrContainer,
   parsePerformPage, patchPerformSlot,
+  parsePerPresetSwitches, patchPerPresetSwitch,
   reencodeRawPatch, reencodeDumpFromRawPatch,
-  type DecodedBlock, type Gen3Modifier, type PerformPage
+  type DecodedBlock, type Gen3Modifier, type PerformPage, type PerPresetSwitches
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
 import { ENV } from './env.js';
@@ -42,7 +43,8 @@ import type {
   FcSwitchState, FcReadState, PresetModifier,
   CabIrUploadOptions, CabIrUploadResult,
   CabSlotQueryOptions, CabSlotStateResult, CabSlotClearResult,
-  PerformSlotPatch, PerformSlotWriteResult
+  PerformSlotPatch, PerformSlotWriteResult,
+  PerPresetSwitchPatch, PerPresetSwitchWriteResult
 } from './types.js';
 
 /** How long to keep listening for the device's frame-by-frame acks to an IR upload.
@@ -583,28 +585,24 @@ class Gen3Driver implements DeviceDriver {
     return parsePerformPage(body);
   }
 
-  /** Write ONE slot of the CURRENT edit buffer's per-preset PERFORMANCE PAGE (§2.2) — the WRITE side.
+  /** The shared read-modify-write spine of the preset-body writers (§2.2's perform page, §3.8's switch
+   *  definitions): dump the edit buffer → decompress → let `mutate` patch the body → recompress + rebuild
+   *  + retarget to the edit-buffer sentinel → send frame by frame at the pacing a measured-accepted write
+   *  used → settle → re-dump.
    *
-   *  The proven path (script `try-preset-write.ts`, accepted by the unit twice on 2026-10-08): dump the
-   *  edit buffer → decompress → patch the slot (ids AND labels TOGETHER — a labels-only or ids-only patch
-   *  leaves the other stale, which reads as a valid page showing the wrong name) → recompress + rebuild
-   *  the dump → retarget it to the edit-buffer sentinel → send it FRAME BY FRAME at the pacing the
-   *  measured-accepted write used → re-dump and report what the unit now holds.
-   *
-   *  THE TARGET IS THE EDIT BUFFER (0x3FFF), never a stored slot: a rejected or mangled write cannot
-   *  touch a saved preset, and reloading the preset discards it. `ok` is the READ-BACK verdict — never
-   *  the absence of a rejection; a dump the unit silently ignores reports `{ok:false,
-   *  reason:'readback-mismatch'}` with the slot as it actually reads. */
-  async setPerformSlot(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult> {
+   *  `mutate` returns null when it applied, or a failure reason (it is the only part that differs between
+   *  callers). The target is ALWAYS the edit buffer (0x3FFF): a rejected or mangled write cannot touch a
+   *  saved preset, and reloading the preset discards it. Returns the body the unit now holds — the caller
+   *  derives its own READ-BACK verdict from it, never from the mere absence of a rejection. */
+  async #rewriteBody(mutate: (body: Uint8Array) => string | null): Promise<{ body: Uint8Array } | { reason: string }> {
     const dev = await this.#conn();
-    const requested: PerformSlotPatch = { ...patch };
     const before = dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER));
     const raw = decodeRawPatch(parsePresetDump(before, 0, this.#prof.model).chunkPayloads);
-    if (!parsePerformPage(raw.body)) return { ok: false, slot, reason: 'no-page', requested, readback: null };
     const body = new Uint8Array(raw.body);
-    if (!patchPerformSlot(body, slot, patch)) return { ok: false, slot, reason: 'slot-out-of-range', requested, readback: null };
+    const failed = mutate(body);
+    if (failed) return { reason: failed };
     const stream = Array.from(reencodeDumpFromRawPatch(before, reencodeRawPatch(raw.rawPatch, body)));
-    if (!retargetPresetDumpToEditBuffer(stream)) return { ok: false, slot, reason: 'retarget-failed', requested, readback: null };
+    if (!retargetPresetDumpToEditBuffer(stream)) return { reason: 'retarget-failed' };
     for (const frame of splitFrames(stream)) {
       if (dev.sendPaced) await dev.sendPaced(frame, 64, 4);
       else if (dev.sendQueued) await dev.sendQueued(frame);
@@ -613,13 +611,59 @@ class Gen3Driver implements DeviceDriver {
     this.#gridCache = null; // the edit buffer changed → the next grid/blocks read reflects it
     await new Promise((r) => setTimeout(r, 1500)); // let the unit settle before the read-back dump
     const after = decodeRawPatch(parsePresetDump(dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER)), 0, this.#prof.model).chunkPayloads);
-    const readback = parsePerformPage(after.body)?.slots.find((s) => s.slot === slot) ?? null;
+    return { body: new Uint8Array(after.body) };
+  }
+
+  /** Write ONE slot of the CURRENT edit buffer's per-preset PERFORMANCE PAGE (§2.2) — the WRITE side.
+   *
+   *  The proven path (script `try-preset-write.ts`, accepted by the unit twice on 2026-10-08) as a method:
+   *  patch the slot (ids AND labels TOGETHER — a labels-only or ids-only patch leaves the other stale,
+   *  which reads as a valid page showing the wrong name), recompress + rebuild + retarget, send, re-dump.
+   *
+   *  `ok` is the READ-BACK verdict, never the absence of a rejection; a dump the unit silently ignores
+   *  reports `{ok:false, reason:'readback-mismatch'}` with the slot as it actually reads. */
+  async setPerformSlot(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult> {
+    const requested: PerformSlotPatch = { ...patch };
+    const res = await this.#rewriteBody((body) => {
+      if (!parsePerformPage(body)) return 'no-page';
+      return patchPerformSlot(body, slot, patch) ? null : 'slot-out-of-range';
+    });
+    if ('reason' in res) return { ok: false, slot, reason: res.reason, requested, readback: null };
+    const readback = parsePerformPage(res.body)?.slots.find((s) => s.slot === slot) ?? null;
     const ok = !!readback
       && (patch.effectId === undefined || readback.effectId === patch.effectId)
       && (patch.paramId === undefined || readback.paramId === patch.paramId)
       && (patch.effectLabel === undefined || readback.effectLabel === truncPerformLabel(patch.effectLabel))
       && (patch.paramLabel === undefined || readback.paramLabel === truncPerformLabel(patch.paramLabel));
     return ok ? { ok: true, slot, requested, readback } : { ok: false, slot, reason: 'readback-mismatch', requested, readback };
+  }
+
+  /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — one preset dump, decoded through the
+   *  SAME body path as `performPage()`. `undefined` when the body holds no block (the codec refuses to
+   *  synthesise one). Only PP#1's offsets are measured; the codec tags every other row `inferred`. */
+  async perPresetSwitches(): Promise<PerPresetSwitches | undefined> {
+    const frames = await this.#dumpFrames(EDIT_BUFFER);
+    const parsed = parsePresetDump(dumpBytesFromFrames(frames), 0, this.#prof.model);
+    const { body } = decodeRawPatch(parsed.chunkPayloads);
+    return parsePerPresetSwitches(body);
+  }
+
+  /** Write ONE per-preset switch (§3.8) — the WRITE side, riding `#rewriteBody` exactly as the perform
+   *  page does. Bounded on purpose: only PP#1's offsets have ever been observed, so any other index is
+   *  refused here rather than written to an unmeasured offset. `ok` is the READ-BACK verdict. */
+  async setPerPresetSwitch(index: number, patch: PerPresetSwitchPatch): Promise<PerPresetSwitchWriteResult> {
+    const requested: PerPresetSwitchPatch = { ...patch };
+    const res = await this.#rewriteBody((body) => {
+      if (!parsePerPresetSwitches(body)) return 'no-block';
+      if (!patchPerPresetSwitch(body, index, patch)) return 'unsupported-index';
+      return null;
+    });
+    if ('reason' in res) return { ok: false, index, reason: res.reason, requested, readback: null };
+    const readback = parsePerPresetSwitches(res.body)?.switches.find((s) => s.index === index) ?? null;
+    const ok = !!readback
+      && (patch.actionCode === undefined || readback.actionCode === patch.actionCode)
+      && (patch.targetIndex === undefined || readback.targetIndex === patch.targetIndex);
+    return ok ? { ok: true, index, requested, readback } : { ok: false, index, reason: 'readback-mismatch', requested, readback };
   }
 
   /** Decode every placed block's full params from the preset body, table-driven via the universal

@@ -2,7 +2,7 @@
 // pre-driver Device/Am4Device modules — their JSON shapes are the HTTP contract Axis consumes and
 // must not drift. `DeviceDriver` is the per-device surface the routes call; methods a device lacks
 // are optional and mirrored by `DriverCapabilities` so routes can answer 501 instead of guessing.
-import type { DecodedBlock, PerformPage, PerformSlot } from 'forgefx-midi/devices/gen3';
+import type { DecodedBlock, PerformPage, PerformSlot, PerPresetSwitch, PerPresetSwitches } from 'forgefx-midi/devices/gen3';
 import type { TypeModel, DeviceLayout, DeviceProfile } from '../devices.js';
 import type { Transport } from '../transport/types.js';
 import type { TelemetryMode, CadenceProfile } from './telemetryProfiles.js';
@@ -358,6 +358,24 @@ export interface PerformSlotWriteResult {
   readback: PerformSlot | null;
 }
 
+/** The fields `setPerPresetSwitch` patches, in the byte domain. */
+export interface PerPresetSwitchPatch {
+  /** The 16-bit action code (0x04 = Effect: Bypass, 0x03 = Scene: Select — INFERRED, two samples). */
+  actionCode?: number;
+  /** The target byte: an index into the FM3's alphabetical FX-slot enumeration. */
+  targetIndex?: number;
+}
+
+/** The outcome of a per-preset switch write, MEASURED by a read-back of the edit buffer. */
+export interface PerPresetSwitchWriteResult {
+  ok: boolean;
+  index: number;
+  /** 'no-block' | 'unsupported-index' | 'retarget-failed' | 'readback-mismatch'. */
+  reason?: string;
+  requested: PerPresetSwitchPatch;
+  readback: PerPresetSwitch | null;
+}
+
 export interface DeviceDriver {
   /** SysEx model byte of the device this driver drives (0x10/0x11/0x12/0x15). */
   readonly modelId: number;
@@ -394,6 +412,13 @@ export interface DeviceDriver {
    *  Patches the slot's ids AND its labels together (labels alone go stale) and sends the recompressed
    *  dump to the EDIT BUFFER (0x3FFF): transient, never a saved slot. Gen-3 only. */
   setPerformSlot?(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult>;
+  /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — one row per switch with its action
+   *  code and target index; `undefined` when the body has no block (never a synthesised one). Gen-3 only.
+   *  NOTE: only PP#1's offsets are measured; every other row is INFERRED (see the codec). */
+  perPresetSwitches?(): Promise<PerPresetSwitches | undefined>;
+  /** Write ONE per-preset switch (currently only PP#1, the one index whose offsets are measured) and
+   *  report what the edit buffer reads back. Same transient EDIT-BUFFER target as `setPerformSlot`. */
+  setPerPresetSwitch?(index: number, patch: PerPresetSwitchPatch): Promise<PerPresetSwitchWriteResult>;
   presetBodyHex?(): Promise<{ len: number; hex: string }>;
   placedBlocks?(): Promise<PresetBlockDTO[]>;
 

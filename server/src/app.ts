@@ -80,7 +80,7 @@ export async function buildApp(
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes, performPageH, performSlotH
+    decodeH, decodeBytes, performPageH, performSlotH, perPresetSwitchesH, perPresetSwitchH
   } = createUnifiedHandlers(registry);
 
   // ── write-safety gates (docs/write-protocol.md:37-39 is the authority; Axis/docs/ROADMAP.md is
@@ -261,6 +261,16 @@ export async function buildApp(
   app.put<{ Params: { slot: string }; Body: { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } }>(
     '/preset/perform/:slot',
     async (req, reply) => performSlotH(reply, Number(req.params.slot), req.body)
+  );
+  // Per-preset SWITCH definitions of the current edit buffer (§3.8) — read-only, one preset dump. 501 when
+  // the device can't; `null` when the body holds no block. Only PP#1's offsets are measured, so every
+  // other row comes back tagged `inferred`.
+  app.get('/preset/switches', (_req, reply) => perPresetSwitchesH(reply));
+  // Write ONE per-preset switch (§3.8). Bounded to PP#1 deliberately — the only index whose offsets have
+  // been measured; other indices answer 400 rather than corrupting an unmeasured field. Device write.
+  app.put<{ Params: { index: string }; Body: { actionCode?: number; targetIndex?: number } }>(
+    '/preset/switches/:index',
+    async (req, reply) => perPresetSwitchH(reply, Number(req.params.index), req.body)
   );
   // ── persistent store: documents (Axis config · library metadata · layouts) ──
   app.get<{ Params: { c: string } }>('/store/:c', (req) => ({ docs: store.listDocs(req.params.c) }));

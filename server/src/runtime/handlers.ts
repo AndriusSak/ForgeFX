@@ -7,7 +7,7 @@
 // the router uses a tiny status recorder), so the exact same code produces the exact same
 // status+body on both surfaces. NO node:/fastify imports — this module must load in a browser.
 import type { DeviceRegistry } from '../drivers/registryCore.js';
-import type { PerformSlotPatch } from '../drivers/types.js';
+import type { PerformSlotPatch, PerPresetSwitchPatch } from '../drivers/types.js';
 
 /** The one reply capability the shared handlers need: set the response status. FastifyReply's
  *  `code()` matches; the runtime router records the status into its RouterResponse. */
@@ -70,6 +70,9 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   const EID_MAX = 0x3fff;
   /** The per-preset Performance Page always holds ten editor slots (see the codec's PERFORM_SLOTS). */
   const PERFORM_SLOT_COUNT = 10;
+  /** Upper bound on a per-preset switch index — an ASSUMED device count (the codec's PP_SWITCH_COUNT);
+   *  only index 1 is writable today, so this only bounds what a garbage index is rejected against. */
+  const PP_SWITCH_COUNT_MAX = 12;
   /** A gen-3 effect/param/block id: an integer in the codec's 14-bit 0..16383 space. */
   const isEid = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= EID_MAX;
   /** The device's routed grid shape: its declared `grid`, the AM4's 1×slotCount linear chain, else the
@@ -583,6 +586,42 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
   };
 
+  /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — READ-ONLY, one preset dump.
+   *  `undefined` (no block in the body) is coerced to null so both surfaces answer a JSON body. */
+  const perPresetSwitchesH = async (reply: StatusSink) => {
+    const d = await driver();
+    if (!d.perPresetSwitches) return unsupported(reply, 'perPresetSwitches');
+    try { return (await d.perPresetSwitches()) ?? null; }
+    catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+
+  /** Write ONE per-preset switch (§3.8) — the WRITE side. Bounded to PP#1 ON PURPOSE: that is the only
+   *  index whose byte offsets have been observed on the wire, and writing to an unmeasured offset would
+   *  corrupt an unrelated field. Any other index is refused with 400 rather than attempted. */
+  const perPresetSwitchH = async (reply: StatusSink, index: number, b?: PerPresetSwitchPatch) => {
+    if (!Number.isInteger(index) || index < 1 || index > PP_SWITCH_COUNT_MAX) {
+      reply.code(400); return { ok: false, error: `index must be an integer 1..${PP_SWITCH_COUNT_MAX}` };
+    }
+    if (index !== 1) {
+      reply.code(400);
+      return { ok: false, error: 'only PP#1 can be written: its byte offsets are the only ones measured (every other row is inferred)' };
+    }
+    const p: PerPresetSwitchPatch = b ?? {};
+    if (p.actionCode === undefined && p.targetIndex === undefined) {
+      reply.code(400); return { ok: false, error: 'at least one of actionCode, targetIndex is required' };
+    }
+    if (p.actionCode !== undefined && (!Number.isInteger(p.actionCode) || p.actionCode < 0 || p.actionCode > 0xffff)) {
+      reply.code(400); return { ok: false, error: 'actionCode must be an integer 0..65535' };
+    }
+    if (p.targetIndex !== undefined && (!Number.isInteger(p.targetIndex) || p.targetIndex < 0 || p.targetIndex > 0xff)) {
+      reply.code(400); return { ok: false, error: 'targetIndex must be an integer 0..255' };
+    }
+    const d = await driver();
+    if (!d.setPerPresetSwitch) return unsupported(reply, 'setPerPresetSwitch');
+    try { return await d.setPerPresetSwitch(index, p); }
+    catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
+  };
+
   return {
     driver, unsupported, decodeFail,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
@@ -592,6 +631,6 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes, performPageH, performSlotH
+    decodeH, decodeBytes, performPageH, performSlotH, perPresetSwitchesH, perPresetSwitchH
   };
 }
