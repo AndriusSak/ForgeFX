@@ -1,6 +1,25 @@
 # 0004 — Non-positional families (GLOBAL) are served UNKNOWN, not fabricated
 
-Status: Accepted
+Status: **SUPERSEDED 2026-10-07 — the premise below was refuted by measurement against a live FM3.**
+
+> **Superseded.** This ADR decided that the GLOBAL family must be served UNKNOWN because its catalog
+> declares `stride 186` while carrying pids up to 65522 — from which it inferred that `pid >= 186` reads
+> past the block and `?? 0` fabricated a 0. **The device disagrees**: the eid-1 `fn=0x1F` body is
+> **14,880 records** and is **indexed by pid**. With the user at the panel, `Mini Display/Ring Brightness`
+> at 100% read `body[7115] = 65534`, and at 70% read `45874` — exactly `0.70 x 65534`; `Mini Display
+> Contrast` 50% read `body[7116] = 32767` (half of 65534); `Ring Intensity Bright` 100% read
+> `body[110] = 65534`. The stride is not the address space, so `base + 7115` was never out of range.
+>
+> The incident this ADR cites was **not** caused by the bulk path: the probe read through the per-pid
+> GET (`fn 0x01 sub 01 00`), which replies with a canned FC-selector template whose value field decodes
+> to a denormal (`2.085e-41`) that *displays as* `0.0000`; the restore then wrote that 0. The GET is now
+> routed through the `0x1a` range op and refuses subnormal/non-finite values.
+>
+> **Correct behaviour (implemented):** read GLOBAL by pid from the body; serve UNKNOWN only for a pid
+> the body genuinely lacks (per-pid, not per-family). The over-broad refusal was removed in P13. This ADR
+> is kept because it records why the wrong call was made — the lesson is that a stride read off a catalog
+> table is not a measurement of a device.
+
 Date: 2026-10-07
 Owners: maintainer
 
