@@ -15,6 +15,12 @@
 // It reads the original raw via the BODY, writes, re-reads via the BODY, then restores the original raw and
 // re-reads to confirm — and it reports honestly if the restore cannot be shown to have taken.
 // LOOK AT THE UNIT: the mini-displays and footswitch LED rings should visibly change and then return.
+//
+// CONVENTION (P14, 2026-10-08): the driver's continuous write takes the client's normalized 0..1 value and,
+// for GLOBAL, converts it to DISPLAY units (0..100) on the wire — measured: setParam(1, 7115, 70) → 70%,
+// setParam(1, 7115, 0.70) → 0.7%. So this script, like every other caller, sends `norm` (--to 40 → 0.40);
+// it prints both the norm it sent and the display % that should result. Sending 40 directly would now be a
+// norm of 40 → clamped/converted to 4000 on the wire, which is the bug this convention avoids.
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
 
@@ -56,8 +62,8 @@ async function main(): Promise<number> {
     console.log('── plan ───────────────────────────────────────────────────────────────────────────');
     console.log(`  parameter : GLOBAL_FS_BRIGHTNESS (eid ${GLOBAL_EID}, pid ${BRIGHTNESS_PID}) — "Mini Display/Ring Brightness"`);
     console.log(`  original  : raw ${before}  (${pct(before)})`);
-    console.log(`  would write: ${toPct}% -> raw ~${Math.round((toPct / 100) * RAW_MAX)}`);
-    console.log(`  would restore: raw ${before}  (${pct(before)})`);
+    console.log(`  would send: norm ${(toPct / 100).toFixed(4)}  (display ${toPct}% -> raw ~${Math.round((toPct / 100) * RAW_MAX)})`);
+    console.log(`  would restore: norm ${(before / RAW_MAX).toFixed(4)}  (raw ${before}, ${pct(before)})`);
     console.log(`  LOOK AT THE UNIT: the mini-displays and LED rings should visibly change, then return.`);
     if (!go) {
       console.log('');
@@ -67,9 +73,11 @@ async function main(): Promise<number> {
 
     console.log('');
     console.log('── writing ────────────────────────────────────────────────────────────────────────');
-    // MEASURED 2026-10-07: this parameter takes DISPLAY UNITS (0..100), not a normalized 0..1 float.
-    // Writing 0.40 on the continuous path set 0.4% (raw 262), not 40% — so the value is the percentage.
-    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, toPct);
+    // CONVENTION (P14): send the client's normalized 0..1 value. The driver converts it to DISPLAY units
+    // for GLOBAL (measured 2026-10-08: setParam(1,7115,70) → 70%, 0.70 → 0.7%), so 40% is sent as 0.40.
+    const sendNorm = toPct / 100;
+    console.log(`  sending    : norm ${sendNorm.toFixed(4)}  (expected display ${toPct}%)`);
+    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, sendNorm);
     await new Promise((r) => setTimeout(r, 400));
     const after = (await readRawBody(s))[BRIGHTNESS_PID];
     console.log(`  after write : raw ${after}  (${pct(after)})  <- read from the BODY, not the GET`);
@@ -88,8 +96,8 @@ async function main(): Promise<number> {
       console.log('  original raw was unreadable — NOT restoring anything (nothing to restore to). Fix by hand if needed.');
       return 2;
     }
-    // Restore in DISPLAY UNITS too (before is raw 16-bit; convert to the 0..100 the param expects).
-    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, (before / RAW_MAX) * 100);
+    // Restore in NORM too (before is the raw 16-bit body value; norm = raw/65534; the driver converts).
+    await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, before / RAW_MAX);
     await new Promise((r) => setTimeout(r, 400));
     const restored = (await readRawBody(s))[BRIGHTNESS_PID];
     console.log(`  after restore: raw ${restored}  (${pct(restored)})   original was ${before} (${pct(before)})`);
