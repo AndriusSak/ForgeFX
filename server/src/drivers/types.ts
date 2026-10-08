@@ -232,8 +232,11 @@ export interface CabSlotStateResult {
   populated: boolean | null;
   /** The raw flag byte, so an unparsed/unknown reading is still inspectable. */
   flag: number | null;
-  /** The content-derived region — identical for slots holding the same IR. NOT a name; not decoded. */
+  /** The first 15 bytes of the packed name field (kept for comparison; `name` is the readable form). */
   nameRegion: number[];
+  /** The slot's NAME, decoded from the unit's own reply — measured 2026-10-08. An empty slot reports the
+   *  device's literal "<EMPTY>", so a name is only meaningful when `populated` is true. */
+  name?: string;
   /** Why `populated` is null, when it is. */
   note?: string;
 }

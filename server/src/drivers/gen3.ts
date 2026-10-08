@@ -1183,6 +1183,7 @@ class Gen3Driver implements DeviceDriver {
         populated: state.populated,
         flag: state.flag,
         nameRegion: state.nameRegion,
+        ...(state.name !== undefined ? { name: state.name } : {}),
         ...(state.populated === null ? { note: `unrecognised flag byte 0x${state.flag.toString(16)}` } : {}),
       });
     }
