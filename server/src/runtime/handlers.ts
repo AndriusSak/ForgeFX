@@ -203,7 +203,20 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   };
   // Unified param write: {value, continuous}. continuous:true → the driver's normalized write
   // (gen-3 continuous SET; AM4 SET_NORM with value as 0..1), continuous:false → discrete ordinal.
-  const setParamH = async (reply: StatusSink, addr: number, paramId: number, value: number, continuous: boolean) => {
+  //
+  // `continuous` is REQUIRED at this boundary and FAILS CLOSED: omitting it is a 400, never a guess.
+  // The two opcodes carry DIFFERENT units — continuous takes the client's NORMALIZED 0..1 (raw 0.25 →
+  // 25%), discrete takes PERCENT/ordinal (raw 40 → 40%) — so an omitted flag has NO safe default: a
+  // direct caller sending `{value:1}` for a knob at maximum silently got 1% via the old `?? false`,
+  // while the Axis client's own helper defaulted the SAME omission to `continuous:true` (→ 100%). The
+  // two sides of the wire disagreed on what an omission MEANS. Forcing the caller to state it removes
+  // the ambiguity. THIS IS AN INTENTIONAL API CHANGE (W2.4): every in-tree caller was checked and the
+  // Axis client always sends the field; test helpers that pinned the old `?? false` default are updated.
+  const setParamH = async (reply: StatusSink, addr: number, paramId: number, value: number, continuous: boolean | undefined) => {
+    if (typeof continuous !== 'boolean') {
+      reply.code(400);
+      return { error: 'continuous is required: send continuous:true for a normalized 0..1 knob value, or continuous:false for a discrete ordinal/percent value (an omitted flag is ambiguous — it selected opposite units on the two sides of the wire)' };
+    }
     // 400 (not an unhandled 500) on a non-integer/out-of-range address or param id — the codec's
     // encode14 throws on these, so a bad route param must be mapped to Bad Request at the seam.
     if (!Number.isInteger(addr) || addr < 0 || addr > 0x3fff || !Number.isInteger(paramId) || paramId < 0 || paramId > 0x3fff) {
