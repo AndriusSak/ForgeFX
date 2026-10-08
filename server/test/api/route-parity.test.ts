@@ -262,7 +262,7 @@ const VALIDATION_ROWS: ValRow[] = [
 
 // drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row,
 // plus the P6 silent-accept proof (against the REAL gen-3 codec) and the P9 fc/state proof, plus the
-// P10 repeated-query-key divergence block.
+// P10 repeated-query-key unification block (a repeated single-valued key → 400 on BOTH surfaces).
 export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 6;
 
 export async function runRouteParityTests(): Promise<void> {
@@ -394,30 +394,30 @@ export async function runRouteParityTests(): Promise<void> {
     }
   }
 
-  // ── 7. P10 — REPEATED QUERY KEYS: a genuine, DOCUMENTED divergence between the two surfaces ──
-  // `?eid=1&eid=2` (the same key twice) is parsed differently by the two query parsers:
-  //   • Fastify (app.ts) → `req.query.eid` is the ARRAY ['1','2']; the shared handlers coerce with
-  //     `Number(['1','2'])` → NaN → not an integer → 400. (Same for /preset/looper and /fc/state's axes.)
-  //   • the browser router → `c.query` is a URLSearchParams and `.get('eid')` takes the FIRST value
-  //     ('1') → 200. The surface genuinely DIFFERS; the §4 guard above (single-key queries only) misses it.
-  // This block PINS the observed behaviour on EACH surface so the divergence cannot drift silently. It is
-  // a FINDING, not a fix: unifying the two parsers is a src/ change, out of scope for a test-only round.
-  // If a future fix makes the router reject repeated keys too, update these expectations deliberately.
+  // ── 7. P10 (UNIFIED) — REPEATED QUERY KEYS: a repeated single-valued key is a 400 on BOTH surfaces ──
+  // `?eid=1&eid=2` (the same key twice) used to be parsed differently by the two query parsers:
+  //   • Fastify (app.ts) → `req.query.eid` is the ARRAY ['1','2']; `Number(['1','2'])` → NaN → 400.
+  //   • the browser router → `c.query.get('eid')` took the FIRST value ('1') → 200.
+  // A repeated key is AMBIGUOUS, so both surfaces now share `singleQuery` (runtime/handlers.ts) and the
+  // router normalises its URLSearchParams into Fastify's shape (runtime/router.ts `queryValue`). This
+  // block asserts the UNIFIED result: 400 on BOTH surfaces, with the SAME body naming the parameter.
+  // (The §4 rows still prove a key given ONCE — or absent — is untouched, so the guard is not over-broad.)
   {
     const { app, registry } = await buildTestApp(0x11, makeFakeFm3());
     const router = createRouter({ registry, store: store.defaultStore });
-    const REPEATED: Array<{ url: string; appError: string }> = [
-      { url: '/preset/monitors/live?eid=1&eid=2', appError: 'eid must be an integer 0..16383' },
-      { url: '/preset/looper?eid=1&eid=2', appError: 'eid required (integer 0..16383)' },
-      { url: '/fc/state?layout=0&layout=1', appError: 'layout, view and switch must be non-negative integers' }
+    const REPEATED: Array<{ url: string; error: string }> = [
+      { url: '/preset/monitors/live?eid=1&eid=2', error: 'query parameter "eid" must be given at most once' },
+      { url: '/preset/looper?eid=1&eid=2', error: 'query parameter "eid" must be given at most once' },
+      { url: '/fc/state?layout=0&layout=1', error: 'query parameter "layout" must be given at most once' }
     ];
     try {
-      for (const { url, appError } of REPEATED) {
+      for (const { url, error } of REPEATED) {
         const res = await app.inject({ method: 'GET', url });
-        assertEqual(res.statusCode, 400, `${url}: Fastify sees the repeated key as an array → 400`);
-        assertEqual((JSON.parse(res.payload) as { error: string }).error, appError, `${url}: app 400 error`);
+        assertEqual(res.statusCode, 400, `${url}: Fastify rejects the repeated key → 400`);
+        assertEqual((JSON.parse(res.payload) as { error: string }).error, error, `${url}: app 400 error names the parameter`);
         const routed = await router.handle('GET', url, undefined);
-        assertEqual(routed.status, 200, `${url}: the browser router takes the FIRST value → 200 (documented divergence)`);
+        assertEqual(routed.status, 400, `${url}: the browser router now rejects the repeated key too → 400 (unified)`);
+        assertEqual(routed.body, res.payload, `${url}: body parity — the router 400 must BE the app payload`);
       }
     } finally {
       await app.close();

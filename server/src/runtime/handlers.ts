@@ -12,6 +12,27 @@ import type { DeviceRegistry } from '../drivers/registryCore.js';
  *  `code()` matches; the runtime router records the status into its RouterResponse. */
 export interface StatusSink { code(statusCode: number): unknown }
 
+/** A single-valued query parameter's raw value as the two HTTP surfaces deliver it. Fastify parses a
+ *  repeated key (`?eid=1&eid=2`) into a string[]; a key given ONCE is a bare string, an absent key is
+ *  undefined. The browser runtime router normalises its URLSearchParams into this same shape
+ *  (router.ts `queryValue`), so one shared guard can police both surfaces identically. */
+export type RawQuery = string | string[] | undefined;
+
+/** Fail-closed single-valued query guard (the divergence is MEASURED, not assumed). Before this guard
+ *  the two surfaces DISAGREED on a repeated key: Fastify parsed `?eid=1&eid=2` into the array ['1','2']
+ *  and the shared handler's `Number(['1','2'])` → NaN → 400, while the browser router's
+ *  `URLSearchParams.get()` took the FIRST value ('1') → 200. A repeated key is AMBIGUOUS — there is no
+ *  defensible "first wins" or "last wins" — so BOTH surfaces now refuse it with 400 naming the
+ *  parameter. A key given once, or absent (undefined), passes through unchanged. */
+function singleQuery(reply: StatusSink, name: string, raw: RawQuery):
+  { ok: true; value: string | undefined } | { ok: false; body: { error: string } } {
+  if (Array.isArray(raw)) {
+    reply.code(400);
+    return { ok: false, body: { error: `query parameter "${name}" must be given at most once` } };
+  }
+  return { ok: true, value: raw };
+}
+
 export function createUnifiedHandlers(registry: DeviceRegistry) {
   const driver = () => registry.driver();
 
@@ -147,10 +168,12 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   };
   // Query-string reads: an ADDRESSED eid query (integer 0..16383) — garbage → 400 rather than silently
   // widening/altering the read. An ABSENT/empty eid keeps its documented "no filter" meaning.
-  const liveMonitorsH = async (reply: StatusSink, rawEid?: string) => {
+  const liveMonitorsH = async (reply: StatusSink, rawEid?: RawQuery) => {
+    const q = singleQuery(reply, 'eid', rawEid);
+    if (!q.ok) return q.body;
     let eid: number | undefined;
-    if (rawEid != null && rawEid !== '') {
-      const n = Number(rawEid);
+    if (q.value != null && q.value !== '') {
+      const n = Number(q.value);
       if (!isEid(n)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
       eid = n;
     }
@@ -160,8 +183,10 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       return await d.liveMonitors(eid);
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   };
-  const looperTelemetryH = async (reply: StatusSink, rawEid?: string) => {
-    const eid = rawEid != null && rawEid !== '' ? Number(rawEid) : NaN;
+  const looperTelemetryH = async (reply: StatusSink, rawEid?: RawQuery) => {
+    const q = singleQuery(reply, 'eid', rawEid);
+    if (!q.ok) return q.body;
+    const eid = q.value != null && q.value !== '' ? Number(q.value) : NaN;
     if (!isEid(eid)) { reply.code(400); return { error: 'eid required (integer 0..16383)' }; }
     try {
       const d = await driver();
@@ -179,11 +204,18 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   // absent. Bound each axis to the device's declared FC geometry when the profile carries it (FM3:
   // 9 layouts × 4 views × 3 switches); an axis the model does not declare is only integer/non-negative
   // checked, so we reject what we can prove and never guess a maximum we cannot.
-  const fcStateH = async (reply: StatusSink, rawLayout?: string, rawView?: string, rawSwitch?: string) => {
+  const fcStateH = async (reply: StatusSink, rawLayout?: RawQuery, rawView?: RawQuery, rawSwitch?: RawQuery) => {
+    // A repeated axis (`?layout=0&layout=1`) is ambiguous → 400 naming that axis, on BOTH surfaces.
+    const lq = singleQuery(reply, 'layout', rawLayout);
+    if (!lq.ok) return lq.body;
+    const vq = singleQuery(reply, 'view', rawView);
+    if (!vq.ok) return vq.body;
+    const sq = singleQuery(reply, 'switch', rawSwitch);
+    if (!sq.ok) return sq.body;
     const axis = (raw?: string): number => (raw == null || raw === '' ? 0 : Number(raw));
-    const layout = axis(rawLayout);
-    const view = axis(rawView);
-    const sw = axis(rawSwitch);
+    const layout = axis(lq.value);
+    const view = axis(vq.value);
+    const sw = axis(sq.value);
     if (!Number.isInteger(layout) || layout < 0 || !Number.isInteger(view) || view < 0
       || !Number.isInteger(sw) || sw < 0) {
       reply.code(400);

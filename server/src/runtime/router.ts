@@ -24,7 +24,7 @@ import * as deviceCache from '../services/deviceCache.js';
 import * as editorCacheImport from '../services/editorCacheImport.js';
 import * as cloudProfiles from '../services/cloudProfiles.js';
 import { blockHelpBySlug, helpIndex } from '../help.js';
-import { createUnifiedHandlers } from './handlers.js';
+import { createUnifiedHandlers, type RawQuery } from './handlers.js';
 import { putStoreDoc } from './services.js';
 import { createLocalService } from './localService.js';
 import type { FolderAdapter } from './folderAdapter.js';
@@ -88,6 +88,16 @@ interface Route { method: string; path: string; segs: string[]; octet: boolean; 
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const OCTET_TYPE = 'application/octet-stream';
+
+/** A query parameter's raw value in the SAME shape Fastify delivers (handlers.ts `RawQuery`): a key
+ *  given once is a bare string, a repeated key (`?eid=1&eid=2`) is a string[], an absent key is
+ *  undefined. URLSearchParams.getAll() always yields an array, so normalise it here — 0 → absent,
+ *  1 → the string, 2+ → the array (a repeated key). This is what lets the shared singleQuery guard
+ *  reject a repeated key identically on both surfaces instead of silently taking the first value. */
+const queryValue = (query: URLSearchParams, name: string): RawQuery => {
+  const all = query.getAll(name);
+  return all.length === 0 ? undefined : all.length === 1 ? all[0] : all;
+};
 
 export function createRouter(deps: RuntimeDeps): {
   handle(method: string, path: string, body?: string | Uint8Array): Promise<RouterResponse>;
@@ -513,8 +523,8 @@ export function createRouter(deps: RuntimeDeps): {
   // Per-block monitor (meter) param table — read-only pids Axis renders meters from. {} if none.
   on('GET', '/preset/monitors', () => registry.profile.monitorParams ?? {});
   // Live per-block audio meters: reads each placed monitored block's level (normalized 0..1) + dB.
-  on('GET', '/preset/monitors/live', (c) => h.liveMonitorsH(c.reply, c.query.get('eid') ?? undefined));
-  on('GET', '/preset/looper', (c) => h.looperTelemetryH(c.reply, c.query.get('eid') ?? undefined));
+  on('GET', '/preset/monitors/live', (c) => h.liveMonitorsH(c.reply, queryValue(c.query, 'eid')));
+  on('GET', '/preset/looper', (c) => h.looperTelemetryH(c.reply, queryValue(c.query, 'eid')));
   on('POST', '/preset/looper/control', async (c) => {
     const { eid, action, on: onv } = (c.body ?? {}) as { eid?: number; action?: string; on?: boolean };
     try {
@@ -527,7 +537,7 @@ export function createRouter(deps: RuntimeDeps): {
   // FC current switch state for one (layout,view,switch), via the sub-0x1b value channel (see app.ts).
   // layout/view/switch are validated in the SHARED fcStateH (malformed → 400 before driver()).
   on('GET', '/fc/state', (c) => h.fcStateH(c.reply,
-    c.query.get('layout') ?? undefined, c.query.get('view') ?? undefined, c.query.get('switch') ?? undefined));
+    queryValue(c.query, 'layout'), queryValue(c.query, 'view'), queryValue(c.query, 'switch')));
   // bind a modifier slot to a target parameter (writes targetEffectId + targetParam + source on the slot eid)
   on('POST', '/mod/bind', async (c) => {
     const b = c.body as { slot?: number; targetEffectId?: number; targetParam?: number; source?: number } | undefined;

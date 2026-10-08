@@ -32,7 +32,7 @@ import * as editorCacheImport from './services/editorCacheImport.js';
 import * as editorCacheDiscovery from './services/editorCacheDiscovery.js';
 import * as cloudProfiles from './services/cloudProfiles.js';
 import * as store from './store.js';
-import { createUnifiedHandlers } from './runtime/handlers.js';
+import { createUnifiedHandlers, type RawQuery } from './runtime/handlers.js';
 import { putStoreDoc } from './runtime/services.js';
 import { registerLocalRoutes } from './localStore.js';
 import { registerHelpRoutes } from './help.js';
@@ -569,9 +569,9 @@ export async function buildApp(
   app.get('/preset/monitors', () => registry.profile.monitorParams ?? {});
   // Live per-block audio meters: reads each placed monitored block's level (normalized 0..1) + dB.
   // ?eid= (optional) narrows to one block; an ADDRESSED but malformed eid is 400 (see liveMonitorsH).
-  app.get('/preset/monitors/live', (req, reply) => liveMonitorsH(reply, (req.query as { eid?: string }).eid));
+  app.get('/preset/monitors/live', (req, reply) => liveMonitorsH(reply, (req.query as { eid?: RawQuery }).eid));
   // Looper page telemetry (waveform envelope + playhead position + level). Empty for non-looper blocks.
-  app.get('/preset/looper', (req, reply) => looperTelemetryH(reply, (req.query as { eid?: string }).eid));
+  app.get('/preset/looper', (req, reply) => looperTelemetryH(reply, (req.query as { eid?: RawQuery }).eid));
   // Toggle a looper transport control (record/play/stop/overdub/undo/once/reverse/half).
   app.post<{ Body: { eid?: number; action?: string; on?: boolean } }>('/preset/looper/control', async (req, reply) => {
     const { eid, action, on } = req.body ?? {};
@@ -587,7 +587,9 @@ export async function buildApp(
   // switch must be non-negative integers within this device's FC geometry (malformed → 400 BEFORE the
   // driver; fcStateH); the driver additionally refuses to encode an out-of-range address (throws) rather
   // than silently reading pid 0. See fcStateH for the NaN → enc14 [0,0] silent-misread rationale.
-  app.get<{ Querystring: { layout?: string; view?: string; switch?: string } }>('/fc/state', (req, reply) =>
+  // Querystring is RawQuery (not bare string): Fastify parses a repeated axis into a string[], which
+  // the shared fcStateH now refuses with 400 — the declared type states the runtime shape, not an ideal.
+  app.get<{ Querystring: { layout?: RawQuery; view?: RawQuery; switch?: RawQuery } }>('/fc/state', (req, reply) =>
     fcStateH(reply, req.query.layout, req.query.view, req.query.switch));
 
   // decompressed preset body (hex) — for per-block param-decode RE (offset diffs)
