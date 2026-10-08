@@ -12,7 +12,7 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parsePresetDump, decodeRawPatch, reencodeRawPatch, reencodeDumpFromRawPatch, parsePerformPage, PERFORM_SLOTS } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, reencodeRawPatch, reencodeDumpFromRawPatch, parsePerformPage, patchPerformSlot } from 'forgefx-midi/devices/gen3';
 
 const u16 = (b: Uint8Array, o: number) => b[o]! | (b[o + 1]! << 8);
 
@@ -23,6 +23,9 @@ export function main(argv: string[]): number {
   const slot = argOf('--slot', 1) - 1;
   const newEid = argOf('--eid', 62);   // default: point slot 1 at the Cab block
   const newPid = argOf('--pid', 41);   // and at its proximity frequency — a target we can verify by eye
+  const argS = (n: string): string | undefined => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+  const effectLabel = argS('--effect-label');
+  const paramLabel = argS('--param-label');
   const dump = new Uint8Array(readFileSync(file.replace('~', process.env.HOME ?? '')));
 
   const parsed = parsePresetDump(dump);
@@ -32,12 +35,19 @@ export function main(argv: string[]): number {
   const at = before.at;
   console.log(`slot ${slot + 1} BEFORE: eid ${before.slots[slot]!.effectId} pid ${before.slots[slot]!.paramId} label ${JSON.stringify(before.slots[slot]!.paramLabel)}`);
 
-  // ── the patch: length-preserving, in the two tables only ──
+  // ── the patch: length-preserving tables AND the label windows, together ──
+  // The first run of this script patched the tables alone, which left the OLD label in place — a page that
+  // passes every structural check and shows a stale name. patchPerformSlot writes both, and the labels are
+  // truncated-and-NUL-padded to the 32-byte window rather than resized.
   const body = new Uint8Array(dec.body);
-  const put = (o: number, v: number): void => { body[o] = v & 0xff; body[o + 1] = (v >> 8) & 0xff; };
-  put(at + slot * 2, newEid);
-  put(at + PERFORM_SLOTS * 2 + slot * 2, newPid);
-  console.log(`patched to eid ${newEid} pid ${newPid} (tables only — the label blocks are untouched)`);
+  const patched = patchPerformSlot(body, slot + 1, {
+    effectId: newEid,
+    paramId: newPid,
+    effectLabel: effectLabel ?? 'CAB',
+    paramLabel: paramLabel ?? 'Proximity Frequ'
+  });
+  if (!patched) { console.log('patch refused (no page, or slot out of range)'); return 1; }
+  console.log(`patched to eid ${newEid} pid ${newPid} with labels ${JSON.stringify(effectLabel ?? 'CAB')} / ${JSON.stringify(paramLabel ?? 'Proximity Frequ')} (tables AND label windows)`);
 
   // ── recompress and rebuild the dump ──
   const newRaw = reencodeRawPatch(dec.rawPatch, body);
