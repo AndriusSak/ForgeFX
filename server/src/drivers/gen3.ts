@@ -254,31 +254,6 @@ class Gen3Driver implements DeviceDriver {
     return { stride, channelCount, base: Math.min(activeChannel, channelCount - 1) * stride };
   }
 
-  /** Why the fn=0x1F bulk body CANNOT resolve a family's param VALUES, or null when it can.
-   *
-   *  The bulk read is POSITIONAL: `assembleGen3BlockBulkRead` reconstructs `values[i]` as the param
-   *  whose device-true paramId is i, and blockParams indexes `values[base + pid]`. That identity only
-   *  holds for a DENSE family — one whose catalog pids tile `0..stride-1`, so pid == record ordinal.
-   *  A SPARSE family breaks it: the FM3 GLOBAL family declares `stride 186` yet carries 173 pids up to
-   *  65522 (91 of them >= 186) — those are device WIRE ADDRESSES, not positions. For such a family the
-   *  positional index is meaningless: `pid >= stride` runs past the block (where the old `?? 0` served
-   *  a fabricated 0 — a CANDIDATE cause of the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident, but
-   *  UNCONFIRMED: the probe that observed that 0 reads through the per-pid GET, not through this path),
-   *  and `pid < stride`
-   *  lands on whatever record shares that ordinal (silently WRONG, not zero). The catalog ships no
-   *  pid→ordinal map to fix this (ranges.generated.ts keys its GLOBAL table by paramId, not position),
-   *  so blockParams must refuse to guess. We detect the case structurally: if ANY ordinary (< 0xff00)
-   *  catalog pid reaches the declared stride, the family is not provably positional. */
-  #bulkUnresolvedReason(family: string | undefined): string | null {
-    if (!family) return null;
-    const stride = this.#prof.rangeSections[family]?.stride;
-    if (stride == null || stride <= 0) return null; // no declared fn=0x1F stride → nothing to reason about
-    const defs = this.#prof.params[family] ?? [];
-    const off = defs.find((p) => p.paramId < 0xff00 && p.paramId >= stride);
-    if (!off) return null; // every ordinary pid < stride → dense/positional (pid == ordinal) → safe
-    return `${family} param values are not addressable by the fn=0x1F positional body: catalog paramId ${off.paramId} >= the block stride ${stride}, so the bulk read cannot index it (the catalog provides no pid→record-ordinal map)`;
-  }
-
   /** Fire-and-forget write, serialized on the request chain (so it never injects mid-read). */
   async #send(bytes: number[]): Promise<{ ok: boolean }> {
     await (await this.#conn()).sendQueued(bytes);
@@ -744,29 +719,40 @@ class Gen3Driver implements DeviceDriver {
           throw new Error(`torn block bulk read for eid ${eid}: got ${bulk.values.length} of ${bulk.itemCount} values`);
         }
         const { stride, base } = this.#channelSlice(family, bulk, activeCh);
-        // The bulk body is POSITIONAL (record i == the param whose catalog paramId is i) — an identity
-        // that holds ONLY for a DENSE family. A SPARSE family (GLOBAL: pids to 65522, 91 of them >= its
-        // stride 186) has device WIRE ADDRESSES as pids, not positions, and the catalog ships NO
-        // pid→record-ordinal map for it (ranges.generated.ts keys its GLOBAL table by paramId, not by
-        // position). Indexing `bulk.values[base + pid]` then lands past the block — where the old `?? 0`
-        // fabricated a 0 (a CANDIDATE cause of the recorded GLOBAL_FS_BRIGHTNESS 7115 → 0.0000 incident —
-        // UNCONFIRMED, since the probe reads that value through the per-pid GET, not this path) — or, for pid <
-        // stride, on an UNRELATED record (silently wrong, not zero). So never index a family we cannot
-        // prove is positional: serve its values as UNRESOLVED (null + reason), never a guessed number.
-        // Same spirit as the torn-read throw above — an unread value must stay visibly unread.
-        const familyUnresolved = this.#bulkUnresolvedReason(family);
+        // The fn=0x1F body IS positional AND pid-indexed: record i is the param whose device-true
+        // paramId is i, so `values[base + pid]` is that pid's own record. Measured on the real FM3
+        // 2026-10-07 with scripts/dump-global.ts (read-only): the eid-1 GLOBAL body is 14,880 records
+        // (head itemCount 14880, assembled 14880, ratio 1.000), so a GLOBAL `base + pid` is IN range,
+        // not past the block. The front panel is the oracle for the indexing — Mini Display/Ring
+        // Brightness at 100% read body[7115] = 65534, and after the user set it to 70% it read
+        // body[7115] = 45874 (exactly 0.70 x 65534); Mini Display Contrast at 50% read body[7116] =
+        // 32767 (exactly half of 65534); Ring Intensity Bright at 100% read body[110] = 65534. Three
+        // independent panel values match by proportion, so pid == record ordinal. The raw field is
+        // 16-bit with 65534 = 100% (the catalog's 0..100 display range, scale 1, is correct).
+        //
+        // A previous fix mis-read the catalog's SPARSE pids (173 pids, 91 of them >= the declared
+        // stride 186, up to 65522) as evidence the body was NOT positional, and refused the WHOLE
+        // family. That mechanism is REFUTED by the measurement above — the body is large (14,880)
+        // and pid-indexed, and the catalog's "stride 186" simply does not describe this body's length.
+        // Out-of-range is therefore PER PID, not per family: a pid whose record the body genuinely
+        // does not carry (a short/torn tail) reads `null`, never a fabricated 0.
+        //
+        // WRITE-SCALE (measured, filed for a follow-up — see the report; NOT changed here): the GLOBAL
+        // body also confirms writes land (setParam(eid 1, pid 7115, 70) read back 45874 = 70.0%), and
+        // that a GLOBAL param takes DISPLAY UNITS (0..100), NOT a normalized 0..1 float — writing 0.70
+        // through the continuous path set 0.7% (raw 459), and 0.40 set 0.4% (raw 262). This contradicts
+        // the "continuous SET carries a normalized float" contract, so any caller writing GLOBAL 0..1
+        // sets ~100x too small. That is a write-path decision, not this read path.
+        //
         // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
         // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).
-        // Only a family the positional body CAN resolve may seed it: for an unresolved family this
-        // slice holds UNRELATED records, and priming it would feed decodeEditBurst a bogus baseline.
-        if (familyUnresolved === null) this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
+        this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
         const readRaw = (pid: number): number | null => {
-          if (familyUnresolved !== null) return null;
           const v = bulk.values[base + pid];
-          return typeof v === 'number' ? v : null; // a missing record is UNKNOWN, never 0
+          return typeof v === 'number' ? v : null; // a record the body does not carry is UNKNOWN, never 0
         };
-        const unresolvedReason = (pid: number): string => familyUnresolved
-          ?? `no fn=0x1F record at index ${base + pid} in the ${family} body (${bulk.values.length} values) to supply pid ${pid}`;
+        const unresolvedReason = (pid: number): string =>
+          `no fn=0x1F record at index ${base + pid} in the ${family} body (${bulk.values.length} values) to supply pid ${pid}`;
         for (const p of knobs) {
           const raw = readRaw(p.paramId);
           named.push(raw === null
@@ -782,7 +768,7 @@ class Gen3Driver implements DeviceDriver {
           // display range (PHASER_ORDER: scale 2, displayMin/Max 0..10) but only `enumCount` ordinals
           // (6), so listing min..displayMax offered 6..10 as phantom selectable ordinals with no label.
           const ordMax = range.enumCount != null ? min + range.enumCount - 1 : max;
-          if (raw === null) { // value unresolved (a non-positional family, or a missing record) — null it, never a guessed ordinal
+          if (raw === null) { // record the body does not carry (short/torn tail) — null it, never a guessed ordinal
             enums.push({ id: p.paramId, name: paramLabel(p), value: null, options: this.#enumOptions(family, p.paramId, p.name, min, ordMax), unresolved: unresolvedReason(p.paramId) });
             continue;
           }
@@ -802,8 +788,8 @@ class Gen3Driver implements DeviceDriver {
           const max = Math.max(0, roster.length - 1);
           const raw = readRaw(typeId);
           if (raw === null) {
-            // Unresolved type (e.g. a non-positional GLOBAL family): leave `type` null rather than
-            // fabricate a type 0 and resolve the layout to the wrong variant.
+            // Record the body does not carry — leave `type` null rather than fabricate a type 0 and
+            // resolve the layout to the wrong variant.
             type = null;
           } else {
             const tv = raw > max ? Math.round((raw / 65534) * max) : raw;
@@ -1472,9 +1458,9 @@ class Gen3Driver implements DeviceDriver {
       try {
         const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
         const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
-        // Never seed the diff baseline from a family the positional body cannot resolve — the slice
-        // would be unrelated records, and a later decodeEditBurst diff would emit them as a move.
-        if (family && this.#bulkUnresolvedReason(family) === null && bulk.values.length > 0) {
+        // Seed the diff baseline from the positional body (the fn=0x1F body is pid-indexed — see
+        // blockParams): the first sweep visit records it without a reload, later edits diff per-param.
+        if (family && bulk.values.length > 0) {
           const { stride, base } = this.#channelSlice(family, bulk, 0);
           this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
         }
@@ -1511,12 +1497,10 @@ class Gen3Driver implements DeviceDriver {
     const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
     const defs = family ? (this.#prof.params[family] ?? []) : [];
     if (!family || defs.length === 0) return { events: [], reload: false, structural: false }; // no param family mapped
-    // A family whose catalog pids are NOT record ordinals cannot be decoded from the positional body
-    // (see #bulkUnresolvedReason). Emitting `cur[id]` here would hand Axis a fabricated `norm` for a
-    // pid < stride (whatever UNRELATED record shares its ordinal) or a fabricated 0 past the block —
-    // and Axis applies that norm verbatim (a live, writable knob showing a value the device never
-    // reported). The honest reflection of a move we cannot read is NO event at all: emit nothing.
-    if (this.#bulkUnresolvedReason(family) !== null) return { events: [], reload: false, structural: false };
+    // The fn=0x1F body is positional AND pid-indexed (the eid-1 GLOBAL body is 14,880 records and
+    // body[7115] tracks the panel — see blockParams), so a moved param is decoded from its own record.
+    // The per-pid honesty in the loop below is what prevents a fabricated norm: `id >= stride` and a
+    // record the body does not carry (`cur[id] === undefined`) are SKIPPED, never coerced to 0.
     // Slice the block's ACTIVE channel (the one blockParams surfaced) — the body is channel-blocked, so
     // diffing against channel A while the user has B-D open would flag every A/B-different param as "moved".
     const { stride, base } = this.#channelSlice(family, bulk, eid === this.#watchedEid ? this.#watchedChannel : 0);

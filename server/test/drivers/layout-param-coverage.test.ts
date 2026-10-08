@@ -102,12 +102,18 @@ function blockBulkFrames(effectId: number, values: readonly number[]): number[][
  *  indistinguishable from a real zero). */
 const NONZERO_BODY = (n: number) => Array.from({ length: n }, (_, i) => (i % 250) + 1);
 
-/** Serve blockParams for one eid over a mocked transport (non-zero bulk body) → the full result. */
-async function servedBlock(profile: DeviceProfile, eid: number) {
+/** The GLOBAL fn=0x1F body length MEASURED on the device (2026-10-07): 14,880 records. A GLOBAL pid
+ *  is in range against this body, so a GLOBAL control resolves from its own record (see 1b). */
+const GLOBAL_DEVICE_BODY_LEN = 14880;
+
+/** Serve blockParams for one eid over a mocked transport (non-zero bulk body) → the full result.
+ *  `bodyLen` defaults to the family's declared stride * 4; pass the measured device length to exercise
+ *  a pid beyond the declared stride that the (larger) real body still carries. */
+async function servedBlock(profile: DeviceProfile, eid: number, bodyLen?: number) {
   const codec = createModernFractalCodec(profile.model);
   const fam = profile.familyForEffectId(eid) ?? '';
   const stride = profile.rangeSections[fam]?.stride ?? 1;
-  const bulk = blockBulkFrames(eid, NONZERO_BODY(Math.max(stride, 1) * 4));
+  const bulk = blockBulkFrames(eid, NONZERO_BODY(bodyLen ?? Math.max(stride, 1) * 4));
   const mock = new MockTransport('serial', `mock-layoutcov-${eid}`);
   mock.isOpen = true;
   mock.reply = (req) => (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(eid)) ? bulk : []);
@@ -180,19 +186,27 @@ export async function runLayoutParamCoverageTests(): Promise<void> {
   for (const id of [7115, 7116]) assert(global.has(id), `FM3 GLOBAL ${id} (FC page Brightness/Contrast) is served`);
   for (const id of [3602, 3603, 3604]) assert(global.has(id), `FM3 GLOBAL FC_DEFAULT_LAYOUT_PFC${id - 3601} (${id}) is served`);
 
-  // 1b. STRENGTHENED (P9): with a deliberately NON-ZERO bulk fixture, a GLOBAL value must be an explicit
-  //     UNKNOWN — `null` + a stated reason — and NEVER a number derived from the fixture. The old code
-  //     indexed by pid and coerced the miss with `?? 0`, so it served a fixture value (pid < stride, the
-  //     WRONG record) or a fabricated 0 (pid >= stride); this assertion fails on it. The fixture being
-  //     non-zero is what makes the check non-vacuous: an all-zero body is indistinguishable from "correct".
-  const gBlock = await servedBlock(profile, famToEid.get('GLOBAL')!);
+  // 1b. FLIPPED (P13): the fn=0x1F body IS positional and pid-indexed, so a GLOBAL control RESOLVES
+  //     from its own record. Served against a device-sized body (14,880 records — the MEASURED length;
+  //     the catalog's declared stride 186 is not the body length), the FC-page controls carry NUMBERS,
+  //     never the `null` P9 served. The deliberately NON-ZERO fixture is what makes the check
+  //     non-vacuous, and this assertion FAILS on the old (P9) code, which nulled every GLOBAL value.
+  const gBlock = await servedBlock(profile, famToEid.get('GLOBAL')!, GLOBAL_DEVICE_BODY_LEN);
   const gParams = [...gBlock.named, ...gBlock.enums];
-  const fabricated = gParams.filter((p) => typeof p.value === 'number');
-  assertEqual(fabricated.length, 0,
-    `GLOBAL values are UNKNOWN, never fabricated from the bulk body (numbers: ${fabricated.map((p) => p.id).join(', ') || 'none'})`);
   const gBright = gParams.find((p) => p.id === 7115);
-  assert(!!gBright && gBright.value === null && typeof gBright.unresolved === 'string' && gBright.unresolved.length > 0,
-    'FM3 GLOBAL_FS_BRIGHTNESS (7115) is served UNKNOWN (null + reason), not a number, under a non-zero fixture');
+  assert(!!gBright && typeof gBright.value === 'number' && gBright.unresolved === undefined,
+    'FM3 GLOBAL_FS_BRIGHTNESS (7115) RESOLVES from the positional body (P9 served null)');
+  const gContrast = gParams.find((p) => p.id === 7116);
+  assert(!!gContrast && typeof gContrast.value === 'number' && gContrast.unresolved === undefined,
+    'FM3 GLOBAL_FS_LCD_CONTRAST (7116) resolves from the positional body (P9 served null)');
+
+  // 1c. OUT-OF-RANGE IS PER PID, not per family: against a SHORT body (744 records, the head advertises
+  //     what arrived) a pid the body does not carry is served UNKNOWN — `null` + a reason — never a
+  //     fabricated 0. This is the honesty the reversal KEEPS; it is not the family-wide refusal P9 had.
+  const gShort = await servedBlock(profile, famToEid.get('GLOBAL')!, 744);
+  const shortBright = [...gShort.named, ...gShort.enums].find((p) => p.id === 7115);
+  assert(!!shortBright && shortBright.value === null && typeof shortBright.unresolved === 'string' && shortBright.unresolved.length > 0,
+    'a GLOBAL pid the body does not carry is UNKNOWN (null + reason), never a fabricated 0');
 
   // 2. INVARIANT: every FM3 layout knob/dropdown is served in its owning family, or is on the
   //    documented allowlist. Families with no blockParams address are not served layouts → skipped.
