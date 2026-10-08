@@ -36,6 +36,16 @@ export interface Store {
   listBackups(): Backup[];
   createBackup(label: string, model: string): Backup;
   setBackupCount(id: string, count: number): void;
+  // content-addressed blobs (opaque bytes) — the same dedup'd store the preset versions use. Exposed
+  // on the Store contract so backend-agnostic consumers (e.g. the cab-IR byte library, §2.7) can keep
+  // large byte payloads OUT of the JSON document maps without caring which backend is in play.
+  hasBlob(key: string): boolean;
+  getBlob(key: string): Uint8Array | null;
+  putBlob(key: string, bytes: Uint8Array): void;
+  deleteBlob(key: string): void;
+  /** sha256 hex of `bytes` — the content-address key. Backed by the store's codec (node:crypto on the
+   *  server, a sync JS/WASM impl in the browser) so callers never reach for a Node module directly. */
+  sha256Hex(bytes: Uint8Array): string;
 }
 
 export function createStore(backend: StoreBackend, codec: StoreCodec): Store {
@@ -141,6 +151,12 @@ export function createStore(backend: StoreBackend, codec: StoreCodec): Store {
     getDoc, listDocs, putDoc, delDoc, putDocRaw, docsChangedSince,
     addPresetVersion, listPresetVersions, getPresetVersion, getPresetVersionBytes, getPresetVersionPacked,
     hasPresetVersion, addVersionRaw, importVersion,
-    listBackups, createBackup, setBackupCount
+    listBackups, createBackup, setBackupCount,
+    // content-addressed blobs — pass-through to the backend; sha via the codec
+    hasBlob: (key) => backend.hasBlob(key),
+    getBlob: (key) => backend.getBlob(key),
+    putBlob: (key, bytes) => backend.putBlob(key, bytes),
+    deleteBlob: (key) => backend.deleteBlob(key),
+    sha256Hex: (bytes) => codec.sha256Hex(bytes)
   };
 }

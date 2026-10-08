@@ -37,6 +37,7 @@ import { putStoreDoc } from './runtime/services.js';
 import { registerLocalRoutes } from './localStore.js';
 import { registerHelpRoutes } from './help.js';
 import { telemetryStatus, uploadDebugReport, type DebugReport } from './telemetry.js';
+import * as cabLibrary from './runtime/cabLibrary.js';
 import { isDeviceWrite, isDryRunRequest, frameHex, READ_ONLY_BODY } from './runtime/writeGate.js';
 
 export async function buildApp(
@@ -338,8 +339,41 @@ export async function buildApp(
       else if (scratch != null) opts.dest = cabIrScratchpad(Number(scratch));
       else if (q.page != null && q.index != null) opts.dest = { page: Number(q.page), index: Number(q.index) };
       else { reply.code(400); return { error: 'a destination is required: ?user=N (1..512), ?scratchpad=N (1..16, refused by the unit) or ?page=&index=' }; }
-      return await d.uploadCabIr(bytes, opts);
+      const r = await d.uploadCabIr(bytes, opts);
+      // §2.7 — on a VERIFIED upload, persist the bytes server-side so the same IR can later be moved,
+      // restored or re-uploaded without the user re-finding the file. Only `ok` (acks complete AND the
+      // close answered 0x00) counts: a DISCARDED upload (ok:false) never landed, so storing it would
+      // let a later move "restore" an IR the unit rejected. Best-effort — a store failure must not turn
+      // a landed upload into an error response.
+      if (r?.ok) {
+        try {
+          const dest = r.dest ?? opts.dest;
+          if (dest) {
+            cabLibrary.saveCabIr(store.defaultStore, {
+              bytes,
+              name: r.name || opts.name || '',
+              page: dest.page,
+              index: dest.index,
+              user: cabLibrary.userSlotForDestination(dest.page, dest.index)
+            });
+          }
+        } catch { /* the library is a convenience, never a reason to fail an upload that landed */ }
+      }
+      return r;
     } catch (e) { reply.code(400); return { error: (e as Error).message }; }
+  });
+  // §2.7 — READ-ONLY cab-IR byte library. Lists the IR bytes this stack has uploaded (NOT the whole
+  // unit's cab set — see CAB_LIBRARY_SCOPE). Plain reads: no write gate, relayed remotely like every
+  // other GET. Both surfaces register these (route-parity guard).
+  app.get('/cab/library', () => cabLibrary.listCabLibrary(store.defaultStore));
+  // One entry's raw .syx container bytes. 400 for a malformed id; 404 when unknown OR its blob was
+  // lost (an index record without bytes is reported, never treated as present).
+  app.get<{ Params: { id: string } }>('/cab/library/:id/bytes', (req, reply) => {
+    if (!cabLibrary.isCabLibraryId(req.params.id)) { reply.code(400); return { error: `"${req.params.id}" is not a cab-library id` }; }
+    const bytes = cabLibrary.readCabLibraryBytes(store.defaultStore, req.params.id);
+    if (!bytes) { reply.code(404); return { error: 'not found', message: 'no stored bytes for this entry' }; }
+    reply.header('content-type', 'application/octet-stream');
+    return Buffer.from(bytes);
   });
   // version history (all, or for one slot via ?location=)
   app.get<{ Querystring: { location?: string } }>('/versions', (req) => ({ versions: store.listPresetVersions(req.query.location != null ? Number(req.query.location) : undefined) }));

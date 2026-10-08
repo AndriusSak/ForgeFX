@@ -54,6 +54,7 @@ import { runGetPathTests, GET_PATH_CASE_COUNT } from './drivers/get-path.test.js
 import { runSetParamUnitsTests, SETPARAM_UNITS_CASE_COUNT } from './drivers/setparam-units.test.js';
 import { runEditBurstStrideTests, EDIT_BURST_STRIDE_CASE_COUNT } from './drivers/edit-burst-stride.test.js';
 import { runPerformPageTests, PERFORM_PAGE_CASE_COUNT } from './drivers/perform-page.test.js';
+import { runCabLibraryTests, CAB_LIBRARY_CASE_COUNT } from './api/cab-library.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -105,7 +106,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/get-path (${GET_PATH_CASE_COUNT} cases, the dead per-pid GET never hands a caller a denormal 0.0000)`, run: runGetPathTests },
   { name: `drivers/setparam-units (${SETPARAM_UNITS_CASE_COUNT} cases, units are per-opcode: the driver converts nothing; value bytes decoded from the sent frame)`, run: runSetParamUnitsTests },
   { name: `drivers/edit-burst-stride (${EDIT_BURST_STRIDE_CASE_COUNT} cases, the edit poll diffs by body extent, not catalogue stride; a pid past the body stays skipped)`, run: runEditBurstStrideTests },
-  { name: `drivers/perform-page (${PERFORM_PAGE_CASE_COUNT} cases, per-preset performance page read-back from a real FM3 dump; unassigned slots stay unassigned)`, run: runPerformPageTests }
+  { name: `drivers/perform-page (${PERFORM_PAGE_CASE_COUNT} cases, per-preset performance page read-back from a real FM3 dump; unassigned slots stay unassigned)`, run: runPerformPageTests },
+  { name: `api/cab-library (${CAB_LIBRARY_CASE_COUNT} cases, §2.7 server-side cab-IR byte store: round-trip/dedup/corrupt/skips/cap + read-only routes on both surfaces)`, run: runCabLibraryTests }
 ];
 
 let failures = 0;

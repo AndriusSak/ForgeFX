@@ -26,6 +26,7 @@ import * as cloudProfiles from '../services/cloudProfiles.js';
 import { blockHelpBySlug, helpIndex } from '../help.js';
 import { createUnifiedHandlers, cabSlotTargetFromQuery, type RawQuery } from './handlers.js';
 import { putStoreDoc } from './services.js';
+import * as cabLibrary from './cabLibrary.js';
 import { createLocalService } from './localService.js';
 import type { FolderAdapter } from './folderAdapter.js';
 import type { ScanCachePersistence } from './localFolder.js';
@@ -376,9 +377,36 @@ export function createRouter(deps: RuntimeDeps): {
       else if (scratch != null) opts.dest = cabIrScratchpad(Number(scratch));
       else if (page != null && index != null) opts.dest = { page: Number(page), index: Number(index) };
       else { c.reply.code(400); return { error: 'a destination is required: ?user=N (1..512), ?scratchpad=N (1..16, refused by the unit) or ?page=&index=' }; }
-      return await d.uploadCabIr(bytes, opts);
+      const r = await d.uploadCabIr(bytes, opts);
+      // §2.7 — persist the bytes of a VERIFIED upload (see app.ts — same rule, same scope line).
+      if (r?.ok) {
+        try {
+          const dest = r.dest ?? opts.dest;
+          if (dest) {
+            cabLibrary.saveCabIr(store, {
+              bytes,
+              name: r.name || opts.name || '',
+              page: dest.page,
+              index: dest.index,
+              user: cabLibrary.userSlotForDestination(dest.page, dest.index)
+            });
+          }
+        } catch { /* library is a convenience; never fail an upload that landed */ }
+      }
+      return r;
     } catch (e) { c.reply.code(400); return { error: (e as Error).message }; }
   }, { octet: true });
+
+  // §2.7 — READ-ONLY cab-IR byte library (mirrors app.ts). Plain GET reads: no write gate, remote-relayed.
+  on('GET', '/cab/library', () => cabLibrary.listCabLibrary(store));
+  // One entry's raw .syx bytes. 400 malformed id; 404 unknown / missing blob.
+  on('GET', '/cab/library/:id/bytes', (c) => {
+    const id = c.params.id ?? '';
+    if (!cabLibrary.isCabLibraryId(id)) { c.reply.code(400); return { error: `"${id}" is not a cab-library id` }; }
+    const bytes = cabLibrary.readCabLibraryBytes(store, id);
+    if (!bytes) { c.reply.code(404); return { error: 'not found', message: 'no stored bytes for this entry' }; }
+    return bytes;
+  });
 
   // ── cross-device preset conversion (OFFLINE decode; the Convert dialog's endpoints) ──
   // Mirrors app.ts. `source.syx` (base64) → offline decode; omit `source` → the CONNECTED device's
