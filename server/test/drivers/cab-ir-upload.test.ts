@@ -17,12 +17,12 @@ import { PROFILES } from '../../src/devices.js';
 import type { Transport, RequestOpts, ConnKind } from '../../src/transport/types.js';
 import { assert } from '../helpers/mock.js';
 import { fractalChecksum } from 'forgefx-midi/shared';
-import { parseCabIrSyx, cabIrUserSlot, cabIrScratchpad } from 'forgefx-midi/devices/gen3';
+import { parseCabIrSyx, cabIrUserSlot, cabIrScratchpad, computeCabIrClosePayload } from 'forgefx-midi/devices/gen3';
 import { pack5Septet32 } from 'forgefx-midi/gen3/axe-fx-iii';
 
 const MODEL = 0x11; // FM3
 
-export const CAB_IR_UPLOAD_CASE_COUNT = 13;
+export const CAB_IR_UPLOAD_CASE_COUNT = 14;
 
 function frame(model: number, fn: number, payload: readonly number[]): number[] {
   const body = [0xf0, 0x00, 0x01, 0x74, model, fn, ...payload];
@@ -41,7 +41,10 @@ function synthIr(name = 'LT TV Mix 7', model = MODEL): number[] {
   for (let i = 0; i < 2040; i++) chunks.push(...pack5Septet32((i * 2654435761) >>> 0));
   const out = [...frame(model, 0x7a, [0x7f, 0x7f, 0x00, 0x10])];
   for (let f = 0; f < 8; f++) out.push(...frame(model, 0x7b, [0x00, 0x02, ...chunks.slice(f * 256 * 5, (f + 1) * 256 * 5)]));
-  out.push(...frame(model, 0x7c, [0x4d, 0x12, 0x08, 0x5d, 0x03]));
+  // A real container is SELF-CONSISTENT: its close frame carries the checksum its content requires.
+  // A hardcoded close would model a container the unit DISCARDS (close-ack 0x13) and would make every
+  // "only the start frame changed" assertion wrong for a reason that has nothing to do with the edit.
+  out.push(...frame(model, 0x7c, computeCabIrClosePayload(out)));
   return out;
 }
 
@@ -189,25 +192,52 @@ export async function runCabIrUploadTests(): Promise<void> {
     assert(t.blobs.length === 0, 'a refused upload sends NOTHING');
   }
 
-  // 6 — a rename is gated, then applied when opted in
+  // 6 — a rename is NOT gated any more: it is measured-working, and the wire carries a RECOMPUTED close
   {
+    const t = new AckTransport();
+    const r = await makeDriver(t).uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1, name: 'RENAMED IR' });
+    assert(t.blobs.length === 1, 'a rename is sent without an opt-in');
+    const wire = t.blobs[0]!;
+    const parsed = parseCabIrSyx(wire);
+    assert(parsed.name === 'RENAMED IR', `wire name should be the rename, got ${JSON.stringify(parsed.name)}`);
+    assert(r.renamed === true && r.name === 'RENAMED IR', 'the result reports the rename');
+    assert(wire.length === synthIr().length, 'a rename does not change the stream length');
+    // the close frame must follow the content, or the unit discards the upload (close-ack 0x13)
+    assert(
+      parsed.endPayload.join(',') === computeCabIrClosePayload(wire).join(','),
+      'the wire close frame is the RECOMPUTED content checksum',
+    );
+    assert(r.ok === true && r.discarded === false, 'and the accepted arm reports accepted');
+  }
+
+  // 7b — a container left SELF-INCONSISTENT is refused before it goes out: the unit would discard it
+  {
+    // corrupt the close value so it no longer matches the content, keeping the frame checksum valid
+    const stale = synthIr();
+    const lastF0 = stale.lastIndexOf(0xf0);
+    stale[lastF0 + 6] ^= 0x01;
+    let sum = 0;
+    for (let i = lastF0; i < stale.length - 2; i++) sum ^= stale[i]!;
+    stale[stale.length - 2] = sum & 0x7f;
+
     const t = new AckTransport();
     const d = makeDriver(t);
     let msg = '';
     try {
-      await d.uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1, name: 'RENAMED IR' });
+      await d.uploadCabIr(Uint8Array.from(stale), { dest: DEST_USER1, recomputeClose: false });
     } catch (e) {
       msg = (e as Error).message;
     }
-    assert(/refusing a RENAME/.test(msg), `expected a rename refusal, got: ${msg || '(no throw)'}`);
-    assert(t.blobs.length === 0, 'a gated rename sends NOTHING');
+    assert(/will DISCARD/.test(msg), `expected a discard refusal, got: ${msg || '(no throw)'}`);
+    assert(/close-code 0x13/.test(msg), 'the refusal names the measured consequence');
+    assert(t.blobs.length === 0, 'a refused container sends NOTHING');
 
+    // ... and the opt-in sends it, so the discard can be MEASURED
     const t2 = new AckTransport();
-    const r = await makeDriver(t2).uploadCabIr(Uint8Array.from(synthIr()), { dest: DEST_USER1, name: 'RENAMED IR', allowUnverified: true });
-    const parsed = parseCabIrSyx(t2.blobs[0]!);
-    assert(parsed.name === 'RENAMED IR', `wire name should be the rename, got ${JSON.stringify(parsed.name)}`);
-    assert(r.renamed === true && r.name === 'RENAMED IR', 'the result reports the rename');
-    assert(t2.blobs[0]!.length === synthIr().length, 'a rename does not change the stream length');
+    t2.closeCode = 0x13;
+    const r = await makeDriver(t2).uploadCabIr(Uint8Array.from(stale), { dest: DEST_USER1, recomputeClose: false, allowUnverified: true });
+    assert(t2.blobs.length === 1, 'the opt-in sends the inconsistent container');
+    assert(r.ok === false && r.discarded === true, 'and the result reports the unit discarding it');
   }
 
   // 7 — a rename preserves the name slot flag bits, and only the first data frame changes
@@ -218,10 +248,14 @@ export async function runCabIrUploadTests(): Promise<void> {
     const sent = parseCabIrSyx(t.blobs[0]!);
     const flags = sent.nameSlotFlags.map((f, i) => (f ? i : -1)).filter((i) => i >= 0);
     assert(flags.join(',') === '31', `the specimen's flag bit must survive a rename, got ${flags.join(',')}`);
-    assert(sent.endPayload.join(',') === [0x4d, 0x12, 0x08, 0x5d, 0x03].join(','), 'the end payload stays verbatim (never recomputed)');
+    assert(
+      sent.endPayload.join(',') === computeCabIrClosePayload(t.blobs[0]!).join(','),
+      'the end payload follows the new content (a stale close makes the unit discard the upload)',
+    );
     const before = parseCabIrSyx(ir);
     const changed = sent.frames.map((f, i) => (f.join(',') === before.frames[i]!.join(',') ? null : i)).filter((x) => x !== null);
-    assert(changed.join(',') === '0,1', `only the start frame and data frame 1 may change, changed: ${changed.join(',')}`);
+    // the close frame (index 9) legitimately changes too — it is the checksum over the new content
+    assert(changed.join(',') === '0,1,9', `only the start frame, data frame 1 and the close may change, changed: ${changed.join(',')}`);
   }
 
   // 8 — a wrong-model container is refused, and NOTHING is sent

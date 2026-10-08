@@ -88,8 +88,8 @@ export async function runCabSlotStateDriverTests(): Promise<void> {
     assert(t.requests.every((r) => r[5] === 0x01 && r[6] === CAB_SLOT_SUB), 'every request is the slot query');
     assert(t.requests.every((r) => r[13] === 0x10), 'every request targets the requested page');
     assert(t.requests.map((r) => r[12]).join(',') === '0,1,2', 'the indices are addressed in order');
-    assert(rows[0]!.contentRegion.length === 15, 'the content region is reported');
-    assert(rows[0]!.contentRegion.join(',') === rows[0]!.contentRegion.join(','), 'region is stable');
+    assert(rows[0]!.nameRegion.length === 15, 'the content region is reported');
+    assert(rows[0]!.nameRegion.join(',') === rows[0]!.nameRegion.join(','), 'region is stable');
   }
 
   // 2 — SILENCE is not empty: an unanswered slot is null with a note
@@ -110,8 +110,8 @@ export async function runCabSlotStateDriverTests(): Promise<void> {
     const d = makeDriver(t);
     const [a, b] = await d.queryCabSlots!({ page: 0x10, from: 0, to: 1 });
     const c = (await d.queryCabSlots!({ page: 0x10, from: 12, to: 12 }))[0]!;
-    assert(a!.contentRegion.join(',') === c!.contentRegion.join(','), 'slot 0 and slot 12 hold the same IR → same region');
-    assert(a!.contentRegion.join(',') !== b!.contentRegion.join(','), 'an empty slot differs');
+    assert(a!.nameRegion.join(',') === c!.nameRegion.join(','), 'slot 0 and slot 12 hold the same IR → same region');
+    assert(a!.nameRegion.join(',') !== b!.nameRegion.join(','), 'an empty slot differs');
   }
 
   // 4 — the SCRATCHPAD is a valid query page (unlike an upload destination)

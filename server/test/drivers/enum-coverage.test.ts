@@ -12,7 +12,7 @@ import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { PROFILES, SLUG_FAMILY, type DeviceProfile } from '../../src/devices.js';
 import { effectRoster } from 'forgefx-midi/devices/gen3';
 import { createModernFractalCodec, packValue16 } from 'forgefx-midi/gen3/axe-fx-iii';
-import { FM3_LAYOUTS } from 'forgefx-midi/gen3/fm3';
+import { FM3_LAYOUTS, FM3_ENUM_OVERRIDES } from 'forgefx-midi/gen3/fm3';
 import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
@@ -21,7 +21,7 @@ const PHASER_EID = effectRoster().find((e) => e.slug === 'phaser')!.page; // PHA
 const TONESTACK_TYPE_PID = 36;
 const PHASER_ORDER_PID = 1; // scaled enum: scale 2, displayMin/Max 0..10, enumCount 6
 
-export const ENUM_COVERAGE_CASE_COUNT = 5;
+export const ENUM_COVERAGE_CASE_COUNT = 7;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -143,4 +143,41 @@ export async function runEnumCoverageTests(): Promise<void> {
     }
   }
   assertEqual(offenders.length, 0, `no enum list is truncated (offenders: ${offenders.slice(0, 8).join('; ') || 'none'})`);
+
+  // 6. A SCALE-1 OFFSET enum (displayMin > 0) stores the DISPLAY value, and its labels are indexed by
+  //    `value - displayMin` — NOT by `value`. The measured shape: GLOBAL/7389 (options ["1 SECOND",…])
+  //    has body raw 2 while the panel shows "2 SECONDS" (MEASURED 2026-10-08; the panel is the oracle).
+  //    FM3_ENUM_OVERRIDES lists labels 0-based by ORDINAL, so reading the label at index `value` shifted
+  //    every offset label by one and rendered the option AFTER the true one. The device-true DELAY "SVF
+  //    Type" is the served instance of that shape: LOWPASS/BANDPASS/HIGHPASS over display values 1..3.
+  const delayEid = effectRoster().find((e) => e.slug === 'delay')!.page;
+  const svf = (await servedEnums(profile, delayEid)).get(87);
+  assert(!!svf, 'delay block serves SVF Type (DELAY/87) as an enum');
+  assertEqual(svf!.options.map((o) => `${o.value}:${o.label}`).join(','), '1:LOWPASS,2:BANDPASS,3:HIGHPASS',
+    'SVF Type labels are indexed by value - displayMin (never shifted by one)');
+
+  // 7. INVARIANT: every served FM3 offset enum's labels match the device-true table at `value - displayMin`.
+  //    Catches the off-by-one on ANY offset selector (the 7389 shape included) across the whole catalog.
+  const fm3Labels = FM3_ENUM_OVERRIDES as unknown as Record<string, Record<string, readonly string[]>>;
+  const offsetOffenders: string[] = [];
+  for (const [family, ranges] of Object.entries(profile.ranges)) {
+    const eid = effectRoster().find((e) => SLUG_FAMILY[e.slug] === family)?.page;
+    if (eid == null) continue;
+    const served = await servedEnums(profile, eid);
+    for (const [idStr, range] of Object.entries(ranges)) {
+      if (!range || range.kind !== 'enum') continue;
+      const min = Math.round(range.displayMin);
+      if (min === 0) continue; // offset selectors only — the defect class (min === 0 is a no-op)
+      const labels = fm3Labels[family]?.[idStr];
+      if (!labels) continue; // no device-true labels → the served label is the bare ordinal (honest)
+      const e = served.get(Number(idStr));
+      if (!e) continue;
+      for (const o of e.options) {
+        const want = labels[o.value - min] ?? String(o.value);
+        if (o.label !== want) offsetOffenders.push(`${family}/${idStr} value ${o.value}: "${o.label}" != "${want}"`);
+      }
+    }
+  }
+  assertEqual(offsetOffenders.length, 0,
+    `every served offset-enum label is indexed by value - displayMin (offenders: ${offsetOffenders.slice(0, 8).join('; ') || 'none'})`);
 }

@@ -233,7 +233,7 @@ export interface CabSlotStateResult {
   /** The raw flag byte, so an unparsed/unknown reading is still inspectable. */
   flag: number | null;
   /** The content-derived region — identical for slots holding the same IR. NOT a name; not decoded. */
-  contentRegion: number[];
+  nameRegion: number[];
   /** Why `populated` is null, when it is. */
   note?: string;
 }
@@ -253,11 +253,17 @@ export interface CabIrUploadOptions {
   /** Rewrite the 32 name slots before sending (flag bits preserved). Gated — see `allowUnverified`. */
   name?: string;
   /**
-   * Opt IN to a path that has NOT been run on hardware. Required only for `name`, because a rename
-   * changes the name chunks while the 0x7C value is carried verbatim and whether that value covers the
-   * name is unverified. A verbatim replay to an explicit destination is NOT gated: it was measured
-   * accepted (the unit acked start + all 8 data frames + end, with the same `0x64` codes the editor's
-   * own upload drew).
+   * Send the container with its close frame UNRECOMPUTED, i.e. deliberately self-inconsistent.
+   *
+   * The unit validates the close value against the content and DISCARDS a mismatch (close-ack `0x13`,
+   * destination untouched — measured). By default this driver recomputes it, which is a no-op for a real
+   * container and the fix for a rename. Set this false only to MEASURE the discard.
+   */
+  recomputeClose?: boolean;
+  /**
+   * Opt IN to sending a container this driver knows the unit will DISCARD (i.e. one left
+   * self-inconsistent with `recomputeClose: false`). It is no longer needed for a rename — that is a
+   * measured-working path since the close value is recomputed.
    */
   allowUnverified?: boolean;
 }

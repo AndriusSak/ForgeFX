@@ -28,7 +28,7 @@ import {
   parseCabIrSyx, buildCabIrSyx, interpretCabIrAcks,
   buildCabSlotQuery, parseCabSlotState,
   CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
-  CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH,
+  CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
   type DecodedBlock, type Gen3Modifier
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -1154,13 +1154,13 @@ class Gen3Driver implements DeviceDriver {
       try {
         frames = await dev.request(q, CAB_SLOT_QUERY_OPTS);
       } catch (e) {
-        out.push({ index, page, populated: null, flag: null, contentRegion: [], note: `transport error: ${(e as Error).message}` });
+        out.push({ index, page, populated: null, flag: null, nameRegion: [], note: `transport error: ${(e as Error).message}` });
         continue;
       }
       const reply = frames.find((f) => f.length >= 30 && f[5] === 0x01 && f[6] === 0x4b);
       const state = reply ? parseCabSlotState(reply, index, page) : null;
       if (!state) {
-        out.push({ index, page, populated: null, flag: null, contentRegion: [], note: reply ? 'reply did not parse' : 'no state reply (SILENT — not the same as empty)' });
+        out.push({ index, page, populated: null, flag: null, nameRegion: [], note: reply ? 'reply did not parse' : 'no state reply (SILENT — not the same as empty)' });
         continue;
       }
       out.push({
@@ -1168,7 +1168,7 @@ class Gen3Driver implements DeviceDriver {
         page,
         populated: state.populated,
         flag: state.flag,
-        contentRegion: state.contentRegion,
+        nameRegion: state.nameRegion,
         ...(state.populated === null ? { note: `unrecognised flag byte 0x${state.flag.toString(16)}` } : {}),
       });
     }
@@ -1424,8 +1424,18 @@ class Gen3Driver implements DeviceDriver {
     const cache = this.#prof.enumLabelsFor(family, paramId); // device-true labels from the editor cache
     const ov = resolveEnumValues(name); // III overlay fallback
     const out: { value: number; label: string }[] = [];
+    // `min` is the row's displayMin, so `v` walks the value the DEVICE speaks for each option: the
+    // display value for a scale-1 selector (min..max) or the ordinal for a scaled one (min=0). The
+    // label tables (enumLabelsFor / the III overlay) are indexed from 0 by ORDINAL, so the label for a
+    // value lives at `value - min`, NOT at `value`. For a scale-1 OFFSET selector (displayMin > 0) the
+    // device stores the DISPLAY value — GLOBAL/7389 body raw 2 ↔ the panel's "2 SECONDS" (MEASURED
+    // 2026-10-08, the panel is the oracle) — so reading the label at `value` shifted every label by one
+    // and showed the option AFTER the true one. `min === 0` for every unscaled, non-offset enum, so this
+    // is a no-op off the offset rows (the scaled PHASER_ORDER case and every 0-based list are unchanged).
+    // Guarded by test/drivers/enum-coverage.test.ts (offset-label invariant over the real FM3 catalog).
     for (let v = min; v <= max && out.length < MAX_ENUM_OPTIONS; v++) {
-      out.push({ value: v, label: cache?.[v] ?? ov?.values?.[v] ?? String(v) });
+      const i = v - min; // 0-based ordinal into the label tables
+      out.push({ value: v, label: cache?.[i] ?? ov?.values?.[i] ?? String(v) });
     }
     return out;
   }
@@ -1879,14 +1889,10 @@ class Gen3Driver implements DeviceDriver {
         'if a scratchpad target is wanted, the copy has to be made from a user slot on the unit.',
       );
     }
-    if (opts.name !== undefined && opts.allowUnverified !== true) {
-      throw new Error(
-        'uploadCabIr: refusing a RENAME on an unverified path. The name lives in the first data frame and ' +
-        'the close frame\'s 0x7C value is carried verbatim — whether that value covers the name has never ' +
-        'been tested on hardware. Send the container verbatim, or pass { allowUnverified: true } to try it ' +
-        'and watch the acks.',
-      );
-    }
+    // A RENAME is no longer gated: it is MEASURED-WORKING (2026-10-08). The name's 8 chunks feed the
+    // close frame's checksum, `buildCabIrSyx` now RECOMPUTES that value for the rewritten container, and
+    // the unit answered close-code 0x00 with the destination slot becoming POPULATED. Carrying the stale
+    // close (the old behaviour) is what drew 0x13 and made the unit discard the upload.
     const dev = await this.#conn();
     const parsed = parseCabIrSyx(syx); // strict: throws with a precise reason on anything unexpected
     if (parsed.modelId !== this.#prof.model) {
@@ -1896,8 +1902,25 @@ class Gen3Driver implements DeviceDriver {
         'replay is exactly the plausible-but-wrong failure this stack refuses to make.',
       );
     }
-    const bytes = buildCabIrSyx(parsed, { name: opts.name, dest: opts.dest });
+    const bytes = buildCabIrSyx(parsed, { name: opts.name, dest: opts.dest, recomputeClose: opts.recomputeClose !== false });
     const expectedData = parsed.frames.filter((f) => f[5] === CAB_IR_FN_DATA).length;
+
+    // FAIL CLOSED on a self-inconsistent container: the unit validates the close frame's value against
+    // the content and DISCARDS a mismatch (close-ack 0x13, destination untouched — measured in four
+    // controlled arms). `buildCabIrSyx` recomputes it, so this asserts the bytes we are about to send
+    // really are consistent — it would catch a codec regression rather than discovering it on the unit.
+    const required = computeCabIrClosePayload(bytes);
+    const outgoingClose = parseCabIrSyx(bytes).endPayload;
+    if (required.join(',') !== outgoingClose.join(',')) {
+      if (opts.allowUnverified !== true) {
+        throw new Error(
+          `uploadCabIr: refusing to send a container the unit will DISCARD — its close frame carries ` +
+          `${outgoingClose.join(' ')} but its content requires ${required.join(' ')}. The unit answers ` +
+          `close-code 0x13 and leaves the destination untouched (measured). Pass { allowUnverified: true } ` +
+          `only to MEASURE that discard.`,
+        );
+      }
+    }
 
     // LISTEN while sending. A paced send is fire-and-forget, so the device's answer — the only wire-side
     // evidence there is — would otherwise be discarded. The editor's own upload was acknowledged frame by

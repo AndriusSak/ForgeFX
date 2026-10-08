@@ -33,8 +33,9 @@
 // USAGE
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13           # DRY RUN: prints the plan
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13 --go      # send it to user slot 13 (verbatim)
-//   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13 --go --rename "X" --allow-unverified
-//                                                                   # rename — gated, never run on hardware
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13 --go --rename "X"   # rename (measured working)
+//   npx tsx scripts/upload-cab-ir.ts <file.syx> --user 13 --go --allow-unverified
+//                                                                   # send a STALE close to measure the discard
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --dest 16:0 --go    # explicit [page,index]
 //   npx tsx scripts/upload-cab-ir.ts <file.syx> --port /dev/ttyACM0
 //
@@ -96,7 +97,10 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
   }
   let bytes: number[];
   try {
-    bytes = buildCabIrSyx(parsed, { name: rename, dest });
+    // --allow-unverified now means "send the close frame UNRECOMPUTED", i.e. deliberately stale, so the
+    // unit's discard (close-code 0x13) can be measured. Without it the close is recomputed — a no-op for
+    // an untouched container and the fix for a rename (measured-working, 2026-10-08).
+    bytes = buildCabIrSyx(parsed, { name: rename, dest, recomputeClose: !allowUnverified });
   } catch (e) {
     log(`REFUSED (nothing was sent): ${(e as Error).message}`);
     return 2;
@@ -149,18 +153,10 @@ export async function main(argv: string[], log: (l: string) => void = console.lo
     for (const p of selPlan) log(`  eid 62 pid ${String(p.paramId).padStart(4)} = ${p.value}   ${p.what}`);
   }
 
-  // A VERBATIM send to a user slot is MEASURED-ACCEPTED (2026-10-08: the export's frames with the
-  // destination written drew the same acks FM3-Edit's own upload draws), so it needs no opt-in. The
-  // only unverified path left is a RENAME — the name lives in the first data frame while the 0x7C
-  // value is carried verbatim, and whether that value covers the name has never been run on hardware.
-  if (go && rename && !allowUnverified) {
-    log('');
-    log('REFUSING a RENAME: the name sits in the first data frame, but the close frame\'s 0x7C value is');
-    log('carried verbatim and whether it covers the name is untested on hardware. A verbatim send needs no');
-    log('opt-in (measured-accepted). Re-run with --allow-unverified to try the rename and watch the acks.');
-    await s.close();
-    return 2;
-  }
+  // No path here needs an opt-in any more: a VERBATIM send and a RENAME are both MEASURED-WORKING
+  // (2026-10-08 — the close frame is a checksum over the content, recomputed for a rename, and the unit
+  // answered 0x00 with the destination populated). --allow-unverified remains for measuring a
+  // deliberately stale container, which the driver refuses by default because the unit DISCARDS it.
 
   if (!go) {
     log('');

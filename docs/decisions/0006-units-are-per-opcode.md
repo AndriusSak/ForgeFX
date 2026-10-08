@@ -45,11 +45,17 @@ be a display value — **the raw is the ORDINAL** for a scaled row, and the app'
 verbatim write-back is the correct handling. This is also why the `raw > max` unscale branch never fires here
 (raw 1 ≤ max 10): do not "simplify" it away without re-measuring.
 
-**One latent caveat, recorded rather than fixed.** A scale-1 OFFSET enum stores the *display* value:
-`GLOBAL/7389` has body raw `2` while the unit shows **"2 SECONDS"** (its list starts `"1 SECOND"`), so the
-stored value is not a 0-based index. The client renders the label at the served value's index, so a served `2`
-would show the *third* option. It is unserved today — nothing misbehaves — and closing it is a
-serving-contract decision, with the panel as the oracle.
+**Scale-1 OFFSET selector — CLOSED 2026-10-08 (server-side).** A scale-1 OFFSET enum stores the *display*
+value: `GLOBAL/7389` has body raw `2` while the unit shows **"2 SECONDS"** (its list starts `"1 SECOND"`), so
+the stored value is not a 0-based index. The driver's `#enumOptions` serves the display value as the option
+`value` (correct) but read the device-true label at index `value` instead of `value - displayMin`, so a served
+`2` labelled the option AFTER the true one. Six served FM3 offset enums were affected (DELAY/87 SVF Type showed
+BANDPASS for LOWPASS; PITCH/35 Track Mode; PITCH/76 Tempo; FILTER/21 · FLANGER/30 · PHASER/23 Quantize).
+Fixed in `server/src/drivers/gen3.ts` by indexing the label tables at `value - min` (`min` = displayMin; a no-op
+for every 0-based list and the scaled PHASER_ORDER case). The Axis client needed no change — it renders
+`options.find(o => o.value === value)`, so correct labels are sufficient. Guarded by
+`server/test/drivers/enum-coverage.test.ts` (the DELAY/87 mapping pinned literally + an invariant over every
+served offset enum against `FM3_ENUM_OVERRIDES` at `value - displayMin`).
 
 ## What the device actually does (measured 2026-10-08, raw floats sent straight to the codec, body read back)
 
