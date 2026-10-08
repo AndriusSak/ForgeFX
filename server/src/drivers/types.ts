@@ -256,6 +256,9 @@ export interface DeviceDriver {
   // ── live block params ──
   blockParams?(eid: number): Promise<{ block: string; slug: string; page: number; named: NamedParam[]; enums: EnumParam[]; type: { value: number; name: string } | null; layout?: DeviceLayout }>;
   readParams?(eid: number, pids: number[]): Promise<Record<number, number>>;
+  /** Per-pid read returning NORMALIZED 0..1 values (the device's own wire fraction), keyed by pid.
+   *  Unreadable pids are omitted, never fabricated. Distinct from the fn=0x1F bulk read, which is
+   *  positional and returns raw 16-bit counts. */
   readRange?(eid: number, pids: number[]): Promise<Record<number, number>>;
   rawBlock?(eid: number): Promise<{ eid: number; values: Record<number, number> }>;
   cabIrs?(refresh?: boolean): Promise<Record<string, string[]>>;

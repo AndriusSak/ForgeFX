@@ -103,7 +103,10 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     if (!d.cabState) return unsupported(reply, 'cabState');
     return d.cabState(eid);
   };
-  /** POST /preset/blocks/:eid/read — per-pid fn 0x01 GET (FC current state). */
+  /** POST /preset/blocks/:eid/read — per-pid read of an effect's parameter values, NORMALIZED 0..1.
+   *  The driver routes this through the sub-0x1a range op (the plain 01 00 per-pid GET is dead on fw13
+   *  — it answers a canned template that decodes to the denormal 2.085e-41, i.e. 0.0000). A pid the
+   *  device cannot answer is omitted, never fabricated; a driver failure is a 503. */
   const readParamsH = async (reply: StatusSink, eid: number, pids?: number[] | null) => {
     if (!isEid(eid)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
     if (pids != null && !isPidList(pids)) { reply.code(400); return { error: 'pids must be an array of integers 0..16383' }; }
