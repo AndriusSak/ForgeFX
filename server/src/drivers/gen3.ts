@@ -30,7 +30,8 @@ import {
   CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
   CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
   buildBlankCabIrContainer,
-  parsePerformPage,
+  parsePerformPage, patchPerformSlot,
+  reencodeRawPatch, reencodeDumpFromRawPatch,
   type DecodedBlock, type Gen3Modifier, type PerformPage
 } from 'forgefx-midi/devices/gen3';
 import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
@@ -40,7 +41,8 @@ import type {
   PresetGridDTO, PresetBlockDTO, PresetSummary, NamedParam, EnumParam, MeterVal,
   FcSwitchState, FcReadState, PresetModifier,
   CabIrUploadOptions, CabIrUploadResult,
-  CabSlotQueryOptions, CabSlotStateResult, CabSlotClearResult
+  CabSlotQueryOptions, CabSlotStateResult, CabSlotClearResult,
+  PerformSlotPatch, PerformSlotWriteResult
 } from './types.js';
 
 /** How long to keep listening for the device's frame-by-frame acks to an IR upload.
@@ -120,6 +122,30 @@ function dumpBytesFromFrames(frames: readonly (readonly number[])[]): Uint8Array
     if (fn === 0x77 || fn === 0x78 || fn === 0x79) keep.push(...f);
   }
   return Uint8Array.from(keep);
+}
+
+/** A perform-page label window is fixed-width (the codec writes 16 uint16 slots and keeps the last NUL),
+ *  so only 15 characters survive a write — mirror that when checking a read-back, or a legitimately
+ *  TRUNCATED label would be misreported as a failed write. */
+const PERFORM_LABEL_MAX_CHARS = 15;
+function truncPerformLabel(text: string): string {
+  return [...text].slice(0, PERFORM_LABEL_MAX_CHARS).join('');
+}
+
+/** Split a concatenated F0..F7 byte stream back into SysEx frames — the inverse of
+ *  `dumpBytesFromFrames`, used when a rebuilt dump is re-sent frame by frame at the pacing a
+ *  measured-accepted write used (see `setPerformSlot`). Bytes outside a frame are skipped. */
+function splitFrames(bytes: readonly number[]): number[][] {
+  const out: number[][] = [];
+  let i = 0;
+  while (i < bytes.length) {
+    if (bytes[i] !== 0xf0) { i++; continue; }
+    const end = bytes.indexOf(0xf7, i);
+    if (end < 0) break;
+    out.push(bytes.slice(i, end + 1));
+    i = end + 1;
+  }
+  return out;
 }
 
 /** Float32 from the 5×7-bit septets a per-pid read carries at body bytes 12-16.
@@ -555,6 +581,45 @@ class Gen3Driver implements DeviceDriver {
     const parsed = parsePresetDump(dumpBytesFromFrames(frames), 0, this.#prof.model);
     const { body } = decodeRawPatch(parsed.chunkPayloads);
     return parsePerformPage(body);
+  }
+
+  /** Write ONE slot of the CURRENT edit buffer's per-preset PERFORMANCE PAGE (§2.2) — the WRITE side.
+   *
+   *  The proven path (script `try-preset-write.ts`, accepted by the unit twice on 2026-10-08): dump the
+   *  edit buffer → decompress → patch the slot (ids AND labels TOGETHER — a labels-only or ids-only patch
+   *  leaves the other stale, which reads as a valid page showing the wrong name) → recompress + rebuild
+   *  the dump → retarget it to the edit-buffer sentinel → send it FRAME BY FRAME at the pacing the
+   *  measured-accepted write used → re-dump and report what the unit now holds.
+   *
+   *  THE TARGET IS THE EDIT BUFFER (0x3FFF), never a stored slot: a rejected or mangled write cannot
+   *  touch a saved preset, and reloading the preset discards it. `ok` is the READ-BACK verdict — never
+   *  the absence of a rejection; a dump the unit silently ignores reports `{ok:false,
+   *  reason:'readback-mismatch'}` with the slot as it actually reads. */
+  async setPerformSlot(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult> {
+    const dev = await this.#conn();
+    const requested: PerformSlotPatch = { ...patch };
+    const before = dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER));
+    const raw = decodeRawPatch(parsePresetDump(before, 0, this.#prof.model).chunkPayloads);
+    if (!parsePerformPage(raw.body)) return { ok: false, slot, reason: 'no-page', requested, readback: null };
+    const body = new Uint8Array(raw.body);
+    if (!patchPerformSlot(body, slot, patch)) return { ok: false, slot, reason: 'slot-out-of-range', requested, readback: null };
+    const stream = Array.from(reencodeDumpFromRawPatch(before, reencodeRawPatch(raw.rawPatch, body)));
+    if (!retargetPresetDumpToEditBuffer(stream)) return { ok: false, slot, reason: 'retarget-failed', requested, readback: null };
+    for (const frame of splitFrames(stream)) {
+      if (dev.sendPaced) await dev.sendPaced(frame, 64, 4);
+      else if (dev.sendQueued) await dev.sendQueued(frame);
+      else dev.send(frame);
+    }
+    this.#gridCache = null; // the edit buffer changed → the next grid/blocks read reflects it
+    await new Promise((r) => setTimeout(r, 1500)); // let the unit settle before the read-back dump
+    const after = decodeRawPatch(parsePresetDump(dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER)), 0, this.#prof.model).chunkPayloads);
+    const readback = parsePerformPage(after.body)?.slots.find((s) => s.slot === slot) ?? null;
+    const ok = !!readback
+      && (patch.effectId === undefined || readback.effectId === patch.effectId)
+      && (patch.paramId === undefined || readback.paramId === patch.paramId)
+      && (patch.effectLabel === undefined || readback.effectLabel === truncPerformLabel(patch.effectLabel))
+      && (patch.paramLabel === undefined || readback.paramLabel === truncPerformLabel(patch.paramLabel));
+    return ok ? { ok: true, slot, requested, readback } : { ok: false, slot, reason: 'readback-mismatch', requested, readback };
   }
 
   /** Decode every placed block's full params from the preset body, table-driven via the universal

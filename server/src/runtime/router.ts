@@ -32,7 +32,7 @@ import type { FolderAdapter } from './folderAdapter.js';
 import type { ScanCachePersistence } from './localFolder.js';
 import type { Store } from './store.js';
 import type { CloudService } from './cloud.js';
-import { isDeviceWrite, isDryRunRequest, frameHex, READ_ONLY_BODY } from './writeGate.js';
+import { isDeviceWrite, isDryRunnable, isDryRunRequest, frameHex, READ_ONLY_BODY, DRY_RUN_UNSUPPORTED_BODY } from './writeGate.js';
 
 export interface RouterResponse {
   status: number;
@@ -310,6 +310,9 @@ export function createRouter(deps: RuntimeDeps): {
   });
   // Per-preset Performance Page of the CURRENT edit buffer (§2.2) — READ-ONLY (see app.ts).
   on('GET', '/preset/perform', (c) => h.performPageH(c.reply));
+  // Write ONE slot of the performance page (§2.2) — the WRITE side (mirrors app.ts). Device write.
+  on('PUT', '/preset/perform/:slot', (c) =>
+    h.performSlotH(c.reply, Number(c.params.slot), c.body as { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } | undefined));
   on('GET', '/presets/:n/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/blocks', (c) => h.blocksH(c.reply));
@@ -747,6 +750,8 @@ export function createRouter(deps: RuntimeDeps): {
       if (deps.writes === false && isDeviceWrite(m, pathname)) return respond(403, READ_ONLY_BODY);
       let dry: { frames: number[][]; release: () => void } | null = null;
       if (isDryRunRequest(path) && isDeviceWrite(m, pathname)) {
+        // a read-modify-write has no preview: refuse it rather than capture a read that returns nothing
+        if (!isDryRunnable(m, pathname)) return respond(400, DRY_RUN_UNSUPPORTED_BODY);
         await driver().catch(() => {}); // activate on the real transport before capturing
         dry = await registry.acquireDryRun();
       }

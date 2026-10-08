@@ -37,6 +37,8 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['POST', '/preset/name'],
   ['POST', '/preset/load'],
   ['POST', '/preset/restore'],
+  // per-preset Performance Page write (§2.2) — mutates the unit's EDIT BUFFER (transient, but a write)
+  ['PUT', '/preset/perform/:slot'],
   // user-cab IR upload writes to the unit's cab storage (§2.5) — a device write, so a read-only
   // server must refuse it rather than push frames at the unit.
   ['POST', '/cab/ir/upload'],
@@ -57,9 +59,34 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
 
 /** True when a request targets a DEVICE-write endpoint (mutates the unit). Used by the read-only gate. */
 export function isDeviceWrite(method: string, pathname: string): boolean {
+  return matchesAny(DEVICE_WRITES, method, pathname);
+}
+
+/** Device writes that CANNOT be previewed with `?dryRun=true`: their frames depend on a device READ
+ *  (read-modify-write), and a capturing transport answers every read with `[]`, so there is nothing to
+ *  preview. Such a request is REFUSED with 400 rather than run against the real unit — a "preview" must
+ *  never fall through to a live write, and a guaranteed decode failure is not a useful answer. */
+const NOT_DRY_RUNNABLE: ReadonlyArray<readonly [string, string]> = [
+  ['PUT', '/preset/perform/:slot'] // dump → patch → re-send: the dump is the thing that has no preview
+];
+
+/** The body served when `?dryRun=true` is asked of a write that cannot be previewed. Identical on both
+ *  surfaces so the twins stay in parity. */
+export const DRY_RUN_UNSUPPORTED_BODY = {
+  error: 'dry-run-unsupported',
+  message: 'this write reads the device first (read-modify-write), so it cannot be previewed; send it without ?dryRun=true'
+} as const;
+
+/** True when a device write CAN be previewed with `?dryRun=true` (a pure frame build). */
+export function isDryRunnable(method: string, pathname: string): boolean {
+  return isDeviceWrite(method, pathname) && !matchesAny(NOT_DRY_RUNNABLE, method, pathname);
+}
+
+/** Match `method` + `pathname` against a (method, path-template) list; ':' matches one segment. */
+function matchesAny(list: ReadonlyArray<readonly [string, string]>, method: string, pathname: string): boolean {
   const m = method.toUpperCase();
   const segs = pathname.split('?')[0]!.split('/').filter(Boolean);
-  return DEVICE_WRITES.some(([pm, tmpl]) => {
+  return list.some(([pm, tmpl]) => {
     if (pm !== m) return false;
     const parts = tmpl.split('/').filter(Boolean);
     if (parts.length !== segs.length) return false;

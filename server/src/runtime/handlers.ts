@@ -7,6 +7,7 @@
 // the router uses a tiny status recorder), so the exact same code produces the exact same
 // status+body on both surfaces. NO node:/fastify imports — this module must load in a browser.
 import type { DeviceRegistry } from '../drivers/registryCore.js';
+import type { PerformSlotPatch } from '../drivers/types.js';
 
 /** The one reply capability the shared handlers need: set the response status. FastifyReply's
  *  `code()` matches; the runtime router records the status into its RouterResponse. */
@@ -67,6 +68,8 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   // codec encode14 throw, and NOT (b) a SILENT 200 where the codec happily encodes the bad value into
   // a frame the device accepts (the P5 lesson — e.g. a float-valued SET encodes NaN without throwing).
   const EID_MAX = 0x3fff;
+  /** The per-preset Performance Page always holds ten editor slots (see the codec's PERFORM_SLOTS). */
+  const PERFORM_SLOT_COUNT = 10;
   /** A gen-3 effect/param/block id: an integer in the codec's 14-bit 0..16383 space. */
   const isEid = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= EID_MAX;
   /** The device's routed grid shape: its declared `grid`, the AM4's 1×slotCount linear chain, else the
@@ -554,6 +557,32 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     catch (e) { reply.code(503); return { error: (e as Error).message }; }
   };
 
+  /** Write ONE slot of the CURRENT edit buffer's per-preset PERFORMANCE PAGE (§2.2) — the WRITE side.
+   *  Capability-gated. `slot` is 1..10 and at least one patch field is required; a patch the driver
+   *  could not confirm by read-back comes back as the driver's `{ok:false, reason}` — the route never
+   *  reports a write as successful on anything weaker than a read-back. */
+  const performSlotH = async (reply: StatusSink, slot: number, b?: PerformSlotPatch) => {
+    if (!Number.isInteger(slot) || slot < 1 || slot > PERFORM_SLOT_COUNT) {
+      reply.code(400); return { ok: false, error: `slot must be an integer 1..${PERFORM_SLOT_COUNT}` };
+    }
+    const p: PerformSlotPatch = b ?? {};
+    if (p.effectId === undefined && p.paramId === undefined && p.effectLabel === undefined && p.paramLabel === undefined) {
+      reply.code(400); return { ok: false, error: 'at least one of effectId, paramId, effectLabel, paramLabel is required' };
+    }
+    // ids are effect/param ids shared with every other route's guard; labels must be strings (the codec
+    // truncates them to the 32-byte window, it does not resize it).
+    if ((p.effectId !== undefined && !isEid(p.effectId)) || (p.paramId !== undefined && !isEid(p.paramId))) {
+      reply.code(400); return { ok: false, error: 'effectId/paramId must be integers 0..16383' };
+    }
+    if ((p.effectLabel !== undefined && typeof p.effectLabel !== 'string') || (p.paramLabel !== undefined && typeof p.paramLabel !== 'string')) {
+      reply.code(400); return { ok: false, error: 'effectLabel/paramLabel must be strings' };
+    }
+    const d = await driver();
+    if (!d.setPerformSlot) return unsupported(reply, 'setPerformSlot');
+    try { return await d.setPerformSlot(slot, p); }
+    catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
+  };
+
   return {
     driver, unsupported, decodeFail,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
@@ -563,6 +592,6 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes, performPageH
+    decodeH, decodeBytes, performPageH, performSlotH
   };
 }

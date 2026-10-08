@@ -2,7 +2,7 @@
 // pre-driver Device/Am4Device modules — their JSON shapes are the HTTP contract Axis consumes and
 // must not drift. `DeviceDriver` is the per-device surface the routes call; methods a device lacks
 // are optional and mirrored by `DriverCapabilities` so routes can answer 501 instead of guessing.
-import type { DecodedBlock, PerformPage } from 'forgefx-midi/devices/gen3';
+import type { DecodedBlock, PerformPage, PerformSlot } from 'forgefx-midi/devices/gen3';
 import type { TypeModel, DeviceLayout, DeviceProfile } from '../devices.js';
 import type { Transport } from '../transport/types.js';
 import type { TelemetryMode, CadenceProfile } from './telemetryProfiles.js';
@@ -337,6 +337,27 @@ export interface CabIrUploadResult {
   };
 }
 
+/** The fields `setPerformSlot` patches, in the byte domain. Any subset — an omitted field keeps the
+ *  slot's current value. `effectLabel`/`paramLabel` are written into the fixed 32-byte windows, so a
+ *  longer string is TRUNCATED (never resized, never completed by guesswork). */
+export interface PerformSlotPatch {
+  effectId?: number;
+  paramId?: number;
+  effectLabel?: string;
+  paramLabel?: string;
+}
+
+/** The outcome of a perform-slot write, as MEASURED by a read-back of the edit buffer — never an
+ *  assumed `ok`. `readback` is the slot as the unit now reports it (null when no page came back). */
+export interface PerformSlotWriteResult {
+  ok: boolean;
+  slot: number;
+  /** Why it failed, when it did: 'no-page' | 'slot-out-of-range' | 'retarget-failed' | 'readback-mismatch'. */
+  reason?: string;
+  requested: PerformSlotPatch;
+  readback: PerformSlot | null;
+}
+
 export interface DeviceDriver {
   /** SysEx model byte of the device this driver drives (0x10/0x11/0x12/0x15). */
   readonly modelId: number;
@@ -369,6 +390,10 @@ export interface DeviceDriver {
    *  their effect/param ids and labels. READ-ONLY, one preset dump; `undefined` when the body has no
    *  page (never a guess). Gen-3 only. */
   performPage?(): Promise<PerformPage | undefined>;
+  /** Write ONE slot of the CURRENT edit buffer's per-preset PERFORMANCE PAGE (§2.2) — the WRITE side.
+   *  Patches the slot's ids AND its labels together (labels alone go stale) and sends the recompressed
+   *  dump to the EDIT BUFFER (0x3FFF): transient, never a saved slot. Gen-3 only. */
+  setPerformSlot?(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult>;
   presetBodyHex?(): Promise<{ len: number; hex: string }>;
   placedBlocks?(): Promise<PresetBlockDTO[]>;
 

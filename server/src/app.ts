@@ -38,7 +38,7 @@ import { registerLocalRoutes } from './localStore.js';
 import { registerHelpRoutes } from './help.js';
 import { telemetryStatus, uploadDebugReport, type DebugReport } from './telemetry.js';
 import * as cabLibrary from './runtime/cabLibrary.js';
-import { isDeviceWrite, isDryRunRequest, frameHex, READ_ONLY_BODY } from './runtime/writeGate.js';
+import { isDeviceWrite, isDryRunnable, isDryRunRequest, frameHex, READ_ONLY_BODY, DRY_RUN_UNSUPPORTED_BODY } from './runtime/writeGate.js';
 
 export async function buildApp(
   registry: DeviceRegistry,
@@ -80,7 +80,7 @@ export async function buildApp(
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes, performPageH
+    decodeH, decodeBytes, performPageH, performSlotH
   } = createUnifiedHandlers(registry);
 
   // ── write-safety gates (docs/write-protocol.md:37-39 is the authority; Axis/docs/ROADMAP.md is
@@ -98,9 +98,13 @@ export async function buildApp(
     if (!writesEnabled && isDeviceWrite(req.method, barePath(req.url))) return reply.code(403).send(READ_ONLY_BODY);
   });
   const dryRuns = new WeakMap<FastifyRequest, { frames: number[][]; release: () => void }>();
-  app.addHook('onRequest', async (req) => {
+  app.addHook('onRequest', async (req, reply) => {
     if (!writesEnabled) return;
-    if (!isDryRunRequest(req.url) || !isDeviceWrite(req.method, barePath(req.url))) return;
+    if (!isDryRunRequest(req.url)) return;
+    const devWrite = isDeviceWrite(req.method, barePath(req.url));
+    // a read-modify-write has no preview: refuse it rather than capture a read that returns nothing
+    if (devWrite && !isDryRunnable(req.method, barePath(req.url))) return reply.code(400).send(DRY_RUN_UNSUPPORTED_BODY);
+    if (!devWrite) return;
     await driver().catch(() => {}); // activate the driver on the REAL transport before capturing
     dryRuns.set(req, await registry.acquireDryRun());
   });
@@ -250,6 +254,14 @@ export async function buildApp(
   // controls (effectId/paramId + their labels) decoded from one preset dump. 501 when the device
   // can't; a slot with effectId 0 is UNASSIGNED and its label text is stale (see the codec).
   app.get('/preset/perform', (_req, reply) => performPageH(reply));
+  // Write ONE slot of the same page (§2.2) — the page's WRITE side. Patches the slot's ids AND labels
+  // together and sends the recompressed dump to the EDIT BUFFER (transient; nothing is saved). A device
+  // write: gated by --writes/read-only and honouring ?dryRun=true. `ok` is the driver's READ-BACK
+  // verdict, so a write the unit ignores answers {ok:false, reason:'readback-mismatch'}, never a false 200.
+  app.put<{ Params: { slot: string }; Body: { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } }>(
+    '/preset/perform/:slot',
+    async (req, reply) => performSlotH(reply, Number(req.params.slot), req.body)
+  );
   // ── persistent store: documents (Axis config · library metadata · layouts) ──
   app.get<{ Params: { c: string } }>('/store/:c', (req) => ({ docs: store.listDocs(req.params.c) }));
   app.get<{ Params: { c: string; id: string } }>('/store/:c/:id', (req, reply) => {
