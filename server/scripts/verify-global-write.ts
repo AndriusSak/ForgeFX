@@ -21,7 +21,7 @@
 //     continuous  0.25 -> 25.0%   => the CONTINUOUS opcode takes the normalized 0..1
 //     continuous  40   -> 100.0% (clamped)   => (consistent: 40 is far above 1.0)
 //     discrete    0.25 -> 0.3%    |  discrete 40 -> 40.0%  => the DISCRETE opcode takes PERCENT 0..100
-// This matches the app: Axis's knob writes pass `continuous: true` with a 0..1 value (editor.svelte.ts:532,634),
+// This matches the app: Axis's knob writes pass `continuous: true` with a 0..1 value (editor.svelte.ts:1684),
 // which is correct as-is. ALWAYS PASS `continuous` EXPLICITLY — an earlier version of this script omitted it,
 // silently took the DISCRETE (percent) opcode with a norm value, and produced a false "0.40 -> 0.4%" reading
 // that was misread as a unit bug in the app.
@@ -77,9 +77,9 @@ async function main(): Promise<number> {
 
     console.log('');
     console.log('── writing ────────────────────────────────────────────────────────────────────────');
-    // MEASURED 2026-10-07: this parameter takes DISPLAY UNITS (0..100), not a normalized 0..1 float.
-    // Writing 0.40 on the continuous path set 0.4% (raw 262), not 40% — so the value is the percentage.
-    // Represent the REAL UI path: a normalized value on the CONTINUOUS opcode (Axis editor.svelte.ts:532,634).
+    // The CONTINUOUS opcode takes a normalized 0..1 (units are per-opcode — see the header and
+    // docs/decisions/0006-units-are-per-opcode.md), so we send `toPct / 100`. This is the REAL UI path:
+    // Axis's knob writes pass `continuous: true` with a 0..1 value (editor.svelte.ts:1684).
     await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, toPct / 100, true);
     await new Promise((r) => setTimeout(r, 400));
     const after = (await readRawBody(s))[BRIGHTNESS_PID];
@@ -99,7 +99,8 @@ async function main(): Promise<number> {
       console.log('  original raw was unreadable — NOT restoring anything (nothing to restore to). Fix by hand if needed.');
       return 2;
     }
-    // Restore in DISPLAY UNITS too (before is raw 16-bit; convert to the 0..100 the param expects).
+    // Restore through the same CONTINUOUS path (normalized 0..1): `before` is the raw 16-bit body count,
+    // so divide by RAW_MAX to get the 0..1 the continuous opcode takes.
     await s.driver.setParam?.(GLOBAL_EID, BRIGHTNESS_PID, before / RAW_MAX, true); // continuous, like every caller
     await new Promise((r) => setTimeout(r, 400));
     const restored = (await readRawBody(s))[BRIGHTNESS_PID];

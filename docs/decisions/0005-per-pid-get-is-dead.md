@@ -57,10 +57,10 @@ A genuine wire `0.0` is *not* subnormal and passes through — the guard must no
   read the device can actually serve. (The guard still yields an explicit absence — omission → an
   empty/partial map — when the device genuinely cannot answer a pid, which is the "fail explicitly"
   floor.)
-- **Route through the fn=0x1F bulk read.** Rejected: the bulk body is positional (pid == record
-  ordinal) and is UNKNOWN for non-positional families like GLOBAL (`docs/decisions/0004`), so it
-  cannot answer a `(eid, pid)` request and would reintroduce a mapping guess. It is the right path for
-  a *block-wide* read, not a per-pid one.
+- **Route through the fn=0x1F bulk read.** Rejected: the bulk body is a whole-BLOCK read (it is
+  pid-indexed — ADR-0004 refuted the old "non-positional" premise — but it returns the entire eid's body),
+  so using it to answer a single `(eid, pid)` request is the wrong tool: it is the right path for a
+  *block-wide* read, not a per-pid one.
 - **Detect the canned template by exact byte compare.** Rejected: brittle (firmware-specific
   checksum/tail), and the subnormal guard is a strictly stronger, shape-based test.
 
@@ -79,7 +79,8 @@ A genuine wire `0.0` is *not* subnormal and passes through — the guard must no
 
 ## Open question — needs device access
 
-Whether sub `0x1a` resolves a **non-positional GLOBAL** pid (eid 1, pid 7115) correctly on fw13 is
-**not** established here — only that it is the documented value opcode and that a garbage reply is
-refused. Confirming it needs one live read of `GLOBAL_FS_BRIGHTNESS` via `POST /preset/blocks/1/read`
-with a known brightness, which is out of scope for an offline change.
+Whether sub `0x1a` resolves a GLOBAL pid (eid 1, pid 7115) correctly on fw13 is **not** established here
+— only that it is the documented value opcode and that a garbage reply is refused. Confirming it needs one
+live read of `GLOBAL_FS_BRIGHTNESS` via `POST /preset/blocks/1/read`, checked against the independent
+fn=0x1F bulk body (`body[7115]`, per `docs/decisions/0004`) rather than a same-path read-back, which is out
+of scope for an offline change.

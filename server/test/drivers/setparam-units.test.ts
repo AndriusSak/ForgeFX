@@ -18,7 +18,7 @@
 //
 // So the driver must pass the caller's value through UNCHANGED in both branches — the units belong to
 // the opcode the caller chose, and the client's currency is the normalized 0..1 for continuous writes
-// (Axis `ControlSurface.svelte:664` → `editor.svelte.ts:532,634` pass `continuous: true`).
+// (Axis `ControlSurface.svelte:664` → `editor.svelte.ts:1684` pass `continuous: true`).
 //
 // These cases are byte-level: they compare the frame the DRIVER sends against the CODEC's own encoding
 // of the same value, so any conversion, scaling or rounding the driver adds fails the suite. Mocked

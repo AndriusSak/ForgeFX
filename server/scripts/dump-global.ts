@@ -3,14 +3,15 @@
 //   npx tsx scripts/dump-global.ts [--model fm3] [--port /dev/ttyACM0] [--max-pid 185]
 //
 // WHY THIS EXISTS. ForgeFX reads a block's params from the fn-0x1F bulk body by INDEXING IT WITH THE PID
-// (`bulk.values[base + pid]`). That is only valid for a DENSE family where record ordinal == pid. The FM3
-// GLOBAL family declares `stride 186 / recordCount 187` yet carries 173 pids up to 65522 — 91 of them
-// >= 186 — so for GLOBAL the index is meaningless: pids past the block read a fabricated 0, and pids below
-// it read whichever record shares that ordinal. GLOBAL values are therefore served as UNKNOWN and every
-// GLOBAL control renders inert. See docs/decisions/0004-global-bulk-read-unknown.md.
+// (`bulk.values[base + pid]`). MEASURED 2026-10-07 on a real FM3: the eid-1 GLOBAL body is 14,880 records
+// INDEXED BY PID (body[7115] = 65534 at 100%, 45874 at 70%; raw 65534 = 100%), so the pid index IS valid
+// for GLOBAL — the catalog's declared `stride 186 / recordCount 187` (against 173 pids up to 65522) simply
+// does not describe this body's length. GLOBAL values are served BY PID; a pid beyond the assembled body
+// reads `null`, never a fabricated 0. See docs/decisions/0004-global-bulk-read-unknown.md (retained — its
+// UNKNOWN premise was superseded by measurement).
 //
 // What would settle it: the REAL shape of the eid-1 body. That is what this prints. It WRITES NOTHING —
-// every frame it sends is a read (fn-0x1F bulk poll, or the per-pid GET), so it is safe on a live unit
+// every frame it sends is a read (fn-0x1F bulk poll, or the per-pid read via the sub-0x1a range op), so it is safe on a live unit
 // with no restore step and no hazard. It answers three questions in one run:
 //   1. the 0x74 head's advertised itemCount vs the assembled 0x75 record count (one channel? 186x3/x4?);
 //   2. does `index == pid` hold in the low range (i.e. is the body positional at all);
@@ -52,7 +53,11 @@ export function parseArgs(argv: string[]): Args {
   return a;
 }
 
-/** Indices (up to `limit`) where `value` appears in `body`. Empty for an undefined/zero-abundant value. */
+/** Indices (up to `limit`) where `value` appears in `body`. Empty for an undefined/zero-abundant value.
+ *  SCALE WARNING: `body` holds RAW 16-bit counts, but the per-pid read the callers use (`readParams`)
+ *  routes through the sub-0x1a range op and returns a NORMALIZED 0..1 fraction. The `===` here (and in
+ *  the section-2/2b comparisons below) therefore compares two DIFFERENT SCALES and is only meaningful as
+ *  a search for a RAW value — a normalized value will not match a raw record. Normalize one side first. */
 export function findIndices(body: readonly number[], value: number | undefined, limit = 8): number[] {
   if (value === undefined) return [];
   const out: number[] = [];
@@ -97,7 +102,9 @@ async function main(): Promise<number> {
     console.log(`  first 24 values     : ${JSON.stringify(body.slice(0, 24))}`);
 
     // ── 2. is `index == pid` true in the low range? ───────────────────────────────────────────────
-    // The GET is the only read path besides this body, so if the body were positional, the two must agree.
+    // The GET is the only read path besides this body, so a positional body and the GET should agree —
+    // BUT the GET (sub-0x1a range op) returns a NORMALIZED 0..1 while the body holds RAW 16-bit, so the
+    // `===` below compares different scales (see the findIndices note).
     const pids: number[] = [];
     for (let p = 0; p <= args.maxPid; p++) pids.push(p);
     let got = new Map<number, number>();
@@ -110,6 +117,9 @@ async function main(): Promise<number> {
     let compared = 0;
     let agree = 0;
     const disagreements: string[] = [];
+    // SCALE WARNING: `got` is the per-pid read (sub-0x1a range op → NORMALIZED 0..1); `body[pid]` is the
+    // RAW 16-bit record. These are DIFFERENT SCALES, so this is not a like-for-like `===` check — it only
+    // reports whether the raw body happens to contain the normalized number.
     for (const [pid, val] of got) {
       if (pid >= body.length) continue;
       compared++;
@@ -125,10 +135,11 @@ async function main(): Promise<number> {
       for (const d of disagreements) console.log(`    ${d}`);
     }
 
-    // ── 2b. CONTROL: the same comparison on a REAL block, where the per-pid GET is known to work.
-    // Q2 of the probe read CABINET_MUTE2 (eid 62, pid 25) successfully on this unit, so if GET and body
-    // agree there, the GET is fine and `index == pid` holds for a dense family — which isolates the
-    // GLOBAL problem to whether ITS body is pid-indexed, not to the read mechanism.
+    // ── 2b. CONTROL: the same comparison on a REAL block. NOTE the premise is stale: the plain per-pid
+    // GET (fn 0x01 sub 01 00) is DEAD on this firmware — it answers a canned template that decodes to a
+    // denormal (2.085e-41, prints 0.0000). `readParams` now routes through the sub-0x1a range op, which
+    // returns a NORMALIZED 0..1 — so this control no longer proves "the GET works", and it shares the
+    // scale mismatch above (normalized GET vs raw body). See docs/decisions/0005-per-pid-get-is-dead.md.
     try {
       const cabPid = 25;
       const cabBulk = await s.codec.assembleGen3BlockBulkRead(
@@ -184,6 +195,11 @@ async function main(): Promise<number> {
 
     console.log('');
     console.log('READ-ONLY — nothing was written, no restore needed.');
+    // MEASURED correction to the printed guidance below: the eid-1 body IS pid-indexed (14,880 records;
+    // body[7115] tracks the panel), so a high agreement means `index == pid` holds — the body is NOT
+    // "ordinal-based" and there is NO pid→ordinal map to feed the generator. (The two console.log lines
+    // below still print the superseded interpretation; correcting them is a code change, left for a
+    // follow-up.) Treat any indifference/mismatch as the scale mismatch noted above, not as an ordinal map.
     console.log('Interpretation: if `index == pid` agrees near 100% the body IS positional (contradicting the');
     console.log('catalog) — re-check the stride. If it agrees only for a prefix, the body is ordinal-based and');
     console.log('the pairs above are the pid->ordinal map to feed the generator.');
