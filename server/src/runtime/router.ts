@@ -376,7 +376,7 @@ export function createRouter(deps: RuntimeDeps): {
   on('GET', '/preset/blocks/:eid/params', (c) => h.blockParamsH(c.reply, Number(c.params.eid)));
   on('PUT', '/preset/blocks/:eid/params/:paramId', (c) => {
     const b = c.body as { value: number; continuous?: boolean };
-    return h.setParamH(c.reply, Number(c.params.eid), Number(c.params.paramId), b.value, b.continuous ?? false);
+    return h.setParamH(c.reply, Number(c.params.eid), Number(c.params.paramId), b.value, b.continuous);
   });
   on('POST', '/preset/blocks/:eid/bypass', (c) => h.bypassH(c.reply, Number(c.params.eid), (c.body as { bypassed: boolean }).bypassed));
   on('POST', '/preset/blocks/:eid/channel', (c) =>

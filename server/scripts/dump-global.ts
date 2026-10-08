@@ -22,6 +22,10 @@ import { PROFILES } from '../src/devices.js';
 
 const DEFAULT_MODEL = 0x11; // FM3
 const GLOBAL_EID = 1;
+/** The fn=0x1F body stores a 16-bit count where 65534 = 100% (see ADR 0006). */
+const RAW_MAX = 65534;
+/** Half a raw step: |body[pid]/65534 - norm| within this counts as agreement. */
+const NORM_TOL = 1.5 / RAW_MAX;
 
 interface Args {
   model: number;
@@ -53,16 +57,15 @@ export function parseArgs(argv: string[]): Args {
   return a;
 }
 
-/** Indices (up to `limit`) where `value` appears in `body`. Empty for an undefined/zero-abundant value.
- *  SCALE WARNING: `body` holds RAW 16-bit counts, but the per-pid read the callers use (`readParams`)
- *  routes through the sub-0x1a range op and returns a NORMALIZED 0..1 fraction. The `===` here (and in
- *  the section-2/2b comparisons below) therefore compares two DIFFERENT SCALES and is only meaningful as
- *  a search for a RAW value — a normalized value will not match a raw record. Normalize one side first. */
-export function findIndices(body: readonly number[], value: number | undefined, limit = 8): number[] {
-  if (value === undefined) return [];
+/** Indices (up to `limit`) where the body's raw count PROPORTIONALLY matches a normalized target
+ *  (|body[i]/65534 - norm| <= NORM_TOL). Empty for an undefined target. The body is a raw 16-bit count
+ *  while the GET norm is a 0..1 fraction, so an exact integer `===` against the norm is meaningless —
+ *  it agrees ~0% and used to look like "the body is ordinal". */
+export function findIndices(body: readonly number[], norm: number | undefined, limit = 8): number[] {
+  if (norm === undefined) return [];
   const out: number[] = [];
   for (let i = 0; i < body.length; i++) {
-    if (body[i] === value) {
+    if (Math.abs(body[i]! / RAW_MAX - norm) <= NORM_TOL) {
       out.push(i);
       if (out.length >= limit) break;
     }
@@ -123,11 +126,16 @@ async function main(): Promise<number> {
     for (const [pid, val] of got) {
       if (pid >= body.length) continue;
       compared++;
-      if (body[pid] === val) agree++;
-      else if (disagreements.length < 12) disagreements.push(`pid ${pid}: GET ${val} vs body[${pid}] ${body[pid]}`);
+      // LIKE FOR LIKE: the GET is a normalized 0..1 fraction; the body is a raw 16-bit count (65534 =
+      // 100%). Comparing the raw int to the norm with `===` (the old bug) agreed ~0% on EVERY run and
+      // read as "the body is ordinal" — an artifact of units, not of indexing.
+      const rawNorm = body[pid]! / RAW_MAX;
+      if (Math.abs(rawNorm - val) <= NORM_TOL) agree++;
+      else if (disagreements.length < 12)
+        disagreements.push(`pid ${pid}: GET norm ${val.toFixed(4)} vs body[${pid}]/${RAW_MAX} = ${rawNorm.toFixed(4)} (raw ${body[pid]})`);
     }
     console.log('');
-    console.log('── 2. does `index == pid` hold? (the assumption the old code made) ────────────────');
+    console.log('── 2. does `index == pid` hold? (compared like-for-like: /65534 vs the GET norm) ──');
     console.log(`  compared            : ${compared} pids read by BOTH paths`);
     console.log(`  agreed              : ${agree}${compared ? ` (${((agree / compared) * 100).toFixed(1)}%)` : ''}`);
     if (disagreements.length) {
@@ -150,11 +158,15 @@ async function main(): Promise<number> {
         })
       );
       const cabGet = (await s.driver.readParams?.(62, [cabPid])) ?? {};
+      const cabRaw = cabBulk.values[cabPid];
+      const cabNorm = typeof cabRaw === 'number' ? cabRaw / RAW_MAX : NaN;
+      const cabGetVal = cabGet[cabPid];
+      const cabAgree = typeof cabGetVal === 'number' && Number.isFinite(cabNorm) && Math.abs(cabNorm - cabGetVal) <= NORM_TOL;
       console.log('');
       console.log('── 2b. CONTROL on a real block (cab eid 62, pid 25) — GET vs bulk ─────────────────');
-      console.log(`  GET  cab pid ${cabPid} : ${JSON.stringify(cabGet[cabPid])}`);
-      console.log(`  body[${cabPid}]        : ${JSON.stringify(cabBulk.values[cabPid])}  (body is ${cabBulk.values.length} records, head ${cabBulk.itemCount})`);
-      console.log(`  agree               : ${cabGet[cabPid] === cabBulk.values[cabPid] ? 'YES — the two paths agree here' : 'NO — the paths disagree even on a working block'}`);
+      console.log(`  GET  cab pid ${cabPid} : ${JSON.stringify(cabGetVal)} (normalized 0..1)`);
+      console.log(`  body[${cabPid}]        : raw ${JSON.stringify(cabRaw)} = ${Number.isFinite(cabNorm) ? cabNorm.toFixed(4) : 'n/a'}  (body is ${cabBulk.values.length} records, head ${cabBulk.itemCount})`);
+      console.log(`  agree               : ${cabAgree ? 'YES — the two paths agree here (like-for-like)' : 'NO — the paths disagree even on a working block'}`);
     } catch (e) {
       console.log(`\n  control read failed: ${(e as Error)?.message ?? String(e)}`);
     }
@@ -173,7 +185,10 @@ async function main(): Promise<number> {
       );
     }
 
-    // ── 3. high pids: the record index where each value appears IS its ordinal ──────────────────
+    // ── 3. high pids: does the record at the pid's OWN index match its normalized GET value? ───────
+    // The pid-indexed hypothesis (index == pid), tested like-for-like: body[pid]/65534 vs the GET norm.
+    // (This is NOT an ordinal search — the old framing "the index where the value appears IS its ordinal"
+    // asserted a false model. A hit at the pid's own index is what confirms index == pid.)
     const highPids = [110, 111, 7115, 7116];
     let high: Record<string, number> = {};
     try {
@@ -182,27 +197,31 @@ async function main(): Promise<number> {
       /* reported below as unavailable */
     }
     console.log('');
-    console.log('── 3. high pids: the record index where each value appears IS its ordinal ──────────');
+    console.log('── 3. high pids: does body[pid]/65534 match the pid\'s own normalized GET value? ──────');
     for (const pid of highPids) {
       const val = high[pid];
-      const idx = findIndices(body, val);
+      const raw = pid < body.length ? body[pid] : undefined;
+      const norm = typeof raw === 'number' ? raw / RAW_MAX : undefined;
+      const matches = typeof val === 'number' && norm !== undefined && Math.abs(norm - val) <= NORM_TOL;
       console.log(
-        `  pid ${String(pid).padEnd(5)} GET ${val === undefined ? 'n/a' : String(val).padEnd(8)} ` +
-          `-> body indices ${idx.length ? idx.join(', ') : '(no match — value absent, zero, or not distinctive)'}`
+        `  pid ${String(pid).padEnd(5)} GET norm ${val === undefined ? 'n/a'.padEnd(8) : val.toFixed(4)} ` +
+          `body[${pid}] raw ${raw === undefined ? '(past the end)' : String(raw).padEnd(7)} ` +
+          `= ${norm === undefined ? 'n/a' : norm.toFixed(4)}  -> ${matches ? 'MATCHES (index == pid)' : 'no match'}`
       );
-      if (idx.length > 1) console.log(`         ^ ${idx.length} matches: the value is not distinctive, so this reading is ambiguous`);
+      if (matches) {
+        const idx = findIndices(body, val);
+        if (idx.length > 1) console.log(`         ^ ${idx.length} proportional matches: the value is not distinctive, so this reading is ambiguous`);
+      }
     }
 
     console.log('');
     console.log('READ-ONLY — nothing was written, no restore needed.');
-    // MEASURED correction to the printed guidance below: the eid-1 body IS pid-indexed (14,880 records;
-    // body[7115] tracks the panel), so a high agreement means `index == pid` holds — the body is NOT
-    // "ordinal-based" and there is NO pid→ordinal map to feed the generator. (The two console.log lines
-    // below still print the superseded interpretation; correcting them is a code change, left for a
-    // follow-up.) Treat any indifference/mismatch as the scale mismatch noted above, not as an ordinal map.
-    console.log('Interpretation: if `index == pid` agrees near 100% the body IS positional (contradicting the');
-    console.log('catalog) — re-check the stride. If it agrees only for a prefix, the body is ordinal-based and');
-    console.log('the pairs above are the pid->ordinal map to feed the generator.');
+    console.log('Interpretation (like-for-like: the GET is normalized 0..1; a body record is a 16-bit count /65534):');
+    console.log('  • `index == pid` agreeing near 100% means the body IS pid-indexed — the catalog\'s declared');
+    console.log('    "stride" does NOT describe this body\'s length, so a pid IS its own record ordinal and a');
+    console.log('    read indexes body[pid] directly (measured 2026-10-08; docs/decisions/0006-units-are-per-opcode.md).');
+    console.log('  • A disagreement means that pid\'s record is not at that index on THIS body — report the pid as');
+    console.log('    UNKNOWN. It is NOT evidence of an ordinal mapping: do NOT build a pid->ordinal map.');
     return 0;
   } finally {
     try {

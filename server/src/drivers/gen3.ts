@@ -737,7 +737,7 @@ class Gen3Driver implements DeviceDriver {
         if (bulk.values.length < bulk.itemCount) {
           throw new Error(`torn block bulk read for eid ${eid}: got ${bulk.values.length} of ${bulk.itemCount} values`);
         }
-        const { stride, base } = this.#channelSlice(family, bulk, activeCh);
+        const { base } = this.#channelSlice(family, bulk, activeCh);
         // The fn=0x1F body IS positional AND pid-indexed: record i is the param whose device-true
         // paramId is i, so `values[base + pid]` is that pid's own record. Measured on the real FM3
         // 2026-10-07 with scripts/dump-global.ts (read-only): the eid-1 GLOBAL body is 14,880 records
@@ -767,7 +767,9 @@ class Gen3Driver implements DeviceDriver {
         //
         // Prime the device-edit-push baseline with the OPEN channel's values so a later front-panel
         // edit's burst diffs cleanly to the moved param (no first-sight reload — see decodeEditBurst).
-        this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
+        // Slice from `base` to the END of the body (NOT base+stride): the diff keys on the body's actual
+        // extent, so a GLOBAL pid >= the catalogue stride (Brightness 7115) still has its record compared.
+        this.#editSnapshot.set(eid, bulk.values.slice(base));
         const readRaw = (pid: number): number | null => {
           const v = bulk.values[base + pid];
           return typeof v === 'number' ? v : null; // a record the body does not carry is UNKNOWN, never 0
@@ -1459,8 +1461,8 @@ class Gen3Driver implements DeviceDriver {
         // Seed the diff baseline from the positional body (the fn=0x1F body is pid-indexed — see
         // blockParams): the first sweep visit records it without a reload, later edits diff per-param.
         if (family && bulk.values.length > 0) {
-          const { stride, base } = this.#channelSlice(family, bulk, 0);
-          this.#editSnapshot.set(eid, bulk.values.slice(base, base + stride));
+          const { base } = this.#channelSlice(family, bulk, 0);
+          this.#editSnapshot.set(eid, bulk.values.slice(base));
         }
       } catch { /* head-only / unreadable → stay unprimed, retry next cycle */ }
       return false;
@@ -1497,12 +1499,23 @@ class Gen3Driver implements DeviceDriver {
     if (!family || defs.length === 0) return { events: [], reload: false, structural: false }; // no param family mapped
     // The fn=0x1F body is positional AND pid-indexed (the eid-1 GLOBAL body is 14,880 records and
     // body[7115] tracks the panel — see blockParams), so a moved param is decoded from its own record.
-    // The per-pid honesty in the loop below is what prevents a fabricated norm: `id >= stride` and a
-    // record the body does not carry (`cur[id] === undefined`) are SKIPPED, never coerced to 0.
-    // Slice the block's ACTIVE channel (the one blockParams surfaced) — the body is channel-blocked, so
-    // diffing against channel A while the user has B-D open would flag every A/B-different param as "moved".
-    const { stride, base } = this.#channelSlice(family, bulk, eid === this.#watchedEid ? this.#watchedChannel : 0);
-    const cur = bulk.values.slice(base, base + stride);
+    // The per-pid honesty in the loop below is what prevents a fabricated norm: a record the body does
+    // not carry (`cur[id] === undefined`) is SKIPPED, never coerced to 0.
+    //
+    // The skip MUST key on the body's ACTUAL EXTENT, not on the catalogue stride. The catalogue gives
+    // GLOBAL a stride of 186, but its body is 14,880 pid-indexed records — so a GLOBAL pid >= 186 has a
+    // real record (Brightness 7115, Contrast 7116) and a `id >= stride` skip silently dropped every
+    // GLOBAL front-panel edit at or above the catalogue stride, leaving the UI on a stale value. A pid
+    // whose record the body genuinely does not carry (a torn/short tail) is still skipped —
+    // `cur[id] === undefined`.
+    //
+    // Slice from the block's ACTIVE channel base (the one blockParams surfaced) to the END of the body.
+    // For a channel-blocked family (amp, cab, …) every real pid is < its catalogue stride, so the
+    // channel's records are exactly `values[base .. base+stride)` and the tail past them is never
+    // indexed; for the pid-indexed GLOBAL body the extent IS the body length. Diffing against channel A
+    // while the user has B-D open would flag every A/B-different param as "moved", so keep the base.
+    const { base } = this.#channelSlice(family, bulk, eid === this.#watchedEid ? this.#watchedChannel : 0);
+    const cur = bulk.values.slice(base);
     const prev = this.#editSnapshot.get(eid);
     this.#editSnapshot.set(eid, cur);
     // First sight of this block (never opened) → we can't diff. Ask the registry for a full reload so the
@@ -1513,8 +1526,7 @@ class Gen3Driver implements DeviceDriver {
     let structural = false;
     for (const p of defs) {
       const id = p.paramId;
-      if (id >= stride) continue;
-      if (cur[id] === undefined || cur[id] === prev[id]) continue; // unchanged / truncated → skip
+      if (cur[id] === undefined || cur[id] === prev[id]) continue; // record the body doesn't carry / unchanged → skip
       if (!this.#prof.ranges[family]?.[id]) continue; // only real controls (skip internal/bypass churn)
       if (typeId != null && id === typeId) structural = true; // a model change is not just a knob nudge
       events.push({ effectId: eid, paramId: id, norm: clamp01((cur[id] ?? 0) / 65534) });

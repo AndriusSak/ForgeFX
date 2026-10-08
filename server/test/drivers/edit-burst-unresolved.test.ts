@@ -7,9 +7,10 @@
 // GLOBAL block emitted NO param event — and its controls stayed inert. That refusal was built on the
 // refuted "pids up to 65522 prove the body is not positional" story; it is removed here.
 //
-// What the reversal KEEPS is per-pid honesty: the diff loop skips `id >= stride` and a record the body
-// does not carry (`cur[id] === undefined`), so an unreadable PID emits no event — never a fabricated 0.
-// (A genuinely short/torn body therefore still yields no bogus move.)
+// What the reversal KEEPS is per-pid honesty: the diff loop skips a record the body does not carry
+// (`cur[id] === undefined`), so an unreadable PID emits no event — never a fabricated 0. The skip keys on
+// the body's ACTUAL EXTENT, not the catalogue stride (the stride-silencing fix is pinned separately in
+// test/drivers/edit-burst-stride.test.ts). (A genuinely short/torn body therefore still yields no bogus move.)
 //
 // The other two positional-decode fixes in this file are UNCHANGED and still asserted:
 //   • cabState() must not swallow a failed/torn read and serve a ZEROED cab state (mode 0 / bank 0 /

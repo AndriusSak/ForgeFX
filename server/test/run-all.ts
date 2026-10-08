@@ -50,6 +50,7 @@ import { runDeviceProbeRunbookTests, DEVICE_PROBE_RUNBOOK_CASE_COUNT } from './d
 import { runEditBurstUnresolvedTests, EDIT_BURST_UNRESOLVED_CASE_COUNT } from './drivers/edit-burst-unresolved.test.js';
 import { runGetPathTests, GET_PATH_CASE_COUNT } from './drivers/get-path.test.js';
 import { runSetParamUnitsTests, SETPARAM_UNITS_CASE_COUNT } from './drivers/setparam-units.test.js';
+import { runEditBurstStrideTests, EDIT_BURST_STRIDE_CASE_COUNT } from './drivers/edit-burst-stride.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -90,14 +91,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `api/preset-convert (${PRESET_CONVERT_CASE_COUNT} cases, cross-device convert offline/connected/501/caps, mocked)`, run: runPresetConvertTests },
   { name: `api/preset-convert-export (${PRESET_CONVERT_EXPORT_CASE_COUNT} cases, FM3→FM3 author round-trip + guards, mocked)`, run: runPresetConvertExportTests },
   { name: `api/write-safety (${WRITE_SAFETY_CASE_COUNT} cases, ?dryRun=true + --writes false, mocked FM3)`, run: runWriteSafetyTests },
-  { name: `api/param-default (${PARAM_DEFAULT_CASE_COUNT} cases, omitted continuous → discrete frame, mocked FM3)`, run: runParamDefaultTests },
+  { name: `api/param-default (${PARAM_DEFAULT_CASE_COUNT} cases, omitted continuous → 400 (fail closed), mocked FM3)`, run: runParamDefaultTests },
   { name: `drivers/layout-param-coverage (${LAYOUT_PARAM_COVERAGE_CASE_COUNT} guards, every FM3 layout knob/dropdown served in its owning family)`, run: runLayoutParamCoverageTests },
   { name: `drivers/global-bulk-read (${GLOBAL_BULK_READ_CASE_COUNT} cases, a pid-indexed body resolves its own record; a genuinely out-of-range pid stays null)`, run: runGlobalBulkReadTests },
   { name: `api/route-parity (${ROUTE_PARITY_CASE_COUNT} cases, app↔runtime route-table drift guard + bad-param 400s)`, run: runRouteParityTests },
   { name: `drivers/device-probe-runbook (${DEVICE_PROBE_RUNBOOK_CASE_COUNT} cases, one-command device probe: read-only default, --writes restore, no-device non-zero, mocked)`, run: runDeviceProbeRunbookTests },
   { name: `drivers/edit-burst-unresolved (${EDIT_BURST_UNRESOLVED_CASE_COUNT} cases, a pid-indexed GLOBAL edit emits its real norm; cabState/meters never zero-fill)`, run: runEditBurstUnresolvedTests },
   { name: `drivers/get-path (${GET_PATH_CASE_COUNT} cases, the dead per-pid GET never hands a caller a denormal 0.0000)`, run: runGetPathTests },
-  { name: `drivers/setparam-units (${SETPARAM_UNITS_CASE_COUNT} cases, units are per-opcode: the driver converts nothing)`, run: runSetParamUnitsTests }
+  { name: `drivers/setparam-units (${SETPARAM_UNITS_CASE_COUNT} cases, units are per-opcode: the driver converts nothing; value bytes decoded from the sent frame)`, run: runSetParamUnitsTests },
+  { name: `drivers/edit-burst-stride (${EDIT_BURST_STRIDE_CASE_COUNT} cases, the edit poll diffs by body extent, not catalogue stride; a pid past the body stays skipped)`, run: runEditBurstStrideTests }
 ];
 
 let failures = 0;
