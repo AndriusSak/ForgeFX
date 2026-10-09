@@ -31,7 +31,7 @@ import {
   CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
   buildBlankCabIrContainer,
   parsePerformPage, patchPerformSlot,
-  parsePerPresetSwitches, patchPerPresetSwitch,
+  parsePerPresetSwitches, patchPerPresetSwitch, ppWritable,
   reencodeRawPatch, reencodeDumpFromRawPatch,
   type DecodedBlock, type Gen3Modifier, type PerformPage, type PerPresetSwitches
 } from 'forgefx-midi/devices/gen3';
@@ -649,14 +649,18 @@ class Gen3Driver implements DeviceDriver {
   }
 
   /** Write ONE per-preset switch (§3.8) — the WRITE side, riding `#rewriteBody` exactly as the perform
-   *  page does. Bounded on purpose: only PP#1's offsets have ever been observed, so any other index is
-   *  refused here rather than written to an unmeasured offset. `ok` is the READ-BACK verdict. */
+   *  page does. Bounded by EVIDENCE, per field: an index with no observed offset in the codec's table is
+   *  refused, and a target write additionally needs that index's target byte to have been located. */
   async setPerPresetSwitch(index: number, patch: PerPresetSwitchPatch): Promise<PerPresetSwitchWriteResult> {
     const requested: PerPresetSwitchPatch = { ...patch };
     const res = await this.#rewriteBody((body) => {
       if (!parsePerPresetSwitches(body)) return 'no-block';
-      if (!patchPerPresetSwitch(body, index, patch)) return 'unsupported-index';
-      return null;
+      const w = ppWritable(index);
+      if (!w.any) return 'unsupported-index';
+      // a TARGET write needs that index's target-byte offset to have been OBSERVED — the flat
+      // one-per-switch array reading was measured and refuted, so there is no stride to fall back on
+      if (patch.targetIndex !== undefined && !w.target) return 'no-target-offset';
+      return patchPerPresetSwitch(body, index, patch) ? null : 'unsupported-index';
     });
     if ('reason' in res) return { ok: false, index, reason: res.reason, requested, readback: null };
     const readback = parsePerPresetSwitches(res.body)?.switches.find((s) => s.index === index) ?? null;

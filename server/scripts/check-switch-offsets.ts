@@ -25,7 +25,7 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, PP_ACTION_OFFSET, PP_TARGET_OFFSET } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, PP_ACTION_OFFSET, PP_TARGET_OFFSET, PP_MEASURED_OFFSETS } from 'forgefx-midi/devices/gen3';
 
 interface Prediction {
   /** Offset from the marker. */
@@ -51,13 +51,20 @@ const isPerformPageByte = (o: number): boolean => o >= 10690 && o <= 11100;
 /** marker+160: seen 0 → 1 → 14 across the three captures. Identity UNKNOWN (a hypothesis, not a finding). */
 const UNEXPLAINED_REL = 160;
 
+/** The refuted stride: PP#2's target byte would sit here IF the array were flat. The codec's table has no
+ *  entry for it — checked below, so the refutation lives in the DATA, not only in this script. */
+const REFUTED_PP2_TARGET_REL = PP_TARGET_OFFSET + 1;
+
+/** PP#2's action-code offset comes from the codec's table (PP_ACTION_OFFSET + 2 was an assumption). */
+const PP2_ACTION_REL = PP_MEASURED_OFFSETS[2]!.actionCode;
+
 const STEPS: Step[] = [
   {
     from: '../test/fixtures/preset-perform/preset-410.bin',
     to: '../test/fixtures/preset-switches/preset-410-pp1.bin',
     predictions: [
       { rel: PP_ACTION_OFFSET, want: 0x04, mustMove: true, what: 'PP#1 action code → Effect: Bypass' },
-      { rel: PP_ACTION_OFFSET + 2, want: 0x03, mustMove: true, what: 'PP#2 action code → Scene: Select' },
+      { rel: PP2_ACTION_REL, want: 0x03, mustMove: true, what: 'PP#2 action code → Scene: Select' },
       { rel: PP_TARGET_OFFSET, want: 20, mustMove: true, what: 'PP#1 target → 20 = Filter 4' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o) || o === 11420 + UNEXPLAINED_REL
@@ -66,11 +73,11 @@ const STEPS: Step[] = [
     from: '../test/fixtures/preset-switches/preset-410-pp1.bin',
     to: '../test/fixtures/preset-switches/preset-410-delay2.bin',
     predictions: [
-      { rel: PP_ACTION_OFFSET + 2, want: 0x04, mustMove: true, what: 'PP#2 action code → Effect: Bypass' },
+      { rel: PP2_ACTION_REL, want: 0x04, mustMove: true, what: 'PP#2 action code → Effect: Bypass' },
       { rel: PP_TARGET_OFFSET, want: 8, mustMove: true, what: 'PP#1 target → 8 = Delay 2' },
       // THE REFUTATION, nailed down: a flat one-per-switch target array would put PP#2's target here, and a
       // configured PP#2 must move it. It did not.
-      { rel: PP_TARGET_OFFSET + 1, mustMove: false, what: 'PP#2 target IF the array were contiguous (REFUTED)' }
+      { rel: REFUTED_PP2_TARGET_REL, mustMove: false, what: 'PP#2 target IF the array were contiguous (REFUTED)' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o) || o === 11420 + UNEXPLAINED_REL
   }
@@ -84,6 +91,11 @@ function load(rel: string): Uint8Array {
 
 export async function main(): Promise<number> {
   let bad = 0;
+  // The refutation must live in the DATA, not only in this script's expectations.
+  if (PP_MEASURED_OFFSETS[2]?.target !== undefined) {
+    console.log('FAIL: the codec table now claims a target offset for PP#2 — if that is a new MEASUREMENT, update this script; if it is an assumption, remove it');
+    bad++;
+  }
   for (const step of STEPS) {
     const a = load(step.from);
     const b = load(step.to);

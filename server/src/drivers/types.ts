@@ -370,7 +370,7 @@ export interface PerPresetSwitchPatch {
 export interface PerPresetSwitchWriteResult {
   ok: boolean;
   index: number;
-  /** 'no-block' | 'unsupported-index' | 'retarget-failed' | 'readback-mismatch'. */
+  /** 'no-block' | 'unsupported-index' | 'no-target-offset' | 'retarget-failed' | 'readback-mismatch'. */
   reason?: string;
   requested: PerPresetSwitchPatch;
   readback: PerPresetSwitch | null;
@@ -414,10 +414,12 @@ export interface DeviceDriver {
   setPerformSlot?(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult>;
   /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — one row per switch with its action
    *  code and target index; `undefined` when the body has no block (never a synthesised one). Gen-3 only.
-   *  NOTE: only PP#1's offsets are measured; every other row is INFERRED (see the codec). */
+   *  NOTE: rows are reported per OBSERVED offset — PP#1 has both, PP#2 its action code only, and the rest
+   *  nothing, which is what `confidence` and the null fields say. Gen-3 only. */
   perPresetSwitches?(): Promise<PerPresetSwitches | undefined>;
-  /** Write ONE per-preset switch (currently only PP#1, the one index whose offsets are measured) and
-   *  report what the edit buffer reads back. Same transient EDIT-BUFFER target as `setPerformSlot`. */
+  /** Write ONE per-preset switch and report what the edit buffer reads back. Only indices with an OBSERVED
+   *  offset in the codec's table can be written at all, and only those whose target byte has been located
+   *  accept a target write. Same transient EDIT-BUFFER target as `setPerformSlot`. */
   setPerPresetSwitch?(index: number, patch: PerPresetSwitchPatch): Promise<PerPresetSwitchWriteResult>;
   presetBodyHex?(): Promise<{ len: number; hex: string }>;
   placedBlocks?(): Promise<PresetBlockDTO[]>;

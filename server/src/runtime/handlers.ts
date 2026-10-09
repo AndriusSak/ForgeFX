@@ -8,6 +8,7 @@
 // status+body on both surfaces. NO node:/fastify imports — this module must load in a browser.
 import type { DeviceRegistry } from '../drivers/registryCore.js';
 import type { PerformSlotPatch, PerPresetSwitchPatch } from '../drivers/types.js';
+import { ppWritable, PP_MEASURED_OFFSETS, PP_SWITCH_COUNT } from 'forgefx-midi/devices/gen3';
 
 /** The one reply capability the shared handlers need: set the response status. FastifyReply's
  *  `code()` matches; the runtime router records the status into its RouterResponse. */
@@ -70,9 +71,9 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   const EID_MAX = 0x3fff;
   /** The per-preset Performance Page always holds ten editor slots (see the codec's PERFORM_SLOTS). */
   const PERFORM_SLOT_COUNT = 10;
-  /** Upper bound on a per-preset switch index — an ASSUMED device count (the codec's PP_SWITCH_COUNT);
-   *  only index 1 is writable today, so this only bounds what a garbage index is rejected against. */
-  const PP_SWITCH_COUNT_MAX = 12;
+  /** Upper bound on a per-preset switch index — the codec's own ASSUMED device count, so there is one source
+   *  of truth. Which indices are actually WRITABLE is decided by the codec's observed-offset table. */
+  const PP_SWITCH_COUNT_MAX = PP_SWITCH_COUNT;
   /** A gen-3 effect/param/block id: an integer in the codec's 14-bit 0..16383 space. */
   const isEid = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= EID_MAX;
   /** The device's routed grid shape: its declared `grid`, the AM4's 1×slotCount linear chain, else the
@@ -595,16 +596,22 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     catch (e) { reply.code(503); return { error: (e as Error).message }; }
   };
 
-  /** Write ONE per-preset switch (§3.8) — the WRITE side. Bounded to PP#1 ON PURPOSE: that is the only
-   *  index whose byte offsets have been observed on the wire, and writing to an unmeasured offset would
-   *  corrupt an unrelated field. Any other index is refused with 400 rather than attempted. */
+  /** Write ONE per-preset switch (§3.8) — the WRITE side. The bound is EVIDENCE-DRIVEN, not hardcoded: an
+   *  index is writable only while the codec has an OBSERVED offset for it, and a TARGET write additionally
+   *  needs that index's target-byte offset to have been located. Anything else is refused 400 rather than
+   *  written to a guessed position (the flat-target-array reading was measured and refuted). */
   const perPresetSwitchH = async (reply: StatusSink, index: number, b?: PerPresetSwitchPatch) => {
-    if (!Number.isInteger(index) || index < 1 || index > PP_SWITCH_COUNT_MAX) {
-      reply.code(400); return { ok: false, error: `index must be an integer 1..${PP_SWITCH_COUNT_MAX}` };
+    if (!Number.isInteger(index) || index < 1 || index > PP_SWITCH_COUNT) {
+      reply.code(400); return { ok: false, error: `index must be an integer 1..${PP_SWITCH_COUNT}` };
     }
-    if (index !== 1) {
+    const writable = ppWritable(index);
+    if (!writable.any) {
       reply.code(400);
-      return { ok: false, error: 'only PP#1 can be written: its byte offsets are the only ones measured (every other row is inferred)' };
+      return {
+        ok: false,
+        error: `PP#${index} has no observed byte offset — only indices with a measured offset can be written`,
+        writableIndices: Object.keys(PP_MEASURED_OFFSETS).map(Number)
+      };
     }
     const p: PerPresetSwitchPatch = b ?? {};
     if (p.actionCode === undefined && p.targetIndex === undefined) {
@@ -615,6 +622,14 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     }
     if (p.targetIndex !== undefined && (!Number.isInteger(p.targetIndex) || p.targetIndex < 0 || p.targetIndex > 0xff)) {
       reply.code(400); return { ok: false, error: 'targetIndex must be an integer 0..255' };
+    }
+    if (p.targetIndex !== undefined && !writable.target) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: `PP#${index}'s target byte offset has not been located — its action code can be written, its target cannot`,
+        writableTargetIndices: Object.entries(PP_MEASURED_OFFSETS).filter(([, o]) => o.target !== undefined).map(([i]) => Number(i))
+      };
     }
     const d = await driver();
     if (!d.setPerPresetSwitch) return unsupported(reply, 'setPerPresetSwitch');

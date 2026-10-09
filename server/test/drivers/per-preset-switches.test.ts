@@ -17,7 +17,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 11;
+export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 13;
 
 function framesFrom(bytes: Uint8Array): number[][] {
   const frames: number[][] = [];
@@ -73,16 +73,20 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.at, 11420, 'the marker sits at body offset 11420 in this fixture');
     assertEqual(page.at + 148, 11568, 'and marker+148 IS the doc\'s measured PP#1 target offset');
     assertEqual(page.populated, false, 'this preset has NO per-preset switch configured (the region is zero)');
-    assertEqual(page.geometry, 'measured-pp1-only', 'the decode states how much of itself it can vouch for');
+    assertEqual(page.geometry, 'per-index-observed-offsets', 'the decode names its own model');
   }
 
-  // 2. Row confidence is per row: PP#1 measured, every other row openly inferred.
+  // 2. Row confidence is a THREE-WAY split, per field: PP#1 has both offsets, PP#2 its action code only,
+  //    and every later row has no observed offset at all — so it reads nothing rather than guessing.
   {
     const page = (await makeDriver(makeEditBufferMock(frames)).perPresetSwitches!())!;
     assertEqual(page.switches[0]!.index, 1, 'rows are 1-based');
-    assertEqual(page.switches[0]!.confidence, 'measured', 'PP#1');
-    assertEqual(page.switches[1]!.confidence, 'inferred', 'PP#2 is inferred — its offset was never observed');
-    assertEqual(page.switches[0]!.action, 'unassigned', 'the unconfigured switch reads as unassigned');
+    assertEqual(page.switches[0]!.confidence, 'measured', 'PP#1: both offsets observed');
+    assertEqual(page.switches[1]!.confidence, 'partial', 'PP#2: action code observed, target not located');
+    assertEqual(page.switches[2]!.confidence, 'unknown', 'PP#3: no observed offset');
+    assertEqual(page.switches[2]!.actionCode, null, 'so it reports NO action code');
+    assertEqual(page.switches[2]!.targetIndex, null, 'and NO target');
+    assertEqual(page.switches[0]!.action, 'unassigned', 'the unconfigured PP#1 reads as unassigned');
   }
 
   // 3. A live-shaped WRITE of PP#1 confirms by read-back (ids + the target byte), to the edit buffer.
@@ -111,27 +115,51 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(res.readback!.targetIndex, 0, 'and reports the slot as it actually reads');
   }
 
-  // 5. Any index but PP#1 is refused BEFORE the write — its offset has never been observed.
+  // 5. The write bound is now EVIDENCE-DRIVEN per field: PP#2's ACTION CODE offset is observed (so it can
+  //    be written), but its TARGET byte has never been located — a target write there is refused whole.
   {
-    const mock = makeEditBufferMock(frames);
+    const mock = makeEditBufferMock(populatedFrames);
     const res = await makeDriver(mock).setPerPresetSwitch!(2, { targetIndex: 51 });
-    assertEqual(res.ok, false, 'PP#2 is refused');
-    assertEqual(res.reason, 'unsupported-index', 'with the reason named');
-    assertEqual(mock.sent.length, 1, 'and NOTHING was written (only the initial dump request)');
+    assertEqual(res.ok, false, 'PP#2 + a target is refused');
+    assertEqual(res.reason, 'no-target-offset', 'and the reason names WHICH field is unknown');
+    assertEqual(mock.sent.length, 1, 'nothing was written (only the initial dump request)');
+  }
+  {
+    const mock = makeEditBufferMock(populatedFrames);
+    const res = await makeDriver(mock).setPerPresetSwitch!(1, { targetIndex: 51 });
+    assert(res.ok, `PP#1 + a target is allowed (its target offset IS observed): ${JSON.stringify(res)}`);
+  }
+  {
+    const mock = makeEditBufferMock(populatedFrames);
+    const res = await makeDriver(mock).setPerPresetSwitch!(3, { actionCode: 0x04 });
+    assertEqual(res.ok, false, 'PP#3 has no observed offset at all');
+    assertEqual(res.reason, 'unsupported-index', 'refused with the index named');
+    assertEqual(mock.sent.length, 1, 'and nothing written');
   }
 
-  // 6. Route validation: index ≠ 1 and an empty patch answer 400, and both surfaces agree.
+  // 6. Route validation: the refusal is per FIELD, and both surfaces agree.
   {
     const { app, registry } = await buildTestApp(MODEL, stubDriver({ setPerPresetSwitch: async (i: number) => ({ ok: true, index: i, requested: {}, readback: null }) }) as never);
-    const other = await app.inject({ method: 'PUT', url: '/preset/switches/2', payload: { targetIndex: 51 } });
-    assertEqual(other.statusCode, 400, 'PUT /preset/switches/2 → 400');
+    const noTarget = await app.inject({ method: 'PUT', url: '/preset/switches/2', payload: { targetIndex: 51 } });
+    assertEqual(noTarget.statusCode, 400, 'PP#2 + target → 400');
+    assert(/target byte offset has not been located/.test((noTarget.json() as { error: string }).error), 'and says WHICH field is unknown');
+
+    // PP#2's ACTION CODE offset IS observed, so an action-only write is allowed
+    const actionOnly = await app.inject({ method: 'PUT', url: '/preset/switches/2', payload: { actionCode: 4 } });
+    assertEqual(actionOnly.statusCode, 200, 'PP#2 + action code → 200');
+
+    const noOffset = await app.inject({ method: 'PUT', url: '/preset/switches/3', payload: { actionCode: 4 } });
+    assertEqual(noOffset.statusCode, 400, 'PP#3 has no observed offset → 400');
+
     const empty = await app.inject({ method: 'PUT', url: '/preset/switches/1', payload: {} });
     assertEqual(empty.statusCode, 400, 'an empty patch → 400');
     const zero = await app.inject({ method: 'PUT', url: '/preset/switches/0', payload: { targetIndex: 1 } });
     assertEqual(zero.statusCode, 400, 'index 0 → 400');
+
     const router = createRouter({ registry, store: store.defaultStore });
     const rtr = await router.handle('PUT', '/preset/switches/2', JSON.stringify({ targetIndex: 51 }));
     assertEqual(rtr.status, 400, 'and the runtime router agrees (parity)');
+    assertEqual(rtr.body, noTarget.payload, 'with the identical body');
     await app.close();
   }
 
@@ -166,7 +194,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp1.targetLabel, 'Filter 4', 'which the independently measured anchor names "Filter 4"');
     const pp2 = page.switches[1]!;
     assertEqual(pp2.actionCode, 0x03, 'PP#2 carries the scene-select code (the owner\'s second switch)');
-    assertEqual(pp2.confidence, 'inferred', 'yet PP#2 still reports its geometry as inferred');
+    assertEqual(pp2.confidence, 'partial', 'PP#2 has an observed action code but no located target byte');
     assertEqual(page.evidence.actionCodesMeasured, 2, 'two action codes are measured');
     assertEqual(page.evidence.targetBytesMeasured, 1, 'one target byte is measured');
   }
@@ -181,7 +209,8 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[0]!.targetIndex, 8, 'PP#1 now targets index 8');
     assertEqual(page.switches[0]!.targetLabel, 'Delay 2', 'which the wire anchor names "Delay 2"');
     assertEqual(page.switches[1]!.actionCode, 0x04, 'PP#2 action code changed to Effect: Bypass');
-    assertEqual(page.switches[1]!.targetIndex, 0, 'yet the byte at marker+149 STAYED 0 — contiguous target array REFUTED');
+    assertEqual(page.switches[1]!.targetIndex, null, 'and marker+149 was never located — reported as NULL, not 0');
+    assertEqual(page.switches[1]!.confidence, 'partial', 'PP#2 is a partial row');
     assertEqual(page.evidence.targetBytesMeasured, 1, 'so the decoder still claims only ONE measured target byte');
   }
 
