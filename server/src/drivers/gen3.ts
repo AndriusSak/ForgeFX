@@ -30,7 +30,7 @@ import {
   CAB_IR_PAGE_SCRATCHPAD, CAB_IR_FN_DATA, CAB_IR_PAGE_USER_BANKS,
   CAB_IR_FN_END, CAB_IR_CLOSE_ACCEPTED, CAB_IR_CLOSE_MISMATCH, computeCabIrClosePayload,
   buildBlankCabIrContainer,
-  parsePerformPage, patchPerformSlot,
+  parsePerformPage, patchPerformSlot, performLabelRoundTrip,
   parsePerPresetSwitches, patchPerPresetSwitch, ppWritable,
   reencodeRawPatch, reencodeDumpFromRawPatch,
   type DecodedBlock, type Gen3Modifier, type PerformPage, type PerPresetSwitches
@@ -124,14 +124,6 @@ function dumpBytesFromFrames(frames: readonly (readonly number[])[]): Uint8Array
     if (fn === 0x77 || fn === 0x78 || fn === 0x79) keep.push(...f);
   }
   return Uint8Array.from(keep);
-}
-
-/** A perform-page label window is fixed-width (the codec writes 16 uint16 slots and keeps the last NUL),
- *  so only 15 characters survive a write — mirror that when checking a read-back, or a legitimately
- *  TRUNCATED label would be misreported as a failed write. */
-const PERFORM_LABEL_MAX_CHARS = 15;
-function truncPerformLabel(text: string): string {
-  return [...text].slice(0, PERFORM_LABEL_MAX_CHARS).join('');
 }
 
 /** Split a concatenated F0..F7 byte stream back into SysEx frames — the inverse of
@@ -662,11 +654,21 @@ class Gen3Driver implements DeviceDriver {
     });
     if ('reason' in res) return { ok: false, slot, reason: res.reason, requested, readback: null };
     const readback = parsePerformPage(res.body)?.slots.find((s) => s.slot === slot) ?? null;
+    // `ok` means "the device holds what this write could represent", NOT "the device echoed the request".
+    // The write path and the read path apply DIFFERENT rules to a label (the writer masks each character to
+    // 7 bits and keeps at most 15 chars; the reader refuses a string shorter than its minimum), so comparing
+    // the read-back against the REQUESTED string demanded an echo the write never promises — reviewed
+    // 2026-10-09 (finding 10) and measured on the real fixture: a 1-char label reads back '' and "Café" reads
+    // back "Cafi", both reported as `readback-mismatch` while the unit held exactly what was written.
+    // `performLabelRoundTrip` is the codec's own answer to "what will this write read back as", derived from
+    // the same write/read code, so the comparison can no longer drift from the codec. The WRITE itself is
+    // untouched: this changes only the verdict, and a read-back that genuinely differs from what the write
+    // could represent still answers {ok:false, reason:'readback-mismatch'} with the actual read-back below.
     const ok = !!readback
       && (patch.effectId === undefined || readback.effectId === patch.effectId)
       && (patch.paramId === undefined || readback.paramId === patch.paramId)
-      && (patch.effectLabel === undefined || readback.effectLabel === truncPerformLabel(patch.effectLabel))
-      && (patch.paramLabel === undefined || readback.paramLabel === truncPerformLabel(patch.paramLabel));
+      && (patch.effectLabel === undefined || readback.effectLabel === performLabelRoundTrip(patch.effectLabel))
+      && (patch.paramLabel === undefined || readback.paramLabel === performLabelRoundTrip(patch.paramLabel));
     return ok ? { ok: true, slot, requested, readback } : { ok: false, slot, reason: 'readback-mismatch', requested, readback };
   }
 

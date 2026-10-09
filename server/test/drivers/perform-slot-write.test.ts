@@ -23,7 +23,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PERFORM_SLOT_WRITE_CASE_COUNT = 11;
+export const PERFORM_SLOT_WRITE_CASE_COUNT = 13;
 
 /** Split a concatenated F0..F7 byte stream into SysEx frames. */
 function framesFrom(bytes: Uint8Array): number[][] {
@@ -264,5 +264,42 @@ export async function runPerformSlotWriteTests(): Promise<void> {
     assert(rejected, 'a throw inside the guarded section surfaces to the caller');
     const res = await driver.setPerformSlot!(2, { effectId: 64, paramId: 42 });
     assert(res.ok, `a rewrite AFTER a thrown one still runs — the gate released (got ${JSON.stringify(res)})`);
+  }
+
+  // 12. LABEL ROUND TRIP (third-party review 2026-10-09, finding 10): the read-back is compared against what
+  //     the write COULD represent, not against the requested string, so a legal label can no longer report a
+  //     false `readback-mismatch`. The four cases were MEASURED on the real fixture (writing a slot's param
+  //     label and reading it back): a 4-char label survives; a 2-char label survives; a 1-char label reads
+  //     back '' (the reader demands >= 2) and a non-ASCII label reads back masked to 7 bits. Before the fix
+  //     the last two were the false mismatches. `ok` must be TRUE and the read-back must report the value the
+  //     codec's own encoding yields — never the raw request.
+  {
+    const cases: Array<[string, string]> = [
+      ['Tone', 'Tone'],
+      ['AB', 'AB'],
+      ['A', ''],
+      ['Café', 'Cafi']
+    ];
+    for (const [requested, expected] of cases) {
+      const mock = makeEditBufferMock(frames);
+      const res = await makeDriver(mock).setPerformSlot!(6, { paramLabel: requested });
+      assert(res.ok, `writing paramLabel ${JSON.stringify(requested)} must NOT report a false mismatch (got ${JSON.stringify(res)})`);
+      assertEqual(res.requested.paramLabel, requested, 'the response still echoes what was REQUESTED');
+      assertEqual(res.readback!.paramLabel, expected, `the read-back reports what the codec's encoding yields for ${JSON.stringify(requested)}`);
+    }
+  }
+
+  // 13. The fix does NOT weaken the verdict: a read-back that GENUINELY differs from what the write could
+  //     represent is still {ok:false, reason:'readback-mismatch'} with the actual read-back in the response.
+  //     Here the unit ignores the label write entirely and keeps its original — slot 1's param label stays
+  //     "Master Volume" while we asked for "Tone", which the normaliser cannot excuse.
+  {
+    const mock = new MockTransport('serial', 'mock-ignore-label-write');
+    mock.isOpen = true;
+    mock.reply = (req) => (isIdentifyBroadcast(req) ? [handshakeReply(MODEL)] : frames); // always the ORIGINAL
+    const res = await makeDriver(mock).setPerformSlot!(1, { paramLabel: 'Tone' });
+    assertEqual(res.ok, false, 'a label the unit ignores must NOT report ok:true');
+    assertEqual(res.reason, 'readback-mismatch', 'and it names the read-back mismatch');
+    assertEqual(res.readback!.paramLabel, 'Master Volume', 'the ACTUAL read-back is reported, so the caller sees what the unit holds');
   }
 }
