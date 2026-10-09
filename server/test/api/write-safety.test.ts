@@ -13,7 +13,7 @@ import { assert, assertEqual, hex } from '../helpers/mock.js';
 import { createRouter } from '../../src/runtime/router.js';
 import * as store from '../../src/store.js';
 
-export const WRITE_SAFETY_CASE_COUNT = 12;
+export const WRITE_SAFETY_CASE_COUNT = 16;
 
 export async function runWriteSafetyTests(): Promise<void> {
   // ── ?dryRun=true returns the exact frame hex and sends nothing ─────────────
@@ -96,6 +96,59 @@ export async function runWriteSafetyTests(): Promise<void> {
     const roApp403 = await (await buildTestApp(0x11, undefined, { writes: false })).app.inject({ method: 'POST', url: '/preset/blocks/58/bypass', payload: { bypassed: true } });
     assertEqual(roApp403.statusCode, roRtr.status, 'read-only 403 parity (app ↔ router)');
     assertEqual(roApp403.payload, roRtr.body, 'read-only 403 body parity (app ↔ router)');
+    await app.close();
+  }
+
+  // ── a PERCENT-ENCODED path must not slip past either gate (third-party review 2026-10-09, finding 1) ──
+  // A router DECODES before it matches, so `/preset/%70erform/1` reaches the same handler as
+  // `/preset/perform/1`. The gate used to compare the RAW url, saw the segment `%70erform`, concluded "not a
+  // device write" and waved it through: a read-only server performed the write and `?dryRun=true` ran a
+  // preview LIVE against the unit. Both are refused now, on both surfaces.
+  {
+    const { app, registry, mock } = await buildTestApp(0x11, undefined, { writes: false });
+    const before = mock.sent.length;
+    const encParam = await app.inject({ method: 'PUT', url: '/preset/%70erform/1', payload: { effectId: 62 } });
+    assertEqual(encParam.statusCode, 403, 'read-only + encoded perform path → 403');
+    const encSwitch = await app.inject({ method: 'PUT', url: '/preset/%73witches/1', payload: { targetIndex: 51 } });
+    assertEqual(encSwitch.statusCode, 403, 'read-only + encoded switch path → 403');
+    assertEqual(mock.sent.length, before, 'and NOTHING reached the device');
+
+    const roRtr = await createRouter({ registry, store: store.defaultStore, writes: false })
+      .handle('PUT', '/preset/%70erform/1', JSON.stringify({ effectId: 62 }));
+    assertEqual(roRtr.status, 403, 'the browser twin refuses it too (parity — it used to 404)');
+    await app.close();
+  }
+
+  // ── and a preview of a read-modify-write stays REFUSED on an encoded path ──
+  {
+    const { app, registry, mock } = await buildTestApp(0x11);
+    const before = mock.sent.length;
+    const dry = await app.inject({ method: 'PUT', url: '/preset/%70erform/1?dryRun=true', payload: { effectId: 62 } });
+    assertEqual(dry.statusCode, 400, 'encoded RMW preview → 400 (never a live write)');
+    assertEqual((dry.json() as { error: string }).error, 'dry-run-unsupported', 'named as unsupported');
+    assertEqual(mock.sent.length, before, 'and it sent nothing');
+    const rtr = await createRouter({ registry, store: store.defaultStore })
+      .handle('PUT', '/preset/%70erform/1?dryRun=true', JSON.stringify({ effectId: 62 }));
+    assertEqual(rtr.status, 400, 'parity on the refusal');
+    await app.close();
+  }
+
+  // ── `?dryRun` means "do not touch the device": PRESENCE is intent, only false/0 says no (finding 5) ──
+  // The old rule accepted only `true`/`1`, so `?dryRun=yes` / `TRUE` / `dryrun=true` were read as "not a
+  // preview" and the request ran live — the one direction this flag must never fail in.
+  {
+    const { app, mock } = await buildTestApp(0x11);
+    for (const q of ['?dryRun=yes', '?dryRun=TRUE', '?dryrun=true', '?dryRun=true']) {
+      const before = mock.sent.length;
+      const res = await app.inject({ method: 'PUT', url: `/preset/blocks/58/params/7${q}`, payload: { value: 0.5, continuous: true } });
+      assertEqual(res.statusCode, 200, `${q} → 200`);
+      assertEqual((res.json() as { dryRun?: boolean }).dryRun, true, `${q} is treated as a preview`);
+      assertEqual(mock.sent.length, before, `${q} sent nothing to the device`);
+    }
+    const before = mock.sent.length;
+    const off = await app.inject({ method: 'PUT', url: '/preset/blocks/58/params/7?dryRun=false', payload: { value: 0.5, continuous: true } });
+    assertEqual((off.json() as { dryRun?: boolean }).dryRun, undefined, 'an explicit false is NOT a preview');
+    assertEqual(mock.sent.length, before + 1, 'so that one really was sent');
     await app.close();
   }
 }

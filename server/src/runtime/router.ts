@@ -32,7 +32,7 @@ import type { FolderAdapter } from './folderAdapter.js';
 import type { ScanCachePersistence } from './localFolder.js';
 import type { Store } from './store.js';
 import type { CloudService } from './cloud.js';
-import { isDeviceWrite, isDryRunnable, isDryRunRequest, frameHex, READ_ONLY_BODY, DRY_RUN_UNSUPPORTED_BODY } from './writeGate.js';
+import { isDeviceWrite, isDeviceWriteRequest, decodePathSegment, isDryRunnable, isDryRunRequest, frameHex, READ_ONLY_BODY, DRY_RUN_UNSUPPORTED_BODY } from './writeGate.js';
 
 export interface RouterResponse {
   status: number;
@@ -313,7 +313,7 @@ export function createRouter(deps: RuntimeDeps): {
   // Write ONE slot of the performance page (§2.2) — the WRITE side (mirrors app.ts). Device write.
   on('PUT', '/preset/perform/:slot', (c) =>
     h.performSlotH(c.reply, Number(c.params.slot), c.body as { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } | undefined));
-  // Per-preset SWITCH definitions (§3.8) — read-only, then the PP#1-only write (mirrors app.ts).
+  // Per-preset SWITCH definitions (§3.8) — read-only, then the per-FIELD-bounded write (mirrors app.ts).
   on('GET', '/preset/switches', (c) => h.perPresetSwitchesH(c.reply));
   on('PUT', '/preset/switches/:index', (c) =>
     h.perPresetSwitchH(c.reply, Number(c.params.index), c.body as { actionCode?: number; targetIndex?: number } | undefined));
@@ -713,8 +713,11 @@ export function createRouter(deps: RuntimeDeps): {
     const params: Record<string, string> = {};
     for (let i = 0; i < segs.length; i++) {
       const pat = route.segs[i]!;
-      if (pat.startsWith(':')) params[pat.slice(1)] = decodeURIComponent(segs[i]!);
-      else if (pat !== segs[i]) return null;
+      // A router DECODES before it matches (find-my-way does on the Fastify surface), so compare on the
+      // decoded segment: otherwise `%70erform` resolves to the route on one surface and 404s on this one.
+      const seg = decodePathSegment(segs[i]!);
+      if (pat.startsWith(':')) params[pat.slice(1)] = seg;
+      else if (pat !== seg) return null;
     }
     return params;
   };
@@ -751,11 +754,11 @@ export function createRouter(deps: RuntimeDeps): {
 
       const ctx: Ctx = { params, query, body: json, raw, reply: new Reply() };
       // write-safety gates (writeGate.ts) — identical to app.ts so the twins stay in parity.
-      if (deps.writes === false && isDeviceWrite(m, pathname)) return respond(403, READ_ONLY_BODY);
+      if (deps.writes === false && isDeviceWriteRequest(m, path, route.path)) return respond(403, READ_ONLY_BODY);
       let dry: { frames: number[][]; release: () => void } | null = null;
-      if (isDryRunRequest(path) && isDeviceWrite(m, pathname)) {
+      if (isDryRunRequest(path) && isDeviceWriteRequest(m, path, route.path)) {
         // a read-modify-write has no preview: refuse it rather than capture a read that returns nothing
-        if (!isDryRunnable(m, pathname)) return respond(400, DRY_RUN_UNSUPPORTED_BODY);
+        if (!isDryRunnable(m, route.path)) return respond(400, DRY_RUN_UNSUPPORTED_BODY);
         await driver().catch(() => {}); // activate on the real transport before capturing
         dry = await registry.acquireDryRun();
       }

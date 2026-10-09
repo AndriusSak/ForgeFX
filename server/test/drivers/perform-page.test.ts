@@ -11,9 +11,13 @@ import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { PROFILES } from '../../src/devices.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
+import { parsePresetDump, decodeRawPatch, parsePerformPage, patchPerformSlot, findPerformTables } from 'forgefx-midi/devices/gen3';
 
 const MODEL = 0x11; // FM3
-export const PERFORM_PAGE_CASE_COUNT = 5;
+// Counted, not guessed: the numbered blocks in `runPerformPageTests` (1-4). The hand-kept constant was 5
+// against 4 blocks — the exact "count nothing compares" pattern the 2026-10-09 review flagged, so it reads
+// 4 now, and the new write-side runner carries its own count.
+export const PERFORM_PAGE_CASE_COUNT = 4;
 
 /** Split a concatenated F0..F7 byte stream into SysEx frames. */
 function framesFrom(bytes: Uint8Array): number[][] {
@@ -86,4 +90,30 @@ export async function runPerformPageTests(): Promise<void> {
   // 4. READ-ONLY: the whole read is ONE preset-dump REQUEST (fn 0x03) — nothing is written to the unit.
   assertEqual(mock.sent.length, 1, 'performPage() issues exactly one request frame (one dump)');
   assertEqual(mock.sent[0]![5], 0x03, 'and it is the preset-dump REQUEST (fn 0x03), not a write');
+}
+
+// 5. WRITE side: a patch that would RELOCATE the page is refused, and refuses to write anything.
+//    The label text IS the anchor `findPerformTables` searches for, so patching a label can move the page to
+//    a DIFFERENT record — measured 2026-10-09, a two-character effect label moved the page 10698 → 10730 and
+//    the slot then read 0/0, i.e. the write "succeeded" into a mis-anchored page (and every later patch
+//    would land on the wrong record). Third-party review finding 2.
+export const PERFORM_PAGE_PATCH_ASSERTION_COUNT = 8;
+
+export function runPerformPagePatchTests(): void {
+  const bytes = new Uint8Array(readFileSync(fileURLToPath(new URL('../fixtures/preset-perform/preset-410.bin', import.meta.url))));
+  const body = decodeRawPatch(parsePresetDump(bytes, 0, MODEL).chunkPayloads).body;
+  const at = findPerformTables(body);
+  assert(at !== undefined, 'case 5: the page is located before the patch');
+  assertEqual(parsePerformPage(body)!.slots[0]!.effectId, 58, 'case 5: slot 1 reads Amp 1 (58)');
+
+  const snapshot = Uint8Array.from(body);
+  assertEqual(patchPerformSlot(body, 1, { effectLabel: 'EQ' }), false, 'case 5: a 2-char effect label is REFUSED');
+  assertEqual(patchPerformSlot(body, 1, { effectLabel: '' }), false, 'case 5: an empty effect label is REFUSED');
+  let same = true;
+  for (let i = 0; i < body.length; i++) if (body[i] !== snapshot[i]) same = false;
+  assertEqual(same, true, 'case 5: and the body is UNTOUCHED (refused, never half-written)');
+
+  assertEqual(patchPerformSlot(body, 1, { effectLabel: 'CAB' }), true, 'case 5: a 3-char label is accepted');
+  assertEqual(findPerformTables(body), at, 'case 5: and the page stays exactly where it was');
+  assertEqual(patchPerformSlot(body, 99, { effectId: 1 }), false, 'case 5: an out-of-range slot is still refused');
 }

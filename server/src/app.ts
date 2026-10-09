@@ -38,7 +38,7 @@ import { registerLocalRoutes } from './localStore.js';
 import { registerHelpRoutes } from './help.js';
 import { telemetryStatus, uploadDebugReport, type DebugReport } from './telemetry.js';
 import * as cabLibrary from './runtime/cabLibrary.js';
-import { isDeviceWrite, isDryRunnable, isDryRunRequest, frameHex, READ_ONLY_BODY, DRY_RUN_UNSUPPORTED_BODY } from './runtime/writeGate.js';
+import { isDeviceWrite, isDeviceWriteRequest, isDryRunnable, isDryRunRequest, frameHex, READ_ONLY_BODY, DRY_RUN_UNSUPPORTED_BODY } from './runtime/writeGate.js';
 
 export async function buildApp(
   registry: DeviceRegistry,
@@ -93,17 +93,24 @@ export async function buildApp(
   //    so validation still happens (a rejected request stays rejected); the hex is spliced into the
   //    JSON response additively as { dryRun:true, frames:[hex,…] }.
   const writesEnabled = opts?.writes !== false;
-  const barePath = (url: string) => url.split('?')[0] || url;
+  // A router DECODES before matching, so a gate that reads only `req.url` sees a different route and waves
+  // the request through (measured: `PUT /preset/%70erform/1` reached the handler, so a read-only server
+  // wrote and a ?dryRun=true preview ran live). Gate on every spelling of the request — the matched route
+  // template, the raw path and the decoded path. See writeGate.gatePaths.
+  const isWriteReq = (req: FastifyRequest): boolean =>
+    isDeviceWriteRequest(req.method, req.url, req.routeOptions?.url);
   app.addHook('onRequest', async (req, reply) => {
-    if (!writesEnabled && isDeviceWrite(req.method, barePath(req.url))) return reply.code(403).send(READ_ONLY_BODY);
+    if (!writesEnabled && isWriteReq(req)) return reply.code(403).send(READ_ONLY_BODY);
   });
   const dryRuns = new WeakMap<FastifyRequest, { frames: number[][]; release: () => void }>();
   app.addHook('onRequest', async (req, reply) => {
     if (!writesEnabled) return;
     if (!isDryRunRequest(req.url)) return;
-    const devWrite = isDeviceWrite(req.method, barePath(req.url));
+    const devWrite = isWriteReq(req);
     // a read-modify-write has no preview: refuse it rather than capture a read that returns nothing
-    if (devWrite && !isDryRunnable(req.method, barePath(req.url))) return reply.code(400).send(DRY_RUN_UNSUPPORTED_BODY);
+    if (devWrite && !isDryRunnable(req.method, req.routeOptions?.url ?? req.url.split('?')[0]!)) {
+      return reply.code(400).send(DRY_RUN_UNSUPPORTED_BODY);
+    }
     if (!devWrite) return;
     await driver().catch(() => {}); // activate the driver on the REAL transport before capturing
     dryRuns.set(req, await registry.acquireDryRun());

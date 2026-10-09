@@ -640,7 +640,8 @@ class Gen3Driver implements DeviceDriver {
 
   /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — one preset dump, decoded through the
    *  SAME body path as `performPage()`. `undefined` when the body holds no block (the codec refuses to
-   *  synthesise one). Only PP#1's offsets are measured; the codec tags every other row `inferred`. */
+   *  synthesise one). Every row is tagged from the OBSERVED-offset table (`measured` / `partial` /
+   *  `unknown`) and an unlocated field reads `null` — never a value derived from a guessed stride. */
   async perPresetSwitches(): Promise<PerPresetSwitches | undefined> {
     const frames = await this.#dumpFrames(EDIT_BUFFER);
     const parsed = parsePresetDump(dumpBytesFromFrames(frames), 0, this.#prof.model);
