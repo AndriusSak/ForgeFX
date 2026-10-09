@@ -17,7 +17,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 10;
+export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 11;
 
 function framesFrom(bytes: Uint8Array): number[][] {
   const frames: number[][] = [];
@@ -169,6 +169,20 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp2.confidence, 'inferred', 'yet PP#2 still reports its geometry as inferred');
     assertEqual(page.evidence.actionCodesMeasured, 2, 'two action codes are measured');
     assertEqual(page.evidence.targetBytesMeasured, 1, 'one target byte is measured');
+  }
+
+  // 11. The THIRD capture (PP#1 → Delay 2): a new anchor, and the flat-target-array reading refuted. PP#2's
+  //     action changed too, so if the target bytes were one-per-switch in a flat array, PP#2's target byte
+  //     (marker+149) would have had to move. It did not.
+  {
+    const delay2 = new Uint8Array(readFileSync(fileURLToPath(new URL('../fixtures/preset-switches/preset-410-delay2.bin', import.meta.url))));
+    const page = await makeDriver(makeEditBufferMock(framesFrom(delay2))).perPresetSwitches!();
+    assert(page, 'the Delay-2 capture has a block');
+    assertEqual(page.switches[0]!.targetIndex, 8, 'PP#1 now targets index 8');
+    assertEqual(page.switches[0]!.targetLabel, 'Delay 2', 'which the wire anchor names "Delay 2"');
+    assertEqual(page.switches[1]!.actionCode, 0x04, 'PP#2 action code changed to Effect: Bypass');
+    assertEqual(page.switches[1]!.targetIndex, 0, 'yet the byte at marker+149 STAYED 0 — contiguous target array REFUTED');
+    assertEqual(page.evidence.targetBytesMeasured, 1, 'so the decoder still claims only ONE measured target byte');
   }
 
   // 10. Write-safety: read-only → 403 (both surfaces); `?dryRun=true` → 400, because a read-modify-write

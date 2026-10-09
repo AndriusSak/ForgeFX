@@ -1,16 +1,25 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
-// check-switch-offsets — the §3.8 offset model, checked against TWO REAL DUMPS of the same preset.
+// check-switch-offsets — the §3.8 offset model, checked BY PREDICTION against three REAL captures of the
+// same preset.
 //
-// WHY A DIFFERENTIAL: the decompressed body of preset 410 was captured twice — once with no per-preset
-// switch configured, once with PP#1 (Effect: Bypass → Filter 4) and PP#2 (Scene: Select) configured. The
-// model PREDICTS which bytes move. A difference anywhere else, or a predicted byte that does not move,
-// refutes it — which is the only reason a fitted model is worth anything here.
+// Each capture is one edit by the owner plus one read-only dump, and this script states what the model
+// expects BEFORE looking. A prediction that fails, or a byte that moves where the model says nothing should,
+// is the point: that is how the contiguous-target-array reading was refuted.
 //
-// WHAT IT CONFIRMED (2026-10-08): @marker+4 = PP#1's action code, @marker+6 = PP#2's action code (so the
-// codes are a contiguous u16 array), @marker+148 = PP#1's target byte, value 20 = "Filter 4" — matching the
-// anchor measured independently on the wire. It also shows the two captures differ in the PERFORM PAGE
-// (@10746 etc., a label he edited in between), which is why the extras below are classified rather than
-// treated as failures: a differential between two captures taken hours apart is not a controlled experiment.
+// THE CHAIN (all real captures of preset 410):
+//   A  preset-perform/preset-410.bin        no switch configured
+//   B  preset-switches/preset-410-pp1.bin   PP#1 = Effect: Bypass → Filter 4 ; PP#2 = Scene: Select
+//   C  preset-switches/preset-410-delay2.bin PP#1 = Effect: Bypass → Delay 2  ; PP#2 = Effect: Bypass
+//
+// CONFIRMED (2026-10-08/09): marker+4 and marker+6 hold the PP#1/PP#2 ACTION CODES (a contiguous u16 array,
+// two entries evidenced); marker+148 holds PP#1's TARGET byte (20 = "Filter 4", then 8 = "Delay 2", each
+// matching an anchor measured independently on the wire).
+// REFUTED (2026-10-09): the TARGET bytes are NOT a flat one-per-switch array — in capture C, PP#2 was fully
+// configured yet marker+149 did not move. Keep that as a `mustMove: false` prediction so it cannot come back.
+//
+// NOTE ON "EXTRAS": the captures were taken hours apart, so the PERFORM PAGE legitimately differs too (a
+// label the owner edited). Those offsets are classified rather than treated as failures — but any OTHER
+// unexpected byte still fails the check, which is how marker+160 was found.
 //
 // READ-ONLY, offline. Run: npx tsx scripts/check-switch-offsets.ts
 // ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -18,52 +27,88 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, PP_ACTION_OFFSET, PP_TARGET_OFFSET } from 'forgefx-midi/devices/gen3';
 
-/** Offsets in the older capture that belong to the PERFORM PAGE, not the switch block (labels he edited
- *  between the captures: 'GEQ' → blank). Listed explicitly so an unexplained extra still fails the check. */
-const KNOWN_PERFORM_PAGE_OFFSETS = new Set([10746, 10748, 10750]);
+interface Prediction {
+  /** Offset from the marker. */
+  rel: number;
+  /** Expected value in the NEW capture (when it must move). */
+  want?: number;
+  /** false = the model says this byte must NOT change. */
+  mustMove: boolean;
+  what: string;
+}
+
+interface Step {
+  from: string;
+  to: string;
+  predictions: Prediction[];
+  /** Offsets allowed to differ for reasons outside the switch block (the perform page, edited in between). */
+  allowedElsewhere: (o: number) => boolean;
+}
+
+/** The perform page's own region — labels the owner edited between captures. */
+const isPerformPageByte = (o: number): boolean => o >= 10690 && o <= 11100;
+
+/** marker+160: seen 0 → 1 → 14 across the three captures. Identity UNKNOWN (a hypothesis, not a finding). */
+const UNEXPLAINED_REL = 160;
+
+const STEPS: Step[] = [
+  {
+    from: '../test/fixtures/preset-perform/preset-410.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp1.bin',
+    predictions: [
+      { rel: PP_ACTION_OFFSET, want: 0x04, mustMove: true, what: 'PP#1 action code → Effect: Bypass' },
+      { rel: PP_ACTION_OFFSET + 2, want: 0x03, mustMove: true, what: 'PP#2 action code → Scene: Select' },
+      { rel: PP_TARGET_OFFSET, want: 20, mustMove: true, what: 'PP#1 target → 20 = Filter 4' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o) || o === 11420 + UNEXPLAINED_REL
+  },
+  {
+    from: '../test/fixtures/preset-switches/preset-410-pp1.bin',
+    to: '../test/fixtures/preset-switches/preset-410-delay2.bin',
+    predictions: [
+      { rel: PP_ACTION_OFFSET + 2, want: 0x04, mustMove: true, what: 'PP#2 action code → Effect: Bypass' },
+      { rel: PP_TARGET_OFFSET, want: 8, mustMove: true, what: 'PP#1 target → 8 = Delay 2' },
+      // THE REFUTATION, nailed down: a flat one-per-switch target array would put PP#2's target here, and a
+      // configured PP#2 must move it. It did not.
+      { rel: PP_TARGET_OFFSET + 1, mustMove: false, what: 'PP#2 target IF the array were contiguous (REFUTED)' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o) || o === 11420 + UNEXPLAINED_REL
+  }
+];
+
+function load(rel: string): Uint8Array {
+  const bytes = new Uint8Array(readFileSync(new URL(rel, import.meta.url)));
+  const { body } = decodeRawPatch(parsePresetDump(bytes, 0, 0x11).chunkPayloads);
+  return body;
+}
 
 export async function main(): Promise<number> {
-  const load = (rel: string): Uint8Array => {
-    const url = new URL(rel, import.meta.url);
-    const { body } = decodeRawPatch(parsePresetDump(new Uint8Array(readFileSync(url)), 0, 0x11).chunkPayloads);
-    return body;
-  };
-  const a = load('../test/fixtures/preset-perform/preset-410.bin');      // no switch configured
-  const b = load('../test/fixtures/preset-switches/preset-410-pp1.bin'); // PP#1 + PP#2 configured
-
-  if (a.length !== b.length) {
-    console.log(`FAIL: the bodies differ in length (${a.length} vs ${b.length}) — the diff is not meaningful`);
-    return 1;
-  }
-  const diff: number[] = [];
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff.push(i);
-
-  const at = findPerPresetSwitchBlock(b);
-  if (at === undefined) { console.log('FAIL: no switch block marker in the populated fixture'); return 1; }
-
-  // The model, stated as predictions BEFORE looking at the diff.
-  const predicted: Array<{ offset: number; want: number; what: string }> = [
-    { offset: at + PP_ACTION_OFFSET, want: 0x04, what: 'PP#1 action code low byte (Effect: Bypass)' },
-    { offset: at + PP_ACTION_OFFSET + 2, want: 0x03, what: 'PP#2 action code low byte (Scene: Select)' },
-    { offset: at + PP_TARGET_OFFSET, want: 20, what: 'PP#1 target byte (Filter 4)' }
-  ];
-
   let bad = 0;
-  console.log(`marker at ${at} in both bodies · ${diff.length} differing byte(s)\n`);
-  console.log('PREDICTIONS');
-  for (const p of predicted) {
-    const moved = diff.includes(p.offset);
-    const got = b[p.offset];
-    const ok = moved && got === p.want;
-    if (!ok) bad++;
-    console.log(`  ${ok ? 'OK  ' : 'FAIL'} @${p.offset} (marker+${p.offset - at}) = ${got}, expected ${p.want} — ${p.what}`);
+  for (const step of STEPS) {
+    const a = load(step.from);
+    const b = load(step.to);
+    if (a.length !== b.length) { console.log(`FAIL: body lengths differ (${a.length} vs ${b.length})`); bad++; continue; }
+    const at = findPerPresetSwitchBlock(b);
+    if (at === undefined) { console.log(`FAIL: no switch marker in ${step.to}`); bad++; continue; }
+    const diff = new Set<number>();
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff.add(i);
+
+    console.log(`\n${step.from.split('/').pop()} → ${step.to.split('/').pop()}   (marker ${at}, ${diff.size} byte(s) differ)`);
+    for (const p of step.predictions) {
+      const abs = at + p.rel;
+      const moved = diff.has(abs);
+      const ok = p.mustMove ? (moved && (p.want === undefined || b[abs] === p.want)) : !moved;
+      if (!ok) bad++;
+      const shown = p.want === undefined ? `stayed ${b[abs]}` : `= ${b[abs]}`;
+      console.log(`  ${ok ? 'OK  ' : 'FAIL'} marker+${p.rel} (${shown}) — ${p.what}`);
+    }
+
+    const covered = new Set(step.predictions.map((p) => at + p.rel));
+    const extras = [...diff].filter((o) => !covered.has(o) && !step.allowedElsewhere(o));
+    console.log(`  extras: ${extras.length ? extras.map((o) => `${o} (marker+${o - at}: ${a[o]}→${b[o]})`).join(', ') : 'none'}`);
+    if (extras.length) bad++;
   }
-
-  const unexplained = diff.filter((o) => !predicted.some((p) => p.offset === o) && !KNOWN_PERFORM_PAGE_OFFSETS.has(o));
-  console.log(`\nextras: ${diff.filter((o) => KNOWN_PERFORM_PAGE_OFFSETS.has(o)).length} known perform-page byte(s), ${unexplained.length} UNEXPLAINED`);
-  for (const o of unexplained) console.log(`  ${a[o]} → ${b[o]} @${o} (marker+${o - at})`);
-
-  console.log(`\n${bad === 0 && unexplained.length === 0 ? 'MODEL HOLDS' : 'MODEL NOT CONFIRMED'}`);
-  return bad === 0 && unexplained.length === 0 ? 0 : 1;
+  console.log(`\n${bad === 0 ? 'MODEL HOLDS on every captured step' : `${bad} prediction(s) FAILED`}`);
+  return bad === 0 ? 0 : 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().then((c) => process.exit(c));
