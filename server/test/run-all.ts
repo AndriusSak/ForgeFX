@@ -57,6 +57,7 @@ import { runPerformPageTests, runPerformPagePatchTests, PERFORM_PAGE_CASE_COUNT,
 import { runPerformSlotWriteTests, PERFORM_SLOT_WRITE_CASE_COUNT } from './drivers/perform-slot-write.test.js';
 import { runPerPresetSwitchDriverTests, PER_PRESET_SWITCH_DRIVER_CASE_COUNT } from './drivers/per-preset-switches.test.js';
 import { runCabLibraryTests, CAB_LIBRARY_CASE_COUNT } from './api/cab-library.test.js';
+import { runGateContractTests, GATE_CONTRACT_CASE_COUNT } from './api/gate-contract.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -111,8 +112,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/perform-page (${PERFORM_PAGE_CASE_COUNT} cases, per-preset performance page read-back from a real FM3 dump; unassigned slots stay unassigned)`, run: runPerformPageTests },
   { name: `drivers/perform-page-patch (${PERFORM_PAGE_PATCH_ASSERTION_COUNT} assertions, a patch that would RELOCATE the page is refused and writes nothing — review 2026-10-09 finding 2)`, run: runPerformPagePatchTests },
   { name: `drivers/perform-slot-write (${PERFORM_SLOT_WRITE_CASE_COUNT} cases, per-preset performance page WRITE side: read-back verdict, truncation, stale-label hazard, dry-run refusal, read-only 403)`, run: runPerformSlotWriteTests },
-  { name: `drivers/per-preset-switches (${PER_PRESET_SWITCH_DRIVER_CASE_COUNT} cases, S3.8 switch block: real-fixture marker offset, per-row confidence, PP#1-bounded write + read-back)`, run: runPerPresetSwitchDriverTests },
-  { name: `api/cab-library (${CAB_LIBRARY_CASE_COUNT} cases, §2.7 server-side cab-IR byte store: round-trip/dedup/corrupt/skips/cap + read-only routes on both surfaces)`, run: runCabLibraryTests }
+  { name: `drivers/per-preset-switches (${PER_PRESET_SWITCH_DRIVER_CASE_COUNT} cases, S3.8 switch block: real-fixture marker offset, per-row confidence, per-FIELD-bounded write + read-back)`, run: runPerPresetSwitchDriverTests },
+  { name: `api/cab-library (${CAB_LIBRARY_CASE_COUNT} cases, §2.7 server-side cab-IR byte store: round-trip/dedup/corrupt/skips/cap + read-only routes on both surfaces)`, run: runCabLibraryTests },
+  { name: `api/gate-contract (${GATE_CONTRACT_CASE_COUNT} cases, ?dryRun=true contract for EVERY device-write route on BOTH tables: zero frames, gate verdict matches NOT_DRY_RUNNABLE, percent-encoded spelling parity)`, run: runGateContractTests }
 ];
 
 let failures = 0;

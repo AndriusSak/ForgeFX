@@ -13,8 +13,11 @@
 //
 // It also covers P3: a route param that makes the codec's encode14 throw (a preset number outside
 // 0..16383, a non-integer :paramId) must answer 400 on BOTH surfaces, not an unhandled 500.
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { DeviceDriver, DriverCapabilities } from '../../src/drivers/types.js';
 import { createRouter } from '../../src/runtime/router.js';
+import { isDeviceWrite, READ_ONLY_BODY } from '../../src/runtime/writeGate.js';
 import * as store from '../../src/store.js';
 import { buildTestApp } from '../helpers/api.js';
 import { assert, assertEqual } from '../helpers/mock.js';
@@ -260,10 +263,76 @@ const VALIDATION_ROWS: ValRow[] = [
   { name: 'fc state max valid geometry (boundary twin)', method: 'GET', url: '/fc/state?layout=8&view=3&switch=2', body: undefined, expect: 200, callsDriver: true }
 ];
 
+// ── READ-ONLY GATE surface (review 2026-10-09: the gate was bypassable by a percent-encoded path). ──
+// The curated, INDEPENDENT expectation of the device-write (method, path-template) surface: the routes
+// the handlers mutate the unit on. It is asserted (a) EQUAL to the DEVICE_WRITES list parsed from
+// writeGate.ts's SOURCE, and (b) EQUAL to the set that actually refuses a read-only server (403 +
+// READ_ONLY_BODY) on BOTH tables — so an endpoint added to one surface but not the other, or a write
+// route added to app.ts/router.ts but not to writeGate.ts's list, fails here rather than silently
+// shipping ungated. Kept in the test (not exported from src) so it stays an independent cross-check.
+const EXPECTED_DEVICE_WRITES: Array<[string, string]> = [
+  ['PUT', '/preset/blocks/:eid/params/:paramId'],
+  ['POST', '/preset/blocks/:eid/bypass'],
+  ['POST', '/preset/blocks/:eid/channel'],
+  ['POST', '/preset/blocks/:eid/type'],
+  ['PUT', '/preset/grid/cell'],
+  ['POST', '/preset/grid/cable'],
+  ['POST', '/preset/grid/select'],
+  ['POST', '/preset/select'],
+  ['POST', '/preset/store'],
+  ['POST', '/preset/name'],
+  ['POST', '/preset/load'],
+  ['POST', '/preset/restore'],
+  ['PUT', '/preset/perform/:slot'],
+  ['PUT', '/preset/switches/:index'],
+  ['POST', '/cab/ir/upload'],
+  ['POST', '/cab/slots/clear'],
+  ['POST', '/scene'],
+  ['POST', '/scene/name'],
+  ['POST', '/tempo'],
+  ['POST', '/tempo/tap'],
+  ['POST', '/mod/bind'],
+  ['POST', '/preset/looper/control'],
+  ['PUT', '/device/param'],
+  ['POST', '/version/:id/load'],
+  ['POST', '/version/:id/restore'],
+  ['POST', '/device/cache/build']
+];
+
+const READ_ONLY_JSON = JSON.stringify(READ_ONLY_BODY);
+/** A concrete request path for a route template — every ':param' becomes '1'. The read-only gate fires
+ *  BEFORE any handler/body parse (Fastify onRequest; the router's matched-route loop), so the value and
+ *  the body never matter: any concrete path proves the refusal. */
+const concretisePath = (template: string): string => template.split('/').map((s) => (s.startsWith(':') ? '1' : s)).join('/');
+/** Per-segment percent-encoding of an otherwise-identical path. A router DECODES before it matches, so
+ *  every spelling must reach the same verdict — this is the class the 2026-10-09 bypass belonged to. */
+const percentEncodePath = (template: string): string =>
+  template.split('/').map((s) => (s.startsWith(':') ? '1' : [...s].map((ch) => `%${ch.charCodeAt(0).toString(16).padStart(2, '0')}`).join(''))).join('/');
+/** True when a response is the shared read-only refusal (status AND body). */
+const isReadOnlyRefusal = (status: number, body: unknown): boolean => status === 403 && String(body) === READ_ONLY_JSON;
+/** The DEVICE_WRITES (method, path-template) entries, parsed from writeGate.ts's SOURCE. Dev-owned module
+ *  style is "no extra exports" and this suite is forbidden from editing src/, so the list is read rather
+ *  than exported — the source IS the authority either way. */
+function parseDeviceWritesFromSource(): Array<[string, string]> {
+  const src = readFileSync(fileURLToPath(new URL('../../src/runtime/writeGate.ts', import.meta.url)), 'utf8');
+  const start = src.indexOf('const DEVICE_WRITES');
+  assert(start >= 0, 'writeGate.ts must define `const DEVICE_WRITES`');
+  const end = src.indexOf('];', start);
+  assert(end > start, 'writeGate.ts DEVICE_WRITES list must terminate with `];`');
+  const block = src.slice(start, end);
+  const out: Array<[string, string]> = [];
+  const re = /\[\s*'([A-Z]+)'\s*,\s*'([^']+)'\s*\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(block))) out.push([m[1]!, m[2]!]);
+  return out;
+}
+
 // drift-diff + documented-exceptions-used + ported-routes-present, plus one case per validation row,
 // plus the P6 silent-accept proof (against the REAL gen-3 codec) and the P9 fc/state proof, plus the
 // P10 repeated-query-key unification block (a repeated single-valued key → 400 on BOTH surfaces).
-export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 6;
+// §8 adds one case per device-write route (plain+encoded refusal, frame-free, parity) plus two aggregate
+// blocks (the device-write set parity across tables and the source-list/behavioural correspondence).
+export const ROUTE_PARITY_CASE_COUNT = VALIDATION_ROWS.length + 6 + EXPECTED_DEVICE_WRITES.length + 2;
 
 export async function runRouteParityTests(): Promise<void> {
   // Hermetic: no cloud (so app.ts's AXIS_CLOUD branch is off and both tables are compared in the
@@ -418,6 +487,103 @@ export async function runRouteParityTests(): Promise<void> {
         const routed = await router.handle('GET', url, undefined);
         assertEqual(routed.status, 400, `${url}: the browser router now rejects the repeated key too → 400 (unified)`);
         assertEqual(routed.body, res.payload, `${url}: body parity — the router 400 must BE the app payload`);
+      }
+    } finally {
+      await app.close();
+    }
+  }
+
+  // ── 8. READ-ONLY GATE guarantee — EVERY device-write route refuses on BOTH surfaces ──
+  // (review 2026-10-09: `PUT /preset/%70erform/1` bypassed the gate because it compared the RAW url
+  // while the router DECODES before matching.) The standing guarantee: on a read-only server EVERY
+  // device-write route answers 403 with the shared READ_ONLY_BODY on BOTH tables, pushes ZERO frames,
+  // and its per-segment percent-encoded spelling reaches the SAME verdict. Built over the REAL FM3
+  // driver on the MockTransport so the frame count is meaningful, and classified with isDeviceWrite.
+  {
+    const roRoutes: Array<{ method: string; path: string }> = [];
+    const { app, registry, mock } = await buildTestApp(0x11, undefined, {
+      writes: false,
+      onRoute: (method, path) => roRoutes.push({ method, path })
+    });
+    const router = createRouter({ registry, store: store.defaultStore, writes: false });
+    try {
+      const routerRoutes = router.listRoutes();
+
+      // ── 8a. the two tables must expose the SAME device-write (method, path) template set ──
+      const appDevWrites = roRoutes
+        .filter((r) => CORE_METHODS.has(r.method) && isDeviceWrite(r.method, r.path))
+        .map(key)
+        .sort();
+      const routerDevWrites = routerRoutes
+        .filter((r) => CORE_METHODS.has(r.method) && isDeviceWrite(r.method, r.path))
+        .map(key)
+        .sort();
+      assert(appDevWrites.length > 0, 'the device-write surface must not be empty');
+      assertEqual(routerDevWrites.join(','), appDevWrites.join(','), 'the device-write (method,path) set must be identical on both tables');
+
+      // ── 8b. per route: read-only 403 + the shared body on BOTH surfaces, ZERO frames, and the
+      //        percent-encoded spelling reaching the SAME status/body as the plain spelling ──
+      for (const template of appDevWrites) {
+        const [method, path] = template.split(' ') as [string, string];
+        const plain = concretisePath(path);
+        const encoded = percentEncodePath(path);
+
+        const before = mock.sent.length;
+        const plainApp = await app.inject({ method: method as 'GET', url: plain });
+        const plainRouter = await router.handle(method, plain);
+        const encApp = await app.inject({ method: method as 'GET', url: encoded });
+        const encRouter = await router.handle(method, encoded);
+        const frames = mock.sent.length - before;
+
+        // (b) a refusal that still pushed frames is worse than no gate.
+        assertEqual(frames, 0, `${template}: refused requests pushed ${frames} frame(s) to the device`);
+        // (a) 403 + the shared READ_ONLY_BODY on BOTH surfaces, with parity of the refusal body.
+        assertEqual(plainApp.statusCode, 403, `${template} ${plain}: app must refuse read-only (got ${plainApp.statusCode} ${plainApp.payload.slice(0, 120)})`);
+        assertEqual(plainApp.payload, READ_ONLY_JSON, `${template} ${plain}: app refusal must BE the shared READ_ONLY_BODY`);
+        assertEqual(plainRouter.status, 403, `${template} ${plain}: router must refuse read-only (got ${plainRouter.status} ${String(plainRouter.body).slice(0, 120)})`);
+        assertEqual(String(plainRouter.body), READ_ONLY_JSON, `${template} ${plain}: router refusal must BE the shared READ_ONLY_BODY`);
+        assertEqual(String(plainRouter.body), plainApp.payload, `${template} ${plain}: refusal body parity (router ≠ app)`);
+        // (c) the percent-encoded spelling reaches the SAME verdict on BOTH surfaces.
+        assertEqual(encApp.statusCode, plainApp.statusCode, `${template} ${encoded}: app status must match the plain spelling`);
+        assertEqual(encApp.payload, plainApp.payload, `${template} ${encoded}: app body must match the plain spelling`);
+        assertEqual(encRouter.status, plainRouter.status, `${template} ${encoded}: router status must match the plain spelling`);
+        assertEqual(String(encRouter.body), String(plainRouter.body), `${template} ${encoded}: router body must match the plain spelling`);
+      }
+
+      // ── 8c. the source DEVICE_WRITES list, the curated surface, and the observable behaviour agree.
+      //     DEVICE_WRITES is NOT exported (the module's style is a minimal export surface) and this suite
+      //     may not edit src/, so the list is parsed from writeGate.ts's SOURCE — the source IS the authority.
+      const parsedKeys = parseDeviceWritesFromSource().map(([m, p]) => `${m} ${p}`).sort();
+      const expectedKeys = EXPECTED_DEVICE_WRITES.map(([m, p]) => `${m} ${p}`).sort();
+
+      // Every DEVICE_WRITES entry must name a route that ACTUALLY EXISTS on both tables (no stale entry).
+      const appSet = new Set(roRoutes.filter((r) => CORE_METHODS.has(r.method)).map(key));
+      const routerSet = new Set(routerRoutes.filter((r) => CORE_METHODS.has(r.method)).map(key));
+      for (const k of parsedKeys) {
+        assert(appSet.has(k), `DEVICE_WRITES entry ${k} has no route in app.ts`);
+        assert(routerSet.has(k), `DEVICE_WRITES entry ${k} has no route in the browser runtime router`);
+      }
+      // ...and the list must equal BOTH the curated expectation AND the built isDeviceWrite classification:
+      // no list entry for a route that does not exist, no device-write route missing from the list.
+      assertEqual(parsedKeys.join(','), expectedKeys.join(','), 'DEVICE_WRITES (parsed from source) must equal the expected device-write surface');
+      assertEqual(appDevWrites.join(','), parsedKeys.join(','), 'isDeviceWrite must classify exactly the DEVICE_WRITES source list');
+      assertEqual(routerDevWrites.join(','), parsedKeys.join(','), 'the router device-write set must equal the DEVICE_WRITES source list');
+
+      // Behavioural derivation: on a read-only server a route refuses (403 + READ_ONLY_BODY) IFF it is a
+      // device write. Scan EVERY route on BOTH tables in the union — a route whose handler mutates the
+      // unit but which does NOT refuse would be exactly the "device-write route missing from the list"
+      // hole. (GET /events is app-only by design and is not a device write.)
+      const union = new Map<string, { method: string; path: string }>();
+      for (const r of [...roRoutes, ...routerRoutes]) union.set(key(r), r);
+      for (const r of union.values()) {
+        if (!CORE_METHODS.has(r.method)) continue;
+        if (exceptionReason(key(r)) != null) continue;
+        const url = concretisePath(r.path);
+        const refApp = await app.inject({ method: r.method as 'GET', url });
+        const refRouter = await router.handle(r.method, url);
+        const listed = parsedKeys.includes(key(r));
+        assertEqual(isReadOnlyRefusal(refApp.statusCode, refApp.payload), listed, `app: ${key(r)} read-only refusal must hold IFF it is a DEVICE_WRITES entry`);
+        assertEqual(isReadOnlyRefusal(refRouter.status, refRouter.body), listed, `router: ${key(r)} read-only refusal must hold IFF it is a DEVICE_WRITES entry`);
       }
     } finally {
       await app.close();

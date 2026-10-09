@@ -23,7 +23,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PERFORM_SLOT_WRITE_CASE_COUNT = 9;
+export const PERFORM_SLOT_WRITE_CASE_COUNT = 11;
 
 /** Split a concatenated F0..F7 byte stream into SysEx frames. */
 function framesFrom(bytes: Uint8Array): number[][] {
@@ -195,5 +195,74 @@ export async function runPerformSlotWriteTests(): Promise<void> {
     assertEqual(res.statusCode, 501, 'a device without setPerformSlot → 501 unsupported');
     assertEqual((res.json() as { capability: string }).capability, 'setPerformSlot', 'naming the capability');
     await app.close();
+  }
+
+  // 10. CONCURRENCY GUARD (third-party review 2026-10-09, finding 4): two rewrites fired at once must
+  //     NOT interleave. #rewriteBody spans several awaited requests, and the transport only serializes
+  //     each REQUEST — so without the guard both rewrites dump the edit buffer back-to-back, then both
+  //     re-send their rebuilt chains over each other, and a read-back can describe a body NEITHER write
+  //     produced. With the gate one rewrite runs to completion (dump → send → settle → read-back)
+  //     before the second's FIRST dump request is even sent; the second then reads the first's result,
+  //     so both patches land, in order.
+  {
+    const mock = makeEditBufferMock(frames);
+    const driver = makeDriver(mock);
+    const [ra, rb] = await Promise.all([
+      driver.setPerformSlot!(1, { effectId: 62, paramId: 41, effectLabel: 'CAB', paramLabel: 'Proximity Frequ' }),
+      driver.setPerformSlot!(2, { effectId: 64, paramId: 42, effectLabel: 'DLY', paramLabel: 'Time' })
+    ]);
+    assert(ra.ok && rb.ok, `both concurrent rewrites must confirm (a=${JSON.stringify(ra)} b=${JSON.stringify(rb)})`);
+    assertEqual(rb.readback!.effectId, 64, 'the second rewrite reads its OWN patch back');
+
+    // No interleave, proven from the SENT stream alone. A serialized pair is exactly
+    //   [dumpReq, <0x77/0x78/0x79 chain A>, readBackReq, dumpReq, <chain B>, readBackReq]
+    // i.e. FOUR fn-0x03 dump requests, with each rewrite's frame chain wholly between its OWN two.
+    // Without the guard the two initial dump requests are adjacent (reqs[0], reqs[1]) with an EMPTY
+    // chain between them — so `chainA.length > 0` is the assertion the guard earns.
+    const reqs = mock.sent.map((f, i) => (f[5] === 0x03 ? i : -1)).filter((i) => i >= 0);
+    assertEqual(reqs.length, 4, 'two serialized rewrites issue four dump requests (2 each)');
+    const isWrite = (f: number[]): boolean => f[5] === 0x77 || f[5] === 0x78 || f[5] === 0x79;
+    const chainA = mock.sent.slice(reqs[0]! + 1, reqs[1]!);
+    const between = mock.sent.slice(reqs[1]! + 1, reqs[2]!);
+    const chainB = mock.sent.slice(reqs[2]! + 1, reqs[3]!);
+    assert(chainA.length > 0 && chainA.every(isWrite), `rewrite A writes its whole chain before its read-back (got ${chainA.length} write frames)`);
+    assertEqual(between.length, 0, "NOTHING is sent between A's read-back and B's first dump (no window overlap)");
+    assert(chainB.length > 0 && chainB.every(isWrite), `rewrite B writes its whole chain before its read-back (got ${chainB.length} write frames)`);
+    assertEqual(chainA[0]![5], 0x77, "A's chain starts with a dump header");
+    assertEqual(chainA[chainA.length - 1]![5], 0x79, "A's chain ends with a dump terminator");
+    assertEqual(chainB[0]![5], 0x77, "B's chain starts with a dump header");
+    assertEqual(chainB[chainB.length - 1]![5], 0x79, "B's chain ends with a dump terminator");
+
+    // The final buffer equals BOTH patches applied in order: B read A's result (not the original), so a
+    // fresh decode of the edit buffer shows A's slot 1 AND B's slot 2 — the state two interleaved writes
+    // could not produce.
+    const page = await driver.performPage!();
+    assert(page, 'the edit buffer still holds a perform page after both writes');
+    const s1 = page!.slots.find((s) => s.slot === 1);
+    const s2 = page!.slots.find((s) => s.slot === 2);
+    assertEqual(s1?.effectId, 62, "slot 1 holds rewrite A's effectId");
+    assertEqual(s1?.paramId, 41, "slot 1 holds rewrite A's paramId");
+    assertEqual(s2?.effectId, 64, "slot 2 holds rewrite B's effectId");
+    assertEqual(s2?.paramId, 42, "slot 2 holds rewrite B's paramId");
+  }
+
+  // 11. The guard cannot deadlock: a THROW inside the guarded section (here a transport failure on the
+  //     first dump) must still release the gate — the next rewrite then runs normally instead of hanging
+  //     forever behind a poisoned promise. `release` runs from a `finally` and the gate is only ever
+  //     RESOLVED, never rejected.
+  {
+    const mock = makeEditBufferMock(frames);
+    const baseReply = mock.reply;
+    let thrown = false;
+    mock.reply = (req) => {
+      if (req[5] === 0x03 && !thrown) { thrown = true; throw new Error('boom (simulated transport failure mid-rewrite)'); }
+      return baseReply(req);
+    };
+    const driver = makeDriver(mock);
+    let rejected = false;
+    try { await driver.setPerformSlot!(1, { effectId: 62 }); } catch { rejected = true; }
+    assert(rejected, 'a throw inside the guarded section surfaces to the caller');
+    const res = await driver.setPerformSlot!(2, { effectId: 64, paramId: 42 });
+    assert(res.ok, `a rewrite AFTER a thrown one still runs — the gate released (got ${JSON.stringify(res)})`);
   }
 }

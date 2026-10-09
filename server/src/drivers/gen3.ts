@@ -594,24 +594,56 @@ class Gen3Driver implements DeviceDriver {
    *  callers). The target is ALWAYS the edit buffer (0x3FFF): a rejected or mangled write cannot touch a
    *  saved preset, and reloading the preset discards it. Returns the body the unit now holds — the caller
    *  derives its own READ-BACK verdict from it, never from the mere absence of a rejection. */
+  // ── rewrite guard (third-party review 2026-10-09, finding 4 — CONFIRMED by reading the code) ──
+  // #rewriteBody is a READ-MODIFY-WRITE spanning SEVERAL awaited requests (dump → patch → re-send
+  // frame-by-frame → settle → re-dump), and the transport serializes each INDIVIDUAL request — not
+  // the sequence. So a different request serviced between two of our awaits (a meter poll, an
+  // edit-buffer watch, a SECOND write) can land inside the window: the second rewrite's dump
+  // overwrites ours mid-flight, and the read-back then reports a body NEITHER write produced (two
+  // rewrites interleave and the verdict describes a state that never existed). This promise-chain
+  // mutex admits ONE rewrite at a time; a second waits for the first to finish.
+  //
+  // Non-deadlocking by construction: the gate is a plain RESOLVER-controlled promise that is only
+  // ever RESOLVED (never rejected), so one failed rewrite cannot poison the waiters behind it; and
+  // `release` runs from a `finally`, so a throw INSIDE the guarded section still opens the gate.
+  // Scope is deliberately #rewriteBody ONLY — it is NOT held across the driver's unrelated traffic,
+  // so telemetry / meter polling (#send, #write and every read path never acquire it) keep flowing
+  // while a write is in progress. Holding it class-wide would stall a meter tick for the whole 1.5 s
+  // settle and starve the UI it is meant to keep live.
+  #rewriteGate: Promise<void> = Promise.resolve();
+
   async #rewriteBody(mutate: (body: Uint8Array) => string | null): Promise<{ body: Uint8Array } | { reason: string }> {
-    const dev = await this.#conn();
-    const before = dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER));
-    const raw = decodeRawPatch(parsePresetDump(before, 0, this.#prof.model).chunkPayloads);
-    const body = new Uint8Array(raw.body);
-    const failed = mutate(body);
-    if (failed) return { reason: failed };
-    const stream = Array.from(reencodeDumpFromRawPatch(before, reencodeRawPatch(raw.rawPatch, body)));
-    if (!retargetPresetDumpToEditBuffer(stream)) return { reason: 'retarget-failed' };
-    for (const frame of splitFrames(stream)) {
-      if (dev.sendPaced) await dev.sendPaced(frame, 64, 4);
-      else if (dev.sendQueued) await dev.sendQueued(frame);
-      else dev.send(frame);
+    // Take the gate: wait behind any in-flight rewrite, then hand the NEXT caller our own slot. Both
+    // lines run before the first `await`, so a second rewrite started in the same tick chains behind
+    // this one (it captures the promise we just stored, not the resolved one we awaited).
+    const prior = this.#rewriteGate;
+    let release!: () => void;
+    this.#rewriteGate = new Promise<void>((r) => { release = r; });
+    await prior; // the gate is only ever resolved → this never rejects
+    // A host-originated body write is a local edit like setParam/setType: stamp the window BEFORE the
+    // send so the FM3 device-edit poll pauses and never reads our own rewrite back as a front-panel edit.
+    this.#lastLocalEditAt = Date.now();
+    try {
+      const dev = await this.#conn();
+      const before = dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER));
+      const raw = decodeRawPatch(parsePresetDump(before, 0, this.#prof.model).chunkPayloads);
+      const body = new Uint8Array(raw.body);
+      const failed = mutate(body);
+      if (failed) return { reason: failed };
+      const stream = Array.from(reencodeDumpFromRawPatch(before, reencodeRawPatch(raw.rawPatch, body)));
+      if (!retargetPresetDumpToEditBuffer(stream)) return { reason: 'retarget-failed' };
+      for (const frame of splitFrames(stream)) {
+        if (dev.sendPaced) await dev.sendPaced(frame, 64, 4);
+        else if (dev.sendQueued) await dev.sendQueued(frame);
+        else dev.send(frame);
+      }
+      this.#gridCache = null; // the edit buffer changed → the next grid/blocks read reflects it
+      await new Promise((r) => setTimeout(r, 1500)); // let the unit settle before the read-back dump
+      const after = decodeRawPatch(parsePresetDump(dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER)), 0, this.#prof.model).chunkPayloads);
+      return { body: new Uint8Array(after.body) };
+    } finally {
+      release(); // a throw anywhere above still frees the next waiter
     }
-    this.#gridCache = null; // the edit buffer changed → the next grid/blocks read reflects it
-    await new Promise((r) => setTimeout(r, 1500)); // let the unit settle before the read-back dump
-    const after = decodeRawPatch(parsePresetDump(dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER)), 0, this.#prof.model).chunkPayloads);
-    return { body: new Uint8Array(after.body) };
   }
 
   /** Write ONE slot of the CURRENT edit buffer's per-preset PERFORMANCE PAGE (§2.2) — the WRITE side.

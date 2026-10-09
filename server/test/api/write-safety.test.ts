@@ -11,9 +11,10 @@
 import { buildTestApp } from '../helpers/api.js';
 import { assert, assertEqual, hex } from '../helpers/mock.js';
 import { createRouter } from '../../src/runtime/router.js';
+import { READ_ONLY_BODY } from '../../src/runtime/writeGate.js';
 import * as store from '../../src/store.js';
 
-export const WRITE_SAFETY_CASE_COUNT = 16;
+export const WRITE_SAFETY_CASE_COUNT = 18;
 
 export async function runWriteSafetyTests(): Promise<void> {
   // ── ?dryRun=true returns the exact frame hex and sends nothing ─────────────
@@ -149,6 +150,41 @@ export async function runWriteSafetyTests(): Promise<void> {
     const off = await app.inject({ method: 'PUT', url: '/preset/blocks/58/params/7?dryRun=false', payload: { value: 0.5, continuous: true } });
     assertEqual((off.json() as { dryRun?: boolean }).dryRun, undefined, 'an explicit false is NOT a preview');
     assertEqual(mock.sent.length, before + 1, 'so that one really was sent');
+    await app.close();
+  }
+
+  // ── the device-cache build: a SWEEP, not a previewable write (found 2026-10-09 while verifying the
+  //    gate-contract sweep). `POST /device/cache/build {mode:'full'}` puts continuous-SET frames on the wire
+  //    AND reloads the current preset (services/deviceCache.ts). Its read-only side was ALREADY right — the
+  //    route is on DEVICE_WRITES, so a read-only server refuses the whole op in both modes. What was missing
+  //    is the PREVIEW side: a capture does not make the sweep safe, because `reloadPreset` goes through the
+  //    DRIVER's connection while a dry run only swaps the registry transport. `?dryRun=true` must therefore
+  //    refuse (400) instead of starting a run — the route now sits on NOT_DRY_RUNNABLE for that reason. ──
+  {
+    const { app, registry, mock } = await buildTestApp(0x11, undefined, { writes: false });
+    const before = mock.sent.length;
+    for (const body of [{ mode: 'full' }, {}]) {
+      const ro = await app.inject({ method: 'POST', url: '/device/cache/build', payload: body });
+      assertEqual(ro.statusCode, 403, `read-only refuses the cache build (${JSON.stringify(body)}) — the whole op is gated`);
+      assertEqual(ro.payload, JSON.stringify(READ_ONLY_BODY), 'with the standard read-only body');
+    }
+    const roRtr = await createRouter({ registry, store: store.defaultStore, writes: false })
+      .handle('POST', '/device/cache/build', JSON.stringify({ mode: 'full' }));
+    assertEqual(roRtr.status, 403, 'the browser twin refuses it too (parity)');
+    assertEqual(mock.sent.length, before, 'and neither reached the device');
+    await app.close();
+  }
+  {
+    const { app, registry, mock } = await buildTestApp(0x11);
+    const before = mock.sent.length;
+    const dry = await app.inject({ method: 'POST', url: '/device/cache/build?dryRun=true', payload: { mode: 'full' } });
+    assertEqual(dry.statusCode, 400, 'a write-sweep cannot be previewed → 400, never a live sweep');
+    assertEqual((dry.json() as { error: string }).error, 'dry-run-unsupported', 'named as unsupported');
+    assertEqual(mock.sent.length, before, 'and it sent nothing');
+    const dryRtr = await createRouter({ registry, store: store.defaultStore })
+      .handle('POST', '/device/cache/build?dryRun=true', JSON.stringify({ mode: 'full' }));
+    assertEqual(dryRtr.status, 400, 'parity on the refusal');
+    assertEqual(dryRtr.body, dry.payload, 'identical refusal body on both surfaces');
     await app.close();
   }
 }

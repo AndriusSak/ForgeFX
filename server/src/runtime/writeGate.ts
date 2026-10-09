@@ -104,7 +104,14 @@ export function isDeviceWriteRequest(method: string, url: string, routeTemplate?
  *  never fall through to a live write, and a guaranteed decode failure is not a useful answer. */
 const NOT_DRY_RUNNABLE: ReadonlyArray<readonly [string, string]> = [
   ['PUT', '/preset/perform/:slot'], // dump → patch → re-send: the dump is the thing that has no preview
-  ['PUT', '/preset/switches/:index'] // same shape
+  ['PUT', '/preset/switches/:index'], // same shape
+  // The device-cache build is a background SWEEP, not a frame write: nothing about it can be shown as a
+  // preview, and `mode:'full'` puts continuous-SET frames on the wire AND reloads the current preset
+  // (services/deviceCache.ts). A capture would NOT make it safe either — the sweep's own sends go through
+  // the registry transport, but `reloadPreset` goes through the DRIVER's connection, which a dry run does
+  // not swap. So `?dryRun=true` must REFUSE (400) rather than start a run. Found 2026-10-09 while verifying
+  // the gate-contract sweep; the read-only side was already correct — this route is on DEVICE_WRITES.
+  ['POST', '/device/cache/build']
 ];
 
 /** The body served when `?dryRun=true` is asked of a write that cannot be previewed. Identical on both
