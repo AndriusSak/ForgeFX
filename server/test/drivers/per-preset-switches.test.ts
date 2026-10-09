@@ -195,8 +195,8 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     const pp2 = page.switches[1]!;
     assertEqual(pp2.actionCode, 0x03, 'PP#2 carries the scene-select code (the owner\'s second switch)');
     assertEqual(pp2.confidence, 'partial', 'PP#2 has an observed action code but no located target byte');
-    assertEqual(page.evidence.actionCodesMeasured, 2, 'two action codes are measured');
-    assertEqual(page.evidence.targetBytesMeasured, 1, 'one target byte is measured');
+    assertEqual(page.evidence.actionCodeIndices.join(','), '1,2', 'the two observed action-code indices are PP#1 and PP#2');
+    assertEqual(page.evidence.targetByteIndices.join(','), '1', 'and the one located target byte is PP#1');
   }
 
   // 11. The THIRD capture (PP#1 → Delay 2): a new anchor, and the flat-target-array reading refuted. PP#2's
@@ -211,7 +211,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[1]!.actionCode, 0x04, 'PP#2 action code changed to Effect: Bypass');
     assertEqual(page.switches[1]!.targetIndex, null, 'and marker+149 was never located — reported as NULL, not 0');
     assertEqual(page.switches[1]!.confidence, 'partial', 'PP#2 is a partial row');
-    assertEqual(page.evidence.targetBytesMeasured, 1, 'so the decoder still claims only ONE measured target byte');
+    assertEqual(page.evidence.targetByteIndices.join(','), '1', 'so the decoder still claims only ONE measured target byte');
   }
 
   // 10. Write-safety: read-only → 403 (both surfaces); `?dryRun=true` → 400, because a read-modify-write
