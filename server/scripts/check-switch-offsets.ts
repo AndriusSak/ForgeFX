@@ -54,7 +54,12 @@ interface Step {
   to: string;
   predictions: Prediction[];
   /** Offsets allowed to differ for reasons outside the switch block (the perform page, edited in between). */
-  allowedElsewhere: (o: number) => boolean;
+  /**
+   * Bytes that MAY move without failing the check, as ABSOLUTE body offsets — a documented known-unknown, named
+   * per offset, NEVER a wildcard. The callback is handed the step's own marker, so a caller never has to
+   * hard-code a position that the codec's own rule says must be SEARCHED for (the marker moves between presets).
+   */
+  allowedElsewhere: (o: number, at: number) => boolean;
 }
 
 /** The perform page's own region — labels the owner edited between captures. */
@@ -183,6 +188,11 @@ const STEPS: Step[] = [
     // once: every remaining action-code slot is located (so the 2-byte array is measured for all 24), and the
     // CODES are read for six categories. It also shows the action code names the FAMILY, not the function:
     // bypass, change-channel and parameter rows all read 0x04.
+    //
+    // NOTE ON THE `want` VALUES HERE: unlike every other step, this capture was read BEFORE these expectations
+    // were written, so this step is a REGRESSION SNAPSHOT, not a prediction. It still earns its place — it pins
+    // the slots, the codes and the record fields so a later capture cannot change them unnoticed — but the
+    // predictions for the NEXT round live in the hardware plan, written down before the dump.
     from: '../test/fixtures/preset-switches/preset-410-pp13-pp24.bin',
     to: '../test/fixtures/preset-switches/preset-410-pp14-pp23-categories.bin',
     predictions: [
@@ -192,17 +202,17 @@ const STEPS: Step[] = [
       { rel: 34, want: 0x03, mustMove: true, what: 'PP#16 action code — Scene again, so 0x03 is the whole scene family' },
       { rel: 36, want: 0x04, mustMove: true, what: 'PP#17 action code — Effect: Change Channel, and it reads the SAME code as Effect: Bypass' },
       { rel: 38, want: 0x04, mustMove: true, what: 'PP#18 action code — Effect: Parameter, also 0x04' },
-      { rel: 40, want: 0x02, mustMove: true, what: 'PP#19 action code — Preset (a NEW category)' },
+      { rel: 40, want: 0x02, mustMove: true, what: 'PP#19 action code — Preset (observed)' },
       { rel: 42, want: 0x02, mustMove: true, what: 'PP#20 action code — Preset again' },
       { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Utility (the assignment was "Utility: Tuner", and 0x05 is the UTILITY category)' },
-      { rel: 46, want: 0x08, mustMove: true, what: 'PP#22 action code — Looper (NEW)' },
+      { rel: 46, want: 0x08, mustMove: true, what: 'PP#22 action code — Looper (observed)' },
       { rel: 48, want: 0x07, mustMove: true, what: 'PP#23 action code — Control Switch (the owner confirmed this switch was Control Switch, not Layout)' },
       // record+0, the "which one" byte — a scene number here, a preset number there, and ZERO for the four
       // categories that do not select a target at all (18, 21, 22, 23) — hence no predictions for those.
       { rel: 304, want: 3, mustMove: true, what: 'PP#14 record+0 → 3 = SCENE 3 (not an FX slot: a scene action stores a scene number)' },
       { rel: 316, want: 7, mustMove: true, what: 'PP#15 record+0 → 7 = scene 7 (the pair proves the field is the scene number)' },
       { rel: 328, want: 1, mustMove: true, what: 'PP#16 record+0 → 1 (the second scene flavour)' },
-      { rel: 340, want: 2, mustMove: true, what: 'PP#17 record+0 → 2 (Effect: Change Channel — the block, with the channel at +4)' },
+      { rel: 340, want: 2, mustMove: true, what: 'PP#17 record+0 → 2 (Effect: Change Channel — a value of 2, which MIGHT be the FX-slot index of the block it changes; unmeasured, with the channel-looking byte at +4)' },
       { rel: 364, want: 28, mustMove: true, what: 'PP#19 record+0 → 28 = a PRESET number' },
       { rel: 376, want: 1, mustMove: true, what: 'PP#20 record+0 → 1 (Preset: Increment)' },
       // The rest of the record: the fields a category writes when it does NOT use +0. Named as observations,
@@ -217,16 +227,25 @@ const STEPS: Step[] = [
       // the four rows whose record+0 the codec therefore refuses to read or write.
       { rel: 388, mustMove: false, what: 'PP#21 (Tuner) record stayed ALL ZERO — nothing to locate' },
       { rel: 400, mustMove: false, what: 'PP#22 (Looper) record stayed ALL ZERO' },
-      { rel: 412, mustMove: false, what: 'PP#23 (Control Switch) record stayed ALL ZERO' }
+      { rel: 412, mustMove: false, what: 'PP#23 (Control Switch) record stayed ALL ZERO' },
+      // The second array's four moved slots, PINNED. These are regression expectations (measured, transcribed
+      // after the dump), not predictions — but leaving them unpinned meant the bytes could read anything and the
+      // check would still pass.
+      { rel: 82, want: 1, mustMove: true, what: 'slot 16 of the marker+52 array = 1' },
+      { rel: 84, want: 2, mustMove: true, what: 'slot 17 = 2' },
+      { rel: 86, want: 3, mustMove: true, what: 'slot 18 = 3' },
+      { rel: 88, mustMove: false, what: 'slot 19 stayed ZERO (its switch is the one with a +0-only record)' },
+      { rel: 90, want: 4, mustMove: true, what: 'slot 20 = 4' }
     ],
     // This step's own sweep moved FOUR bytes in a region that had been all-zero in every previous capture:
-    // marker+82, +84, +86 and +90 read 1, 2, 3, 4 (the byte at +88 stayed 0). Reading the region back with the
-    // tool — not by eye — showed they are not stray bytes at all: they are slots 16/17/18/20 of a SECOND
-    // 24-entry u16 array at marker+52 (+52…+99, stride 2), the direct analogue of the action-code array. Its
-    // MEANING is an OPEN ITEM (the HOLD half of the switch definitions, or a function/mode index), so they stay
-    // allowed EXPLICITLY and by offset — a documented known-unknown, never a wildcard — and the check keeps
-    // naming them in its extras line rather than failing on bytes the model does not claim to explain.
-    allowedElsewhere: (o) => isPerformPageByte(o) || [82, 84, 86, 90].some((r) => o === 11420 + r)
+    // marker+82, +84, +86 and +90 read 1, 2, 3, 4 with +88 staying 0. Reading the region back with the tool —
+    // not by eye — showed they are not stray bytes at all: they are slots 16/17/18/20 of a stride-2 array that
+    // starts right after the action-code array (marker+52) and is one entry per switch. Its MEANING is OPEN
+    // (three candidates, in the codec header), but its VALUES are now PINNED as ordinary predictions below —
+    // which is why this step needs no `allowedElsewhere` entry for them any more: a pinned expectation that can
+    // fail beats a documented unknown that cannot. No offset here is hard-coded: the callback is handed the
+    // step's own marker, because the codec's rule is that the marker must be SEARCHED for, never assumed.
+    allowedElsewhere: (o) => isPerformPageByte(o)
   }
 ];
 
@@ -295,7 +314,12 @@ export async function main(): Promise<number> {
     }
 
     const covered = new Set(step.predictions.map((p) => at + p.rel));
-    const extras = [...diff].filter((o) => !covered.has(o) && !step.allowedElsewhere(o));
+    const extras = [...diff].filter((o) => !covered.has(o) && !step.allowedElsewhere(o, at));
+    const tolerated = [...diff].filter((o) => !covered.has(o) && step.allowedElsewhere(o, at));
+    if (tolerated.length) {
+      console.log(`  allowed-elsewhere (documented known-unknowns — named so they cannot drift silently): ` +
+        tolerated.map((o) => `marker+${o - at}: ${a[o]}→${b[o]}`).join(', '));
+    }
     console.log(`  extras: ${extras.length ? extras.map((o) => `${o} (marker+${o - at}: ${a[o]}→${b[o]})`).join(', ') : 'none'}`);
     if (extras.length) bad++;
   }

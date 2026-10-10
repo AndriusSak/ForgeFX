@@ -58,7 +58,7 @@ export async function main(argv: string[]): Promise<number> {
       c === null ? 'code null (no observed offset)' : `code 0x${c.toString(16).padStart(2, '0')} (${label ?? 'unmeasured'})`;
     for (const s of block.switches.slice(0, Object.keys(PP_MEASURED_OFFSETS).length + 1)) {
       console.log(`  PP#${s.index}  ${code(s.actionCode, s.action)}` +
-        ` → target ${s.targetIndex} (${s.targetLabel ?? 'unlabelled'})  [${s.confidence}]`);
+        ` → target ${s.targetIndex} (${s.targetLabel ? `${s.targetLabel} [FX-slot name — measured with Effect: Bypass only]` : 'unlabelled'})  [${s.confidence}]`);
     }
     // The RAW marker-relative window. The offsets the model reads are a handful, and a byte that moved where
     // the model says it should not is the interesting result — so print the bytes rather than only the
