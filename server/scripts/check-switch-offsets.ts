@@ -9,11 +9,15 @@
 // THE CHAIN (all real captures of preset 410):
 //   A  preset-perform/preset-410.bin        no switch configured
 //   B  preset-switches/preset-410-pp1.bin   PP#1 = Effect: Bypass → Filter 4 ; PP#2 = Scene: Select
-//   C  preset-switches/preset-410-delay2.bin PP#1 = Effect: Bypass → Delay 2  ; PP#2 = Effect: Bypass
+//   C  preset-switches/preset-410-delay2.bin PP#1 = Effect: Bypass → Delay 2  ; PP#2 = Effect: Bypass, target FB Rtn 2
+//   D  preset-switches/preset-410-pp2-reverb1.bin          PP#2 target → Reverb 1 (the PREDICTION that settled 160)
+//   E  preset-switches/preset-410-pp2-fbrtn2-pp3-chorus1.bin PP#2 target → FB Rtn 2 ; PP#3 = Effect: Bypass → Chorus 1
 //
-// CONFIRMED (2026-10-08/09): marker+4 and marker+6 hold the PP#1/PP#2 ACTION CODES (a contiguous u16 array,
-// two entries evidenced); marker+148 holds PP#1's TARGET byte (20 = "Filter 4", then 8 = "Delay 2", each
-// matching an anchor measured independently on the wire).
+// CONFIRMED (2026-10-08/09): marker+4/6/8 hold the PP#1/PP#2/PP#3 ACTION CODES (u16, stride 2);
+// marker+148/160/172 hold the PP#1/PP#2/PP#3 TARGET bytes (stride 12). PP#1's came from reading back a known
+// anchor; PP#2's and PP#3's were CONFIRMED BY PREDICTION — the value was stated before the capture and read
+// exactly (51 = "Reverb 1" at 160, 2 = "Chorus 1" at 172). An earlier unexplained 14 at marker+160 is
+// explained by the same model: PP#2's target with "FB Rtn 2" selected (14).
 // REFUTED (2026-10-09): the TARGET bytes are NOT a flat one-per-switch array — in capture C, PP#2 was fully
 // configured yet marker+149 did not move. Keep that as a `mustMove: false` prediction so it cannot come back.
 //
@@ -48,15 +52,15 @@ interface Step {
 /** The perform page's own region — labels the owner edited between captures. */
 const isPerformPageByte = (o: number): boolean => o >= 10690 && o <= 11100;
 
-/** marker+160: seen 0 → 1 → 14 across the three captures. Identity UNKNOWN (a hypothesis, not a finding). */
-const UNEXPLAINED_REL = 160;
-
 /** The refuted stride: PP#2's target byte would sit here IF the array were flat. The codec's table has no
  *  entry for it — checked below, so the refutation lives in the DATA, not only in this script. */
 const REFUTED_PP2_TARGET_REL = PP_TARGET_OFFSET + 1;
 
-/** PP#2's action-code offset comes from the codec's table (PP_ACTION_OFFSET + 2 was an assumption). */
+/** PP#2's and PP#3's offsets come from the codec's table (arithmetic off PP#1's was an assumption). */
 const PP2_ACTION_REL = PP_MEASURED_OFFSETS[2]!.actionCode;
+const PP2_TARGET_REL = PP_MEASURED_OFFSETS[2]!.target!;
+const PP3_ACTION_REL = PP_MEASURED_OFFSETS[3]!.actionCode;
+const PP3_TARGET_REL = PP_MEASURED_OFFSETS[3]!.target!;
 
 const STEPS: Step[] = [
   {
@@ -65,9 +69,13 @@ const STEPS: Step[] = [
     predictions: [
       { rel: PP_ACTION_OFFSET, want: 0x04, mustMove: true, what: 'PP#1 action code → Effect: Bypass' },
       { rel: PP2_ACTION_REL, want: 0x03, mustMove: true, what: 'PP#2 action code → Scene: Select' },
-      { rel: PP_TARGET_OFFSET, want: 20, mustMove: true, what: 'PP#1 target → 20 = Filter 4' }
+      { rel: PP_TARGET_OFFSET, want: 20, mustMove: true, what: 'PP#1 target → 20 = Filter 4' },
+      // PP#2's target byte moved 0 → 1 here while its action was Scene: Select. Under the model that is its
+      // target field, whose MEANING depends on the action (a scene number here — the FX-slot anchors were all
+      // measured with Effect: Bypass), so it is asserted as a byte, not as a slot name.
+      { rel: PP2_TARGET_REL, want: 1, mustMove: true, what: 'PP#2 target byte → 1 (Scene: Select is set: a scene number, not an FX slot)' }
     ],
-    allowedElsewhere: (o) => isPerformPageByte(o) || o === 11420 + UNEXPLAINED_REL
+    allowedElsewhere: (o) => isPerformPageByte(o)
   },
   {
     from: '../test/fixtures/preset-switches/preset-410-pp1.bin',
@@ -75,11 +83,36 @@ const STEPS: Step[] = [
     predictions: [
       { rel: PP2_ACTION_REL, want: 0x04, mustMove: true, what: 'PP#2 action code → Effect: Bypass' },
       { rel: PP_TARGET_OFFSET, want: 8, mustMove: true, what: 'PP#1 target → 8 = Delay 2' },
+      // The previously UNEXPLAINED 1 → 14. Under the model this is PP#2's target byte with the owner's
+      // "FB Rtn 2" selected, which capture E re-measures at exactly the same value from a different direction.
+      { rel: PP2_TARGET_REL, want: 14, mustMove: true, what: 'PP#2 target → 14 = FB Rtn 2' },
       // THE REFUTATION, nailed down: a flat one-per-switch target array would put PP#2's target here, and a
       // configured PP#2 must move it. It did not.
       { rel: REFUTED_PP2_TARGET_REL, mustMove: false, what: 'PP#2 target IF the array were contiguous (REFUTED)' }
     ],
-    allowedElsewhere: (o) => isPerformPageByte(o) || o === 11420 + UNEXPLAINED_REL
+    allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // The PREDICTION that settled marker+160: PP#2's target was set to a KNOWN anchor (Reverb 1) and the model
+    // said 51 must appear there. It did — and adding PP#3 to the same capture then confirmed 172 by the same
+    // method (want 2 = Chorus 1), i.e. a second index, not a single lucky byte.
+    from: '../test/fixtures/preset-switches/preset-410-delay2.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp2-reverb1.bin',
+    predictions: [
+      { rel: PP_TARGET_OFFSET, want: 20, mustMove: true, what: 'PP#1 target → back to 20 = Filter 4' },
+      { rel: PP2_TARGET_REL, want: 51, mustMove: true, what: 'PP#2 target → 51 = Reverb 1 (PREDICTED before the capture)' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    from: '../test/fixtures/preset-switches/preset-410-pp2-reverb1.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp2-fbrtn2-pp3-chorus1.bin',
+    predictions: [
+      { rel: PP2_TARGET_REL, want: 14, mustMove: true, what: 'PP#2 target → 14 = FB Rtn 2 (the earlier unexplained value, reproduced)' },
+      { rel: PP3_ACTION_REL, want: 0x04, mustMove: true, what: 'PP#3 action code → Effect: Bypass (a THIRD action-code slot: stride 2 holds)' },
+      { rel: PP3_TARGET_REL, want: 2, mustMove: true, what: 'PP#3 target → 2 = Chorus 1 (PREDICTED before the capture: stride 12 holds)' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
   }
 ];
 
@@ -91,10 +124,20 @@ function load(rel: string): Uint8Array {
 
 export async function main(): Promise<number> {
   let bad = 0;
-  // The refutation must live in the DATA, not only in this script's expectations.
-  if (PP_MEASURED_OFFSETS[2]?.target !== undefined) {
-    console.log('FAIL: the codec table now claims a target offset for PP#2 — if that is a new MEASUREMENT, update this script; if it is an assumption, remove it');
-    bad++;
+  // The offsets must live in the DATA, and this script must not drift from them: every prediction below was
+  // written against this table, so a change to it has to be re-stated here WITH a capture that proves it.
+  const table = PP_MEASURED_OFFSETS;
+  const claims: Array<[string, boolean]> = [
+    ['PP#1 action @4', table[1]?.actionCode === 4],
+    ['PP#1 target @148', table[1]?.target === 148],
+    ['PP#2 action @6', table[2]?.actionCode === 6],
+    ['PP#2 target @160', table[2]?.target === 160],
+    ['PP#3 action @8', table[3]?.actionCode === 8],
+    ['PP#3 target @172', table[3]?.target === 172],
+    ['indices 4+ still have NO observed offset', Object.keys(table).length === 3 && table[4] === undefined]
+  ];
+  for (const [what, ok] of claims) {
+    if (!ok) { console.log(`FAIL: the codec table no longer says "${what}" — the predictions below were written against that table`); bad++; }
   }
   for (const step of STEPS) {
     const a = load(step.from);

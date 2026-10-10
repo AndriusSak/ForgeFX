@@ -15,7 +15,7 @@ import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
-import { parsePresetDump, decodeRawPatch, parsePerPresetSwitches } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, parsePerPresetSwitches, PP_ACTION_OFFSET, PP_TARGET_OFFSET } from 'forgefx-midi/devices/gen3';
 
 const EDIT_BUFFER = 0x3fff;
 
@@ -42,18 +42,35 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
     console.log(`block at body offset ${block.at} · populated=${block.populated}`);
-    for (const s of block.switches.slice(0, 3)) {
-      console.log(`  PP#${s.index}  code 0x${s.actionCode.toString(16).padStart(2, '0')} (${s.action ?? 'unmeasured'})` +
-        ` → target ${s.targetIndex} (${s.targetLabel ?? 'unlabelled'})  [${s.confidence}]`);
-    }
     if (!block.populated) {
       console.log('the block is present but ALL ZERO — that is not the populated fixture §3.8 needs.');
       return 1;
     }
+    // SAVE BEFORE PRINTING. Measured 2026-10-09 on the live unit: a row whose fields are unobserved carries a NULL
+    // actionCode (by design — the codec never extrapolates), the old print loop called .toString(16) on it
+    // and threw AFTER a successful dump and BEFORE the write, so a real capture of the unit was lost and the
+    // frame tap was the only copy. A display bug must never cost the artifact.
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, Buffer.from(bytes));
     const sha = createHash('sha256').update(Buffer.from(bytes)).digest('hex').slice(0, 12);
     console.log(`wrote ${out}  sha256 ${sha}`);
+    const code = (c: number | null, label?: string | null): string =>
+      c === null ? 'code null (no observed offset)' : `code 0x${c.toString(16).padStart(2, '0')} (${label ?? 'unmeasured'})`;
+    for (const s of block.switches.slice(0, 4)) {
+      console.log(`  PP#${s.index}  ${code(s.actionCode, s.action)}` +
+        ` → target ${s.targetIndex} (${s.targetLabel ?? 'unlabelled'})  [${s.confidence}]`);
+    }
+    // The RAW marker-relative window. The offsets the model reads are a handful, and a byte that moved where
+    // the model says it should not is the interesting result — so print the bytes rather than only the
+    // decoder's reading of them.
+    console.log(`  [marker+${PP_ACTION_OFFSET}/${PP_ACTION_OFFSET + 2} = PP#1/PP#2 action code (u16, stride 2) ·` +
+      ` marker+${PP_TARGET_OFFSET} = PP#1 target (MEASURED) · marker+160 = the candidate PP#2 target]`);
+    for (let o = 0; o < 200; o += 16) {
+      const chunk = [...body.slice(block.at + o, block.at + o + 16)];
+      const hex = chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ');
+      const txt = chunk.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('');
+      console.log(`  marker+${String(o).padStart(3, ' ')}  ${hex.padEnd(47, ' ')}  ${txt}`);
+    }
     return 0;
   } finally {
     await session.close();

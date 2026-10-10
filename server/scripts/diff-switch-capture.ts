@@ -11,7 +11,7 @@
 // ────────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, PP_ACTION_OFFSET, PP_TARGET_OFFSET, ppTargetLabel } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, PP_MEASURED_OFFSETS, ppTargetLabel } from 'forgefx-midi/devices/gen3';
 
 function load(p: string): Uint8Array {
   const bytes = new Uint8Array(readFileSync(p));
@@ -19,16 +19,14 @@ function load(p: string): Uint8Array {
   return body;
 }
 
-/** Names for the offsets the model currently reads. */
+/** Names for the offsets the model currently reads — read from the CODEC's table, so this label cannot
+ *  outlive the model (it used to hard-code a flat one-per-switch target array, refuted 2026-10-09). */
 function labelFor(rel: number): string {
-  if (rel === PP_ACTION_OFFSET) return 'PP#1 action code (u16 low)';
-  if (rel === PP_ACTION_OFFSET + 1) return 'PP#1 action code (u16 high)';
-  if (rel === PP_ACTION_OFFSET + 2) return 'PP#2 action code (u16 low)';
-  if (rel === PP_ACTION_OFFSET + 3) return 'PP#2 action code (u16 high)';
-  if (rel === PP_TARGET_OFFSET) return 'PP#1 target byte (MEASURED)';
-  if (rel === PP_TARGET_OFFSET + 1) return 'PP#2 target byte IF stride 1 (unproven)';
-  if (rel === PP_TARGET_OFFSET + 2) return 'PP#3 target byte IF stride 1 (unproven)';
-  if (rel === 160) return 'the byte that moved unexplained last time';
+  for (const [i, off] of Object.entries(PP_MEASURED_OFFSETS)) {
+    if (rel === off.actionCode) return `PP#${i} action code (u16 low, MEASURED)`;
+    if (rel === off.actionCode + 1) return `PP#${i} action code (u16 high)`;
+    if (off.target !== undefined && rel === off.target) return `PP#${i} target byte (MEASURED)`;
+  }
   return '(not one of the offsets the model reads)';
 }
 
@@ -61,12 +59,17 @@ export async function main(argv: string[]): Promise<number> {
     console.log(`  @${o} (${relTxt}) : ${a[o]} → ${b[o]}   ${labelFor(rel)}${asTarget}`);
   }
 
-  console.log('\nswitch block now:');
-  for (let i = 0; i < 4; i++) {
-    const code = (b[at + PP_ACTION_OFFSET + i * 2] ?? 0) | ((b[at + PP_ACTION_OFFSET + i * 2 + 1] ?? 0) << 8);
-    const tgt = b[at + PP_TARGET_OFFSET + i] ?? 0;
-    const named = ppTargetLabel(tgt);
-    console.log(`  PP#${i + 1}: action 0x${code.toString(16).padStart(2, '0')} · byte at marker+${PP_TARGET_OFFSET + i} = ${tgt}${named ? ` (${named})` : ''}`);
+  // The block AS THE CODEC READS IT: one row per index with an OBSERVED offset, from the table. This used to
+  // print four rows off `PP_TARGET_OFFSET + i` — the flat one-per-switch array that was refuted — so it showed
+  // models of bytes the write path never touches.
+  console.log('\nswitch block now (codec table):');
+  for (const i of Object.keys(PP_MEASURED_OFFSETS).map(Number).sort((x, y) => x - y)) {
+    const off = PP_MEASURED_OFFSETS[i]!;
+    const code = (b[at + off.actionCode] ?? 0) | ((b[at + off.actionCode + 1] ?? 0) << 8);
+    const tgt = off.target === undefined ? null : (b[at + off.target] ?? 0);
+    const named = tgt === null ? null : ppTargetLabel(tgt);
+    console.log(`  PP#${i}: action 0x${code.toString(16).padStart(2, '0')} · ` +
+      (tgt === null ? 'target byte NOT located' : `marker+${off.target} = ${tgt}${named ? ` (${named})` : ''}`));
   }
   return 0;
 }

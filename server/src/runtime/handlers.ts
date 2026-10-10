@@ -599,7 +599,10 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   /** Write ONE per-preset switch (§3.8) — the WRITE side. The bound is EVIDENCE-DRIVEN, not hardcoded: an
    *  index is writable only while the codec has an OBSERVED offset for it, and a TARGET write additionally
    *  needs that index's target-byte offset to have been located. Anything else is refused 400 rather than
-   *  written to a guessed position (the flat-target-array reading was measured and refuted). */
+   *  written to a guessed position. The target bound MOVES when the codec's table does — as of 2026-10-09
+   *  PP#1–PP#3 carry both offsets (marker+148/160/172), so all three accept a target write and PP#4+ still
+   *  refuse one; the `target byte offset has not been located` branch below is the guard for the next index
+   *  someone measures only half of. */
   const perPresetSwitchH = async (reply: StatusSink, index: number, b?: PerPresetSwitchPatch) => {
     if (!Number.isInteger(index) || index < 1 || index > PP_SWITCH_COUNT) {
       reply.code(400); return { ok: false, error: `index must be an integer 1..${PP_SWITCH_COUNT}` };
