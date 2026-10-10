@@ -194,7 +194,7 @@ const STEPS: Step[] = [
       { rel: 38, want: 0x04, mustMove: true, what: 'PP#18 action code — Effect: Parameter, also 0x04' },
       { rel: 40, want: 0x02, mustMove: true, what: 'PP#19 action code — Preset (a NEW category)' },
       { rel: 42, want: 0x02, mustMove: true, what: 'PP#20 action code — Preset again' },
-      { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Tuner (NEW)' },
+      { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Utility (the assignment was "Utility: Tuner", and 0x05 is the UTILITY category)' },
       { rel: 46, want: 0x08, mustMove: true, what: 'PP#22 action code — Looper (NEW)' },
       { rel: 48, want: 0x07, mustMove: true, what: 'PP#23 action code — Control Switch (the owner confirmed this switch was Control Switch, not Layout)' },
       // record+0, the "which one" byte — a scene number here, a preset number there, and ZERO for the four
@@ -219,12 +219,13 @@ const STEPS: Step[] = [
       { rel: 400, mustMove: false, what: 'PP#22 (Looper) record stayed ALL ZERO' },
       { rel: 412, mustMove: false, what: 'PP#23 (Control Switch) record stayed ALL ZERO' }
     ],
-    // This step's own sweep surfaced FOUR bytes NOBODY HAS EXPLAINED, in the region that has been all-zero in
-    // every previous capture: marker+82, +84, +86 and +90 read 1, 2, 3, 4 (the byte at +88 stayed 0). They are
-    // allowed EXPLICITLY and by offset — a documented known-unknown, not a wildcard — so the check keeps
-    // surfacing them in the extras line instead of failing on bytes the model never claimed to explain. What
-    // they hold is an OPEN ITEM: the most plausible reading is a short list belonging to one of the scene
-    // flavours set in this sweep (PP#16), but "plausible" is exactly what this file refuses to record as fact.
+    // This step's own sweep moved FOUR bytes in a region that had been all-zero in every previous capture:
+    // marker+82, +84, +86 and +90 read 1, 2, 3, 4 (the byte at +88 stayed 0). Reading the region back with the
+    // tool — not by eye — showed they are not stray bytes at all: they are slots 16/17/18/20 of a SECOND
+    // 24-entry u16 array at marker+52 (+52…+99, stride 2), the direct analogue of the action-code array. Its
+    // MEANING is an OPEN ITEM (the HOLD half of the switch definitions, or a function/mode index), so they stay
+    // allowed EXPLICITLY and by offset — a documented known-unknown, never a wildcard — and the check keeps
+    // naming them in its extras line rather than failing on bytes the model does not claim to explain.
     allowedElsewhere: (o) => isPerformPageByte(o) || [82, 84, 86, 90].some((r) => o === 11420 + r)
   }
 ];

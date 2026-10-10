@@ -345,7 +345,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     const codes: Array<[number, number, string]> = [
       [14, 0x03, 'Scene'], [15, 0x03, 'Scene'], [16, 0x03, 'scene flavour #2'],
       [17, 0x04, 'Effect: Change Channel'], [18, 0x04, 'Effect: Parameter'],
-      [19, 0x02, 'Preset'], [20, 0x02, 'Preset'], [21, 0x05, 'Tuner'], [22, 0x08, 'Looper'], [23, 0x07, 'Control Switch']
+      [19, 0x02, 'Preset'], [20, 0x02, 'Preset'], [21, 0x05, 'Utility: Tuner'], [22, 0x08, 'Looper'], [23, 0x07, 'Control Switch']
     ];
     for (const [index, code, what] of codes) {
       assertEqual(page.switches[index - 1]!.actionCode, code, `PP#${index} (${what}) reads 0x${code.toString(16)}`);
