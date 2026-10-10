@@ -186,7 +186,7 @@ const STEPS: Step[] = [
     from: '../test/fixtures/preset-switches/preset-410-pp13-pp24.bin',
     to: '../test/fixtures/preset-switches/preset-410-pp14-pp23-categories.bin',
     predictions: [
-      // Action codes, in order: Scene ×3, Effect ×2, Preset ×2, Tuner, Looper, Control-Switch/Layout.
+      // Action codes, in order: Scene ×3, Effect ×2, Preset ×2, Tuner, Looper, Control Switch.
       { rel: 30, want: 0x03, mustMove: true, what: 'PP#14 action code (marker+30) — Scene' },
       { rel: 32, want: 0x03, mustMove: true, what: 'PP#15 action code — Scene (a SECOND scene flavour)' },
       { rel: 34, want: 0x03, mustMove: true, what: 'PP#16 action code — Scene again, so 0x03 is the whole scene family' },
@@ -196,7 +196,7 @@ const STEPS: Step[] = [
       { rel: 42, want: 0x02, mustMove: true, what: 'PP#20 action code — Preset again' },
       { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Tuner (NEW)' },
       { rel: 46, want: 0x08, mustMove: true, what: 'PP#22 action code — Looper (NEW)' },
-      { rel: 48, want: 0x07, mustMove: true, what: 'PP#23 action code — Control Switch / Layout (NEW; which of the two is unconfirmed)' },
+      { rel: 48, want: 0x07, mustMove: true, what: 'PP#23 action code — Control Switch (the owner confirmed this switch was Control Switch, not Layout)' },
       // record+0, the "which one" byte — a scene number here, a preset number there, and ZERO for the four
       // categories that do not select a target at all (18, 21, 22, 23) — hence no predictions for those.
       { rel: 304, want: 3, mustMove: true, what: 'PP#14 record+0 → 3 = SCENE 3 (not an FX slot: a scene action stores a scene number)' },
@@ -213,11 +213,11 @@ const STEPS: Step[] = [
       { rel: 360, want: 1, mustMove: true, what: 'PP#18 record+8 → 1' },
       { rel: 382, want: 255, mustMove: true, what: 'PP#20 record+6 → 255 (low byte of a u16 at +6)' },
       { rel: 383, want: 1, mustMove: true, what: 'PP#20 record+7 → 1 (high byte: 0x01FF = 511)' },
-      // Tuner, Looper and the Control-Switch/Layout row left the WHOLE record zero — 21, 22 and 23. Those are
+      // Tuner, Looper and the Control Switch row left the WHOLE record zero — 21, 22 and 23. Those are
       // the four rows whose record+0 the codec therefore refuses to read or write.
       { rel: 388, mustMove: false, what: 'PP#21 (Tuner) record stayed ALL ZERO — nothing to locate' },
       { rel: 400, mustMove: false, what: 'PP#22 (Looper) record stayed ALL ZERO' },
-      { rel: 412, mustMove: false, what: 'PP#23 (Control Switch / Layout) record stayed ALL ZERO' }
+      { rel: 412, mustMove: false, what: 'PP#23 (Control Switch) record stayed ALL ZERO' }
     ],
     // This step's own sweep surfaced FOUR bytes NOBODY HAS EXPLAINED, in the region that has been all-zero in
     // every previous capture: marker+82, +84, +86 and +90 read 1, 2, 3, 4 (the byte at +88 stayed 0). They are
