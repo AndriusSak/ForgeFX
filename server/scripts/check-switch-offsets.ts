@@ -177,6 +177,55 @@ const STEPS: Step[] = [
       { rel: 424, want: 32, mustMove: true, what: 'PP#24 target → 32 = Megatap 1 (marker+424 = 148 + 12×23, PREDICTED)' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // THE CATEGORY SWEEP — PP#14..PP#23 given ten different functions in one edit. Two things come out of it at
+    // once: every remaining action-code slot is located (so the 2-byte array is measured for all 24), and the
+    // CODES are read for six categories. It also shows the action code names the FAMILY, not the function:
+    // bypass, change-channel and parameter rows all read 0x04.
+    from: '../test/fixtures/preset-switches/preset-410-pp13-pp24.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp14-pp23-categories.bin',
+    predictions: [
+      // Action codes, in order: Scene ×3, Effect ×2, Preset ×2, Tuner, Looper, Control-Switch/Layout.
+      { rel: 30, want: 0x03, mustMove: true, what: 'PP#14 action code (marker+30) — Scene' },
+      { rel: 32, want: 0x03, mustMove: true, what: 'PP#15 action code — Scene (a SECOND scene flavour)' },
+      { rel: 34, want: 0x03, mustMove: true, what: 'PP#16 action code — Scene again, so 0x03 is the whole scene family' },
+      { rel: 36, want: 0x04, mustMove: true, what: 'PP#17 action code — Effect: Change Channel, and it reads the SAME code as Effect: Bypass' },
+      { rel: 38, want: 0x04, mustMove: true, what: 'PP#18 action code — Effect: Parameter, also 0x04' },
+      { rel: 40, want: 0x02, mustMove: true, what: 'PP#19 action code — Preset (a NEW category)' },
+      { rel: 42, want: 0x02, mustMove: true, what: 'PP#20 action code — Preset again' },
+      { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Tuner (NEW)' },
+      { rel: 46, want: 0x08, mustMove: true, what: 'PP#22 action code — Looper (NEW)' },
+      { rel: 48, want: 0x07, mustMove: true, what: 'PP#23 action code — Control Switch / Layout (NEW; which of the two is unconfirmed)' },
+      // record+0, the "which one" byte — a scene number here, a preset number there, and ZERO for the four
+      // categories that do not select a target at all (18, 21, 22, 23) — hence no predictions for those.
+      { rel: 304, want: 3, mustMove: true, what: 'PP#14 record+0 → 3 = SCENE 3 (not an FX slot: a scene action stores a scene number)' },
+      { rel: 316, want: 7, mustMove: true, what: 'PP#15 record+0 → 7 = scene 7 (the pair proves the field is the scene number)' },
+      { rel: 328, want: 1, mustMove: true, what: 'PP#16 record+0 → 1 (the second scene flavour)' },
+      { rel: 340, want: 2, mustMove: true, what: 'PP#17 record+0 → 2 (Effect: Change Channel — the block, with the channel at +4)' },
+      { rel: 364, want: 28, mustMove: true, what: 'PP#19 record+0 → 28 = a PRESET number' },
+      { rel: 376, want: 1, mustMove: true, what: 'PP#20 record+0 → 1 (Preset: Increment)' },
+      // The rest of the record: the fields a category writes when it does NOT use +0. Named as observations,
+      // not decoded — the per-category layout is still open.
+      { rel: 330, want: 1, mustMove: true, what: 'PP#16 record+2 → 1' },
+      { rel: 344, want: 1, mustMove: true, what: 'PP#17 record+4 → 1' },
+      { rel: 354, want: 2, mustMove: true, what: 'PP#18 record+2 → 2 (Effect: Parameter writes +2, leaving +0 zero)' },
+      { rel: 360, want: 1, mustMove: true, what: 'PP#18 record+8 → 1' },
+      { rel: 382, want: 255, mustMove: true, what: 'PP#20 record+6 → 255 (low byte of a u16 at +6)' },
+      { rel: 383, want: 1, mustMove: true, what: 'PP#20 record+7 → 1 (high byte: 0x01FF = 511)' },
+      // Tuner, Looper and the Control-Switch/Layout row left the WHOLE record zero — 21, 22 and 23. Those are
+      // the four rows whose record+0 the codec therefore refuses to read or write.
+      { rel: 388, mustMove: false, what: 'PP#21 (Tuner) record stayed ALL ZERO — nothing to locate' },
+      { rel: 400, mustMove: false, what: 'PP#22 (Looper) record stayed ALL ZERO' },
+      { rel: 412, mustMove: false, what: 'PP#23 (Control Switch / Layout) record stayed ALL ZERO' }
+    ],
+    // This step's own sweep surfaced FOUR bytes NOBODY HAS EXPLAINED, in the region that has been all-zero in
+    // every previous capture: marker+82, +84, +86 and +90 read 1, 2, 3, 4 (the byte at +88 stayed 0). They are
+    // allowed EXPLICITLY and by offset — a documented known-unknown, not a wildcard — so the check keeps
+    // surfacing them in the extras line instead of failing on bytes the model never claimed to explain. What
+    // they hold is an OPEN ITEM: the most plausible reading is a short list belonging to one of the scene
+    // flavours set in this sweep (PP#16), but "plausible" is exactly what this file refuses to record as fact.
+    allowedElsewhere: (o) => isPerformPageByte(o) || [82, 84, 86, 90].some((r) => o === 11420 + r)
   }
 ];
 
@@ -212,9 +261,15 @@ export async function main(): Promise<number> {
     ['PP#13 target @292', table[13]?.target === 292],
     ['PP#24 action @50', table[24]?.actionCode === 50],
     ['PP#24 target @424', table[24]?.target === 424],
-    // The count is 24 (FM3-Edit's list, then measured at both ends) but only 14 indices have been OBSERVED.
-    // 14-23 stay out because a stride is not a reading — this claim is what keeps that from slipping.
-    ['the table holds exactly the OBSERVED indices (14 of 24)', Object.keys(table).length === 14 && table[14] === undefined && table[23] === undefined]
+    ['PP#14 action @30', table[14]?.actionCode === 30],
+    ['PP#23 action @48', table[23]?.actionCode === 48],
+    // The count is 24 and every ACTION CODE is located; FOUR rows have no located record+0 (18, 21, 22, 23),
+    // because those categories leave that byte at zero — so the per-FIELD bound is the live claim, not a
+    // per-index one. This is what keeps a stride or a "they all have targets" assumption from slipping in.
+    ['the table holds all 24 OBSERVED indices', Object.keys(table).length === 24],
+    ['exactly four rows have no located record+0 (18, 21, 22, 23)',
+      [18, 21, 22, 23].every((i) => table[i] !== undefined && table[i]!.target === undefined)
+      && [14, 15, 16, 17, 19, 20].every((i) => table[i]!.target !== undefined)]
   ];
   for (const [what, ok] of claims) {
     if (!ok) { console.log(`FAIL: the codec table no longer says "${what}" — the predictions below were written against that table`); bad++; }

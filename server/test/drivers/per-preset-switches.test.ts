@@ -21,7 +21,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 19;
+export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 22;
 
 function framesFrom(bytes: Uint8Array): number[][] {
   const frames: number[][] = [];
@@ -102,10 +102,12 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[10]!.confidence, 'measured', 'PP#11: the table reaches marker+24 / marker+268');
     assertEqual(page.switches[11]!.confidence, 'measured', 'PP#12: marker+26 / marker+280');
     assertEqual(page.switches[12]!.confidence, 'measured', 'PP#13: marker+28 / marker+292 — the unit has more than twelve');
-    assertEqual(page.switches[13]!.confidence, 'unknown', 'PP#14: no observed offset — the stride predicts it, nothing more');
+    assertEqual(page.switches[13]!.confidence, 'measured', 'PP#14: located by the category sweep (marker+30 / marker+304)');
+    assertEqual(page.switches[17]!.confidence, 'partial', 'PP#18: its ACTION CODE is observed but record+0 read zero — effect-parameter does not write it');
     assertEqual(page.switches[23]!.confidence, 'measured', 'PP#24: marker+50 / marker+424, the far end of the range');
     assertEqual(page.switches.length, 24, 'twenty-four rows: the switch count came from FM3-Edit and was then MEASURED');
-    assertEqual(page.switches.filter((s) => s.confidence === 'unknown').length, 10, 'ten of them (14–23) are still unread');
+    assertEqual(page.switches.filter((s) => s.confidence === 'unknown').length, 0, 'no row is unread: all 24 action codes are located');
+    assertEqual(page.switches.filter((s) => s.confidence === 'partial').length, 4, 'four partial rows (18, 21, 22, 23) — the per-FIELD bound, exercised for real');
     assertEqual(page.switches[0]!.action, 'unassigned', 'the unconfigured PP#1 reads as unassigned');
   }
 
@@ -161,10 +163,24 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(res.reason, 'unsupported-index', 'refused with the index named');
     assertEqual(mock.sent.length, 1, 'and nothing written');
   }
+  {
+    // The per-FIELD bound, exercised for real: PP#18's action code is located, its record+0 is not.
+    const mock = makeEditBufferMock(populatedFrames);
+    const denied = await makeDriver(mock).setPerPresetSwitch!(18, { targetIndex: 3 });
+    assertEqual(denied.ok, false, 'PP#18 + a target is refused');
+    assertEqual(denied.reason, 'no-target-offset', 'and the reason names exactly which field is unlocated');
+    assertEqual(mock.sent.length, 1, 'nothing was written (only the dump request)');
+  }
+  {
+    const mock = makeEditBufferMock(populatedFrames);
+    const res = await makeDriver(mock).setPerPresetSwitch!(25, {});
+    assertEqual(res.ok, false, 'an empty patch on an out-of-range index is refused too');
+    assertEqual(mock.sent.length, 1, 'and nothing written');
+  }
 
-  // 6. Route validation, per FIELD, with both surfaces agreeing. The per-field REFUSAL branch
-  //    (`no-target-offset`) is unreachable while no index has an action code without a located target — it
-  //    stays in the handler because it is the guard for the next index someone measures only half of.
+  // 6. Route validation, per FIELD, with both surfaces agreeing. All three refusals are exercised here:
+  //    an index whose record+0 is unlocated (PP#18 — Effect: Parameter does not write that field), an index
+  //    past the count (PP#25), and an empty patch.
   {
     const { app, registry } = await buildTestApp(MODEL, stubDriver({ setPerPresetSwitch: async (i: number) => ({ ok: true, index: i, requested: {}, readback: null }) }) as never);
     const pp2Target = await app.inject({ method: 'PUT', url: '/preset/switches/2', payload: { targetIndex: 51 } });
@@ -180,9 +196,11 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     // the guard for the next index someone measures only half of.
     const pp12 = await app.inject({ method: 'PUT', url: '/preset/switches/12', payload: { targetIndex: 3 } });
     assertEqual(pp12.statusCode, 200, 'PP#12 + target → 200');
-    const unread = await app.inject({ method: 'PUT', url: '/preset/switches/14', payload: { targetIndex: 3 } });
-    assertEqual(unread.statusCode, 400, 'PP#14 → 400: the switch EXISTS (24 of them) but its offset was never observed');
-    assert(/PP#14 has no observed byte offset/.test((unread.json() as { error: string }).error), 'and the error says exactly that');
+    const located = await app.inject({ method: 'PUT', url: '/preset/switches/14', payload: { targetIndex: 3 } });
+    assertEqual(located.statusCode, 200, 'PP#14 + target → 200: the sweep located its offsets');
+    const perField = await app.inject({ method: 'PUT', url: '/preset/switches/18', payload: { targetIndex: 3 } });
+    assertEqual(perField.statusCode, 400, 'PP#18 + target → 400: its code is located, its record+0 is not');
+    assert(/target byte offset has not been located/.test((perField.json() as { error: string }).error), 'and the error names that field specifically');
     const past = await app.inject({ method: 'PUT', url: '/preset/switches/25', payload: { actionCode: 4 } });
     assertEqual(past.statusCode, 400, 'PP#25 → 400 (past PP_SWITCH_COUNT)');
     assert(/index must be an integer 1\.\.24/.test((past.json() as { error: string }).error), 'and the error names the valid range');
@@ -232,8 +250,8 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     const pp2 = page.switches[1]!;
     assertEqual(pp2.actionCode, 0x03, 'PP#2 carries the scene-select code (the owner\'s second switch)');
     assertEqual(pp2.targetIndex, 1, 'and its target byte reads 1 — the number is the observation');
-    assertEqual(page.evidence.actionCodeIndices.join(','), '1,2,3,4,5,6,7,8,9,10,11,12,13,24', 'the observed indices are 1–13 and 24 — NOT a range, and not a count');
-    assertEqual(page.evidence.targetByteIndices.join(','), '1,2,3,4,5,6,7,8,9,10,11,12,13,24', 'and the target bytes carry the same list');
+    assertEqual(page.evidence.actionCodeIndices.length, 24, 'all 24 action-code offsets are observed');
+    assertEqual(page.evidence.targetByteIndices.join(','), '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,24', 'while the located record+0 set skips 18, 21, 22, 23 — NOT a range, and not a count');
   }
 
   // 11. The THIRD capture (C): PP#1 → Delay 2, and the flat-target-array reading refuted. PP#2's action
@@ -301,7 +319,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp12.actionCode, 0x04, 'PP#12 action code reads 0x04 at marker+26 — the stride covers the whole range');
     assertEqual(pp12.targetIndex, 3, 'PP#12 target reads 3 = Chorus 2 at marker+280 (predicted, then read)');
     assertEqual(pp12.targetLabel, 'Chorus 2', 'named by the anchor measured on 2026-10-07');
-    assertEqual(page.switches.filter((s) => s.confidence === 'unknown').length, 10, 'ten of 24 remain unread (14–23)');
+    assertEqual(page.switches.filter((s) => s.confidence === 'partial').length, 4, 'and the four unlocated record+0 rows (18, 21, 22, 23) are the only gap left');
   }
 
   // 16. The EIGHTH capture (H): the unit has TWENTY-FOUR per-preset switches, not twelve — tested rather than
@@ -316,7 +334,26 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp24.actionCode, 0x04, 'PP#24 action code reads 0x04 at marker+50 (predicted)');
     assertEqual(pp24.targetIndex, 32, 'PP#24 target reads 32 = Megatap 1 at marker+424 (predicted)');
     assertEqual(pp24.targetLabel, 'Megatap 1', 'named by the anchor measured on 2026-10-07');
-    assertEqual(page.switches[13]!.confidence, 'unknown', 'and PP#14 is still unread — the stride across 14–23 is NOT extrapolated');
+    assertEqual(page.switches[13]!.confidence, 'measured', 'and PP#14 is measured too (the category sweep located it)');
+  }
+
+  // 17. The NINTH capture (I): a CATEGORY SWEEP — PP#14..PP#23 given ten different functions in one edit. It
+  //     located every remaining slot AND showed that the action code names the CATEGORY (bypass, change-channel
+  //     and parameter all read 0x04) while the mode lives in the 12-byte record.
+  {
+    const page = await pageOf('../fixtures/preset-switches/preset-410-pp14-pp23-categories.bin');
+    const codes: Array<[number, number, string]> = [
+      [14, 0x03, 'Scene'], [15, 0x03, 'Scene'], [16, 0x03, 'scene flavour #2'],
+      [17, 0x04, 'Effect: Change Channel'], [18, 0x04, 'Effect: Parameter'],
+      [19, 0x02, 'Preset'], [20, 0x02, 'Preset'], [21, 0x05, 'Tuner'], [22, 0x08, 'Looper'], [23, 0x07, 'Control Switch / Layout']
+    ];
+    for (const [index, code, what] of codes) {
+      assertEqual(page.switches[index - 1]!.actionCode, code, `PP#${index} (${what}) reads 0x${code.toString(16)}`);
+    }
+    assertEqual(page.switches[17]!.confidence, 'partial', 'PP#18 is PARTIAL: its code is located, its record+0 is not (it wrote +2/+8 instead)');
+    assertEqual(page.switches[13]!.targetIndex, 3, 'PP#14 record+0 = 3 — the SCENE number, not an FX slot');
+    assertEqual(page.switches[18]!.targetIndex, 28, 'PP#19 record+0 = 28 — a PRESET number');
+    assertEqual(page.switches[20]!.targetIndex, null, 'PP#21 (Tuner) reports no record+0 at all: the whole record read zero');
   }
 
   // 10. Write-safety: read-only → 403 (both surfaces); `?dryRun=true` → 400, because a read-modify-write
