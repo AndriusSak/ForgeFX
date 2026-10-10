@@ -15,7 +15,7 @@ import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
-import { parsePresetDump, decodeRawPatch, parsePerPresetSwitches, PP_MEASURED_OFFSETS, PP_REGION_BYTES, PP_SWITCH_COUNT } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, parsePerPresetSwitches, PP_MEASURED_OFFSETS, PP_REGION_BYTES } from 'forgefx-midi/devices/gen3';
 
 const EDIT_BUFFER = 0x3fff;
 
@@ -67,11 +67,14 @@ export async function main(argv: string[]): Promise<number> {
     // offsets in hard-coded text and was wrong the moment PP#3+ were measured.
     console.log(`  [${Object.entries(PP_MEASURED_OFFSETS).map(([i, o]) =>
       `PP#${i}: action@${o.actionCode} target@${o.target ?? 'unlocated'}`).join(' · ')}]`);
-    // The window covers the full switch range the codec ASSUMES (PP_SWITCH_COUNT entries at a 12-byte target
-    // stride), not just the measured region: a byte that moves OUTSIDE the measured offsets is exactly what a
-    // "does the unit really hold N switches?" question looks like, and a window sized to the current table
-    // would cut it off. The assertion below still only READS the offsets in the table.
-    const windowEnd = Math.max(PP_REGION_BYTES + 8, PP_MEASURED_OFFSETS[1]!.target! + 12 * (PP_SWITCH_COUNT - 1) + 8);
+    // The window covers a WIDER range than the codec reads — `WINDOW_SWITCHES` entries at the 12-byte target
+    // stride — because a byte that moves OUTSIDE the measured offsets is exactly what "does the unit really
+    // hold N switches?" looks like, and a window sized to the current table would cut it off. FM3-Edit lists
+    // TWENTY-FOUR per-preset switches while `PP_SWITCH_COUNT` is 12, so the window is deliberately sized for
+    // 24: PP#24's action code and target would sit at marker+50 and marker+424. Nothing below reads those
+    // offsets — the parser only touches the table — this is a print bound, and it is labelled as one.
+    const WINDOW_SWITCHES = 24;
+    const windowEnd = Math.max(PP_REGION_BYTES + 8, PP_MEASURED_OFFSETS[1]!.target! + 12 * (WINDOW_SWITCHES - 1) + 8);
     for (let o = 0; o < windowEnd; o += 16) {
       const chunk = [...body.slice(block.at + o, block.at + o + 16)];
       const hex = chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ');

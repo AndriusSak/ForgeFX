@@ -17,6 +17,9 @@
 //   G  preset-switches/preset-410-pp6-pp12.bin  PP#6..PP#12 → seven DISTINCT anchors (the whole remaining
 //      range in one edit: 208/220/232/244/256/268 predicted and read, plus PP#12's 280 — which makes the
 //      switch COUNT a measurement rather than an assumption)
+//   H  preset-switches/preset-410-pp13-pp24.bin PP#13 → Gate 1 and PP#24 → Megatap 1, i.e. the TWO ENDS of the
+//      range the owner's FM3-Edit lists (24 rows): the unit really has 24 per-preset switches, and both strides
+//      hold across the whole span (marker+28/+50 for the action codes, marker+292/+424 for the targets)
 //
 // CONFIRMED (2026-10-08/09): marker+4/6/8/10/12 hold the PP#1..PP#5 ACTION CODES (u16, stride 2);
 // marker+148/160/172/184/196 hold the PP#1..PP#5 TARGET bytes (stride 12). PP#1's came from reading back a
@@ -159,6 +162,21 @@ const STEPS: Step[] = [
       { rel: 280, want: 3, mustMove: true, what: 'PP#12 target → 3 = Chorus 2 (marker+280, PREDICTED — the 12th entry is REAL)' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // THE COUNT ITSELF, tested rather than believed: FM3-Edit lists 24 per-preset switches while the codec
+    // assumed 12. Two switches — the FIRST and the LAST of the extra range — were set to distinct known
+    // anchors, and the strides say exactly where their bytes must land. If only one of the four moved, the
+    // range would be two blocks of twelve rather than one array of 24.
+    from: '../test/fixtures/preset-switches/preset-410-pp6-pp12.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp13-pp24.bin',
+    predictions: [
+      { rel: 28, want: 0x04, mustMove: true, what: 'PP#13 action code (marker+28 — the 2-byte stride continues past PP#12)' },
+      { rel: 292, want: 25, mustMove: true, what: 'PP#13 target → 25 = Gate 1 (marker+292 = 148 + 12×12, PREDICTED)' },
+      { rel: 50, want: 0x04, mustMove: true, what: 'PP#24 action code (marker+50 = 4 + 2×23, PREDICTED)' },
+      { rel: 424, want: 32, mustMove: true, what: 'PP#24 target → 32 = Megatap 1 (marker+424 = 148 + 12×23, PREDICTED)' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
   }
 ];
 
@@ -190,7 +208,13 @@ export async function main(): Promise<number> {
     ['PP#11 target @268', table[11]?.target === 268],
     ['PP#12 action @26', table[12]?.actionCode === 26],
     ['PP#12 target @280', table[12]?.target === 280],
-    ['the table holds EXACTLY twelve indices (the measured switch count)', Object.keys(table).length === 12]
+    ['PP#13 action @28', table[13]?.actionCode === 28],
+    ['PP#13 target @292', table[13]?.target === 292],
+    ['PP#24 action @50', table[24]?.actionCode === 50],
+    ['PP#24 target @424', table[24]?.target === 424],
+    // The count is 24 (FM3-Edit's list, then measured at both ends) but only 14 indices have been OBSERVED.
+    // 14-23 stay out because a stride is not a reading — this claim is what keeps that from slipping.
+    ['the table holds exactly the OBSERVED indices (14 of 24)', Object.keys(table).length === 14 && table[14] === undefined && table[23] === undefined]
   ];
   for (const [what, ok] of claims) {
     if (!ok) { console.log(`FAIL: the codec table no longer says "${what}" — the predictions below were written against that table`); bad++; }
