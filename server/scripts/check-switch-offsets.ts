@@ -14,6 +14,9 @@
 //   E  preset-switches/preset-410-pp2-fbrtn2-pp3-chorus1.bin PP#2 target → FB Rtn 2 ; PP#3 = Effect: Bypass → Chorus 1
 //   F  preset-switches/preset-410-pp4-delay2-pp5-reverb1.bin PP#4 → Delay 2 ; PP#5 → Reverb 1 (the stride over
 //      indices 4 and 5: 184 and 196 both stated in advance and both read exactly)
+//   G  preset-switches/preset-410-pp6-pp12.bin  PP#6..PP#12 → seven DISTINCT anchors (the whole remaining
+//      range in one edit: 208/220/232/244/256/268 predicted and read, plus PP#12's 280 — which makes the
+//      switch COUNT a measurement rather than an assumption)
 //
 // CONFIRMED (2026-10-08/09): marker+4/6/8/10/12 hold the PP#1..PP#5 ACTION CODES (u16, stride 2);
 // marker+148/160/172/184/196 hold the PP#1..PP#5 TARGET bytes (stride 12). PP#1's came from reading back a
@@ -132,6 +135,30 @@ const STEPS: Step[] = [
       { rel: PP5_TARGET_REL, want: 51, mustMove: true, what: 'PP#5 target → 51 = Reverb 1 (PREDICTED at marker+196)' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // The WHOLE REST OF THE RANGE in one edit: PP#6..PP#12 set to seven DISTINCT anchors, so every byte has to
+    // be right for the right reason. This is the step that turned the assumed switch count into a measurement —
+    // PP#12's target is read here (marker+280) even though the codec's table does not yet carry that index.
+    from: '../test/fixtures/preset-switches/preset-410-pp4-delay2-pp5-reverb1.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp6-pp12.bin',
+    predictions: [
+      { rel: 14, want: 0x04, mustMove: true, what: 'PP#6 action code (marker+14)' },
+      { rel: 208, want: 25, mustMove: true, what: 'PP#6 target → 25 = Gate 1 (marker+208, PREDICTED)' },
+      { rel: 16, want: 0x04, mustMove: true, what: 'PP#7 action code (marker+16)' },
+      { rel: 220, want: 27, mustMove: true, what: 'PP#7 target → 27 = GEQ 1 (marker+220, PREDICTED)' },
+      { rel: 18, want: 0x04, mustMove: true, what: 'PP#8 action code (marker+18)' },
+      { rel: 232, want: 29, mustMove: true, what: 'PP#8 target → 29 = In 1 (marker+232, PREDICTED)' },
+      { rel: 20, want: 0x04, mustMove: true, what: 'PP#9 action code (marker+20)' },
+      { rel: 244, want: 31, mustMove: true, what: 'PP#9 target → 31 = Looper (marker+244, PREDICTED)' },
+      { rel: 22, want: 0x04, mustMove: true, what: 'PP#10 action code (marker+22)' },
+      { rel: 256, want: 32, mustMove: true, what: 'PP#10 target → 32 = Megatap 1 (marker+256, PREDICTED)' },
+      { rel: 24, want: 0x04, mustMove: true, what: 'PP#11 action code (marker+24)' },
+      { rel: 268, want: 38, mustMove: true, what: 'PP#11 target → 38 = MultDly 1 (marker+268, PREDICTED)' },
+      { rel: 26, want: 0x04, mustMove: true, what: 'PP#12 action code (marker+26 — the TWELFTH slot, so the 2-byte stride covers the whole range)' },
+      { rel: 280, want: 3, mustMove: true, what: 'PP#12 target → 3 = Chorus 2 (marker+280, PREDICTED — the 12th entry is REAL)' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
   }
 ];
 
@@ -157,7 +184,13 @@ export async function main(): Promise<number> {
     ['PP#4 target @184', table[4]?.target === 184],
     ['PP#5 action @12', table[5]?.actionCode === 12],
     ['PP#5 target @196', table[5]?.target === 196],
-    ['indices 6+ still have NO observed offset', Object.keys(table).length === 5 && table[6] === undefined]
+    ['PP#6 action @14', table[6]?.actionCode === 14],
+    ['PP#6 target @208', table[6]?.target === 208],
+    ['PP#11 action @24', table[11]?.actionCode === 24],
+    ['PP#11 target @268', table[11]?.target === 268],
+    ['PP#12 action @26', table[12]?.actionCode === 26],
+    ['PP#12 target @280', table[12]?.target === 280],
+    ['the table holds EXACTLY twelve indices (the measured switch count)', Object.keys(table).length === 12]
   ];
   for (const [what, ok] of claims) {
     if (!ok) { console.log(`FAIL: the codec table no longer says "${what}" — the predictions below were written against that table`); bad++; }
