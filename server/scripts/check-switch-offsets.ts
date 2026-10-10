@@ -12,12 +12,14 @@
 //   C  preset-switches/preset-410-delay2.bin PP#1 = Effect: Bypass → Delay 2  ; PP#2 = Effect: Bypass, target FB Rtn 2
 //   D  preset-switches/preset-410-pp2-reverb1.bin          PP#2 target → Reverb 1 (the PREDICTION that settled 160)
 //   E  preset-switches/preset-410-pp2-fbrtn2-pp3-chorus1.bin PP#2 target → FB Rtn 2 ; PP#3 = Effect: Bypass → Chorus 1
+//   F  preset-switches/preset-410-pp4-delay2-pp5-reverb1.bin PP#4 → Delay 2 ; PP#5 → Reverb 1 (the stride over
+//      indices 4 and 5: 184 and 196 both stated in advance and both read exactly)
 //
-// CONFIRMED (2026-10-08/09): marker+4/6/8 hold the PP#1/PP#2/PP#3 ACTION CODES (u16, stride 2);
-// marker+148/160/172 hold the PP#1/PP#2/PP#3 TARGET bytes (stride 12). PP#1's came from reading back a known
-// anchor; PP#2's and PP#3's were CONFIRMED BY PREDICTION — the value was stated before the capture and read
-// exactly (51 = "Reverb 1" at 160, 2 = "Chorus 1" at 172). An earlier unexplained 14 at marker+160 is
-// explained by the same model: PP#2's target with "FB Rtn 2" selected (14).
+// CONFIRMED (2026-10-08/09): marker+4/6/8/10/12 hold the PP#1..PP#5 ACTION CODES (u16, stride 2);
+// marker+148/160/172/184/196 hold the PP#1..PP#5 TARGET bytes (stride 12). PP#1's came from reading back a
+// known anchor; indices 2-5 were CONFIRMED BY PREDICTION — each value was stated before the capture and read
+// exactly (51 = "Reverb 1" at 160, 2 = "Chorus 1" at 172, 8 = "Delay 2" at 184, 51 = "Reverb 1" at 196). An
+// earlier unexplained 14 at marker+160 is explained by the same model: PP#2's target with "FB Rtn 2" (14).
 // REFUTED (2026-10-09): the TARGET bytes are NOT a flat one-per-switch array — in capture C, PP#2 was fully
 // configured yet marker+149 did not move. Keep that as a `mustMove: false` prediction so it cannot come back.
 //
@@ -56,11 +58,15 @@ const isPerformPageByte = (o: number): boolean => o >= 10690 && o <= 11100;
  *  entry for it — checked below, so the refutation lives in the DATA, not only in this script. */
 const REFUTED_PP2_TARGET_REL = PP_TARGET_OFFSET + 1;
 
-/** PP#2's and PP#3's offsets come from the codec's table (arithmetic off PP#1's was an assumption). */
+/** Every offset past PP#1's comes from the codec's table (arithmetic off PP#1's was an assumption). */
 const PP2_ACTION_REL = PP_MEASURED_OFFSETS[2]!.actionCode;
 const PP2_TARGET_REL = PP_MEASURED_OFFSETS[2]!.target!;
 const PP3_ACTION_REL = PP_MEASURED_OFFSETS[3]!.actionCode;
 const PP3_TARGET_REL = PP_MEASURED_OFFSETS[3]!.target!;
+const PP4_ACTION_REL = PP_MEASURED_OFFSETS[4]!.actionCode;
+const PP4_TARGET_REL = PP_MEASURED_OFFSETS[4]!.target!;
+const PP5_ACTION_REL = PP_MEASURED_OFFSETS[5]!.actionCode;
+const PP5_TARGET_REL = PP_MEASURED_OFFSETS[5]!.target!;
 
 const STEPS: Step[] = [
   {
@@ -113,6 +119,19 @@ const STEPS: Step[] = [
       { rel: PP3_TARGET_REL, want: 2, mustMove: true, what: 'PP#3 target → 2 = Chorus 1 (PREDICTED before the capture: stride 12 holds)' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // The stride over TWO more indices, both stated in advance: 184 (PP#4 targets Delay 2 = 8) and 196
+    // (PP#5 targets Reverb 1 = 51), with their action codes at marker+10 and marker+12.
+    from: '../test/fixtures/preset-switches/preset-410-pp2-fbrtn2-pp3-chorus1.bin',
+    to: '../test/fixtures/preset-switches/preset-410-pp4-delay2-pp5-reverb1.bin',
+    predictions: [
+      { rel: PP4_ACTION_REL, want: 0x04, mustMove: true, what: 'PP#4 action code → Effect: Bypass (marker+10)' },
+      { rel: PP4_TARGET_REL, want: 8, mustMove: true, what: 'PP#4 target → 8 = Delay 2 (PREDICTED at marker+184)' },
+      { rel: PP5_ACTION_REL, want: 0x04, mustMove: true, what: 'PP#5 action code → Effect: Bypass (marker+12)' },
+      { rel: PP5_TARGET_REL, want: 51, mustMove: true, what: 'PP#5 target → 51 = Reverb 1 (PREDICTED at marker+196)' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
   }
 ];
 
@@ -134,7 +153,11 @@ export async function main(): Promise<number> {
     ['PP#2 target @160', table[2]?.target === 160],
     ['PP#3 action @8', table[3]?.actionCode === 8],
     ['PP#3 target @172', table[3]?.target === 172],
-    ['indices 4+ still have NO observed offset', Object.keys(table).length === 3 && table[4] === undefined]
+    ['PP#4 action @10', table[4]?.actionCode === 10],
+    ['PP#4 target @184', table[4]?.target === 184],
+    ['PP#5 action @12', table[5]?.actionCode === 12],
+    ['PP#5 target @196', table[5]?.target === 196],
+    ['indices 6+ still have NO observed offset', Object.keys(table).length === 5 && table[6] === undefined]
   ];
   for (const [what, ok] of claims) {
     if (!ok) { console.log(`FAIL: the codec table no longer says "${what}" — the predictions below were written against that table`); bad++; }

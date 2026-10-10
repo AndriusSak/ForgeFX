@@ -2,10 +2,11 @@
 //
 // The fixtures are the owner's real preset 410 dumps. Capture A (`preset-perform/preset-410.bin`) has the
 // switch block PRESENT but UNCONFIGURED — that pins the marker's position in a real decompressed body and
-// confirms marker+148 as PP#1's target byte. Captures B–E are one edit each by the owner plus one read-only
-// dump; PP#2's and PP#3's target bytes (marker+160, marker+172) were located BY PREDICTION, and both
-// predictions were stated before the capture was read (`check-switch-offsets.ts` re-runs all four steps).
-// Everything past PP#3 is absent from the codec's offset table and therefore reads nothing — never a guess.
+// confirms marker+148 as PP#1's target byte. Captures B–F are one edit each by the owner plus one read-only
+// dump; the target bytes of PP#2–PP#5 (marker+160/172/184/196) were located BY PREDICTION, and every one was
+// stated before the capture was read (`check-switch-offsets.ts` re-runs all five steps). Everything past PP#5
+// is absent from the codec's offset table and therefore reads nothing: the stride is measured over five
+// points and NOT extrapolated.
 //
 // Offline/mocked, NO hardware.
 import { readFileSync } from 'node:fs';
@@ -19,7 +20,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 16;
+export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 17;
 
 function framesFrom(bytes: Uint8Array): number[][] {
   const frames: number[][] = [];
@@ -95,9 +96,11 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[0]!.confidence, 'measured', 'PP#1: both offsets observed');
     assertEqual(page.switches[1]!.confidence, 'measured', 'PP#2: both offsets observed (target byte at marker+160)');
     assertEqual(page.switches[2]!.confidence, 'measured', 'PP#3: both offsets observed (action code at marker+8, target at marker+172)');
-    assertEqual(page.switches[3]!.confidence, 'unknown', 'PP#4: no observed offset');
-    assertEqual(page.switches[3]!.actionCode, null, 'so it reports NO action code');
-    assertEqual(page.switches[3]!.targetIndex, null, 'and NO target');
+    assertEqual(page.switches[3]!.confidence, 'measured', 'PP#4: both offsets observed (marker+10 / marker+184)');
+    assertEqual(page.switches[4]!.confidence, 'measured', 'PP#5: both offsets observed (marker+12 / marker+196)');
+    assertEqual(page.switches[5]!.confidence, 'unknown', 'PP#6: no observed offset');
+    assertEqual(page.switches[5]!.actionCode, null, 'so it reports NO action code');
+    assertEqual(page.switches[5]!.targetIndex, null, 'and NO target');
     assertEqual(page.switches[0]!.action, 'unassigned', 'the unconfigured PP#1 reads as unassigned');
   }
 
@@ -127,8 +130,8 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(res.readback!.targetIndex, 0, 'and reports the slot as it actually reads');
   }
 
-  // 5. The write bound is EVIDENCE-DRIVEN per field, and it MOVED with the measurement: PP#1–PP#3 are
-  //    writable (both fields), PP#4 has no observed offset at all.
+  // 5. The write bound is EVIDENCE-DRIVEN per field, and it MOVED with the measurement: PP#1–PP#5 are
+  //    writable (both fields), PP#6 has no observed offset at all.
   {
     const mock = makeEditBufferMock(populatedFrames);
     const res = await makeDriver(mock).setPerPresetSwitch!(2, { targetIndex: 51 });
@@ -148,8 +151,8 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
   }
   {
     const mock = makeEditBufferMock(populatedFrames);
-    const res = await makeDriver(mock).setPerPresetSwitch!(4, { actionCode: 0x04 });
-    assertEqual(res.ok, false, 'PP#4 has no observed offset at all');
+    const res = await makeDriver(mock).setPerPresetSwitch!(6, { actionCode: 0x04 });
+    assertEqual(res.ok, false, 'PP#6 has no observed offset at all');
     assertEqual(res.reason, 'unsupported-index', 'refused with the index named');
     assertEqual(mock.sent.length, 1, 'and nothing written');
   }
@@ -165,11 +168,11 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     const actionOnly = await app.inject({ method: 'PUT', url: '/preset/switches/2', payload: { actionCode: 4 } });
     assertEqual(actionOnly.statusCode, 200, 'PP#2 + action code → 200');
 
-    const noOffset = await app.inject({ method: 'PUT', url: '/preset/switches/4', payload: { actionCode: 4 } });
-    assertEqual(noOffset.statusCode, 400, 'PP#4 has no observed offset → 400');
+    const noOffset = await app.inject({ method: 'PUT', url: '/preset/switches/6', payload: { actionCode: 4 } });
+    assertEqual(noOffset.statusCode, 400, 'PP#6 has no observed offset → 400');
     const body = noOffset.json() as { error: string; writableIndices: number[] };
-    assert(/PP#4 has no observed byte offset/.test(body.error), 'and the error names the index and the reason');
-    assertEqual(body.writableIndices.join(','), '1,2,3', 'listing exactly the indices the codec has measured');
+    assert(/PP#6 has no observed byte offset/.test(body.error), 'and the error names the index and the reason');
+    assertEqual(body.writableIndices.join(','), '1,2,3,4,5', 'listing exactly the indices the codec has measured');
 
     const empty = await app.inject({ method: 'PUT', url: '/preset/switches/1', payload: {} });
     assertEqual(empty.statusCode, 400, 'an empty patch → 400');
@@ -177,7 +180,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(zero.statusCode, 400, 'index 0 → 400');
 
     const router = createRouter({ registry, store: store.defaultStore });
-    const rtr = await router.handle('PUT', '/preset/switches/4', JSON.stringify({ actionCode: 4 }));
+    const rtr = await router.handle('PUT', '/preset/switches/6', JSON.stringify({ actionCode: 4 }));
     assertEqual(rtr.status, 400, 'and the runtime router agrees on the refusal (parity)');
     assertEqual(rtr.body, noOffset.payload, 'with the identical body');
     const ok = await router.handle('PUT', '/preset/switches/2', JSON.stringify({ targetIndex: 51 }));
@@ -216,8 +219,8 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     const pp2 = page.switches[1]!;
     assertEqual(pp2.actionCode, 0x03, 'PP#2 carries the scene-select code (the owner\'s second switch)');
     assertEqual(pp2.targetIndex, 1, 'and its target byte reads 1 — the number is the observation');
-    assertEqual(page.evidence.actionCodeIndices.join(','), '1,2,3', 'three action-code offsets are observed');
-    assertEqual(page.evidence.targetByteIndices.join(','), '1,2,3', 'and three target bytes');
+    assertEqual(page.evidence.actionCodeIndices.join(','), '1,2,3,4,5', 'five action-code offsets are observed');
+    assertEqual(page.evidence.targetByteIndices.join(','), '1,2,3,4,5', 'and five target bytes');
   }
 
   // 11. The THIRD capture (C): PP#1 → Delay 2, and the flat-target-array reading refuted. PP#2's action
@@ -250,7 +253,21 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp3.actionCode, 0x04, 'PP#3 action code is a THIRD observed u16 slot (marker+8: stride 2 holds)');
     assertEqual(pp3.targetIndex, 2, 'and PP#3 target reads 2 = Chorus 1 (marker+172, stride 12 — predicted, then read)');
     assertEqual(pp3.targetLabel, 'Chorus 1', 'named by the anchor measured on 2026-10-07');
-    assertEqual(page.switches[3]!.confidence, 'unknown', 'PP#4 is still unobserved — the stride is NOT extrapolated to it');
+    assertEqual(page.switches[3]!.confidence, 'measured', 'PP#4 in THIS capture reads 0/0 — its offsets exist, its assignment does not');
+  }
+
+  // 14. The SIXTH capture (F): the stride over two more indices, both stated in advance — PP#4 → Delay 2 (8 at
+  //     marker+184) and PP#5 → Reverb 1 (51 at marker+196), with their action codes at marker+10/12.
+  {
+    const page = await pageOf('../fixtures/preset-switches/preset-410-pp4-delay2-pp5-reverb1.bin');
+    const pp4 = page.switches[3]!;
+    assertEqual(pp4.actionCode, 0x04, 'PP#4 action code reads 0x04 at marker+10');
+    assertEqual(pp4.targetIndex, 8, 'PP#4 target reads 8 = Delay 2 at marker+184 — predicted, then read');
+    assertEqual(pp4.targetLabel, 'Delay 2', 'named by the anchor read off the wire on 2026-10-07');
+    const pp5 = page.switches[4]!;
+    assertEqual(pp5.actionCode, 0x04, 'PP#5 action code reads 0x04 at marker+12');
+    assertEqual(pp5.targetIndex, 51, 'PP#5 target reads 51 = Reverb 1 at marker+196 — predicted, then read');
+    assertEqual(page.switches[5]!.confidence, 'unknown', 'PP#6 is STILL unobserved: the stride is not extrapolated past what was read');
   }
 
   // 10. Write-safety: read-only → 403 (both surfaces); `?dryRun=true` → 400, because a read-modify-write

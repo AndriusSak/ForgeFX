@@ -15,7 +15,7 @@ import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
-import { parsePresetDump, decodeRawPatch, parsePerPresetSwitches, PP_ACTION_OFFSET, PP_TARGET_OFFSET } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, parsePerPresetSwitches, PP_MEASURED_OFFSETS, PP_REGION_BYTES } from 'forgefx-midi/devices/gen3';
 
 const EDIT_BUFFER = 0x3fff;
 
@@ -56,16 +56,18 @@ export async function main(argv: string[]): Promise<number> {
     console.log(`wrote ${out}  sha256 ${sha}`);
     const code = (c: number | null, label?: string | null): string =>
       c === null ? 'code null (no observed offset)' : `code 0x${c.toString(16).padStart(2, '0')} (${label ?? 'unmeasured'})`;
-    for (const s of block.switches.slice(0, 4)) {
+    for (const s of block.switches.slice(0, Object.keys(PP_MEASURED_OFFSETS).length + 1)) {
       console.log(`  PP#${s.index}  ${code(s.actionCode, s.action)}` +
         ` → target ${s.targetIndex} (${s.targetLabel ?? 'unlabelled'})  [${s.confidence}]`);
     }
     // The RAW marker-relative window. The offsets the model reads are a handful, and a byte that moved where
     // the model says it should not is the interesting result — so print the bytes rather than only the
     // decoder's reading of them.
-    console.log(`  [marker+${PP_ACTION_OFFSET}/${PP_ACTION_OFFSET + 2} = PP#1/PP#2 action code (u16, stride 2) ·` +
-      ` marker+${PP_TARGET_OFFSET} = PP#1 target (MEASURED) · marker+160 = the candidate PP#2 target]`);
-    for (let o = 0; o < 200; o += 16) {
+    // The offset legend and the window are DERIVED from the codec's table — this banner used to name the
+    // offsets in hard-coded text and was wrong the moment PP#3+ were measured.
+    console.log(`  [${Object.entries(PP_MEASURED_OFFSETS).map(([i, o]) =>
+      `PP#${i}: action@${o.actionCode} target@${o.target ?? 'unlocated'}`).join(' · ')}]`);
+    for (let o = 0; o < PP_REGION_BYTES + 8; o += 16) {
       const chunk = [...body.slice(block.at + o, block.at + o + 16)];
       const hex = chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ');
       const txt = chunk.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('');
