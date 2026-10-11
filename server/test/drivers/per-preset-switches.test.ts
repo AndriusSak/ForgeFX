@@ -21,7 +21,7 @@ import * as store from '../../src/store.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
-export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 22;
+export const PER_PRESET_SWITCH_DRIVER_CASE_COUNT = 27;
 
 function framesFrom(bytes: Uint8Array): number[][] {
   const frames: number[][] = [];
@@ -354,6 +354,84 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[13]!.targetIndex, 3, 'PP#14 record+0 = 3 — the SCENE number, not an FX slot');
     assertEqual(page.switches[18]!.targetIndex, 28, 'PP#19 record+0 = 28 — a PRESET number');
     assertEqual(page.switches[20]!.targetIndex, null, 'PP#21 (Tuner) reports no record+0 at all: the whole record read zero');
+  }
+
+  // 18. The TENTH capture (ROUND 10, 2026-10-11): the ENUMERATION — one edit that finished the CATEGORY table.
+  //     The seven codes this project had only PREDICTED all read exactly as stated before the dump, which is
+  //     also what lets the codec name them now, and the same edit exposed the two new arrays.
+  {
+    const page = await pageOf('../fixtures/preset-switches/preset-410-enumeration.bin');
+    const predicted: Array<[number, number, string]> = [
+      [1, 0x01, 'Bank'], [2, 0x06, 'Layout'], [3, 0x09, 'Per-Preset'], [4, 0x0a, 'View'],
+      [5, 0x0b, 'Setlist'], [6, 0x0c, 'Song'], [7, 0x0d, 'Song Section']
+    ];
+    for (const [index, code, name] of predicted) {
+      assertEqual(page.switches[index - 1]!.actionCode, code, `PP#${index} reads 0x0${code.toString(16)} = ${name} — PREDICTED before this capture`);
+      assertEqual(page.switches[index - 1]!.action, `${name} (category — the mode is in the record)`, `and ${name} is a NAME now, not a prediction`);
+    }
+    // The FUNCTION INDEX (marker+52): per category, so two categories can share a value; PP#14/15/17/18/19 are
+    // Chan Select rows (index 1) and every one of them predicts the FX-slot meaning of record+0.
+    assertEqual(page.switches[13]!.functionIndex, 1, 'PP#14 function index 1 = Chan Select');
+    assertEqual(page.switches[13]!.functionName, 'Chan Select', 'named from the list the owner read off FM3-Edit');
+    assertEqual(page.switches[13]!.targetIsFxSlot, true, 'so an FX-slot name applies to a Chan Select row…');
+    assertEqual(page.switches[13]!.targetIndex, 2, '…and its record+0 is 2');
+    assertEqual(page.switches[13]!.targetLabel, 'Chorus 1', 'which the anchor table names "Chorus 1" — the measurement that re-enabled the name');
+    assertEqual(page.switches[14]!.targetIndex, 51, 'PP#15 (Chan Select → Reverb 1) records 51');
+    assertEqual(page.switches[16]!.targetIndex, 7, 'PP#17 (Chan Select → Delay 1) records 7');
+    assertEqual(page.switches[18]!.targetIndex, 28, 'PP#19 (Chan Select → GEQ 2) records 28 — a NEW anchor, consistent with the measured GEQ 1 = 27');
+    assertEqual(page.switches[18]!.targetLabel, 'GEQ 2', 'and the table now carries it');
+    assertEqual(page.switches[0]!.targetIsFxSlot, false, 'a BANK row may not be named by the FX-slot table — its byte is a bank number');
+    assertEqual(page.switches[0]!.targetIndex, 1, 'even though the byte itself is observed');
+    assertEqual(page.switches[16]!.functionName, 'Chan Select', 'PP#18 was set to Chan Select (FM3-Edit offers no "Parameter" function — that label was a doc guess)');
+  }
+
+  // 19. The HOLD half (marker+436 + 2·(index−1)) — read from the same capture: three HOLDs set, three codes out.
+  {
+    const page = await pageOf('../fixtures/preset-switches/preset-410-enumeration.bin');
+    assertEqual(page.switches[15]!.holdActionCode, 0x08, 'PP#16 HOLD = 0x08 Looper');
+    assertEqual(page.switches[15]!.holdAction, 'Looper (category — the mode is in the record)', 'named from the same code space as the TAP code');
+    assertEqual(page.switches[16]!.holdActionCode, 0x05, 'PP#17 HOLD = 0x05 Utility (Utility: Tuner)');
+    assertEqual(page.switches[17]!.holdActionCode, 0x07, 'PP#18 HOLD = 0x07 Control Switch');
+    assertEqual(page.switches[14]!.holdActionCode, 0, 'a row with no HOLD reads 0…');
+    assertEqual(page.switches[14]!.holdMeasured, false, '…and is flagged as never exercised: that zero is Unassigned by convention, not an observation');
+    assertEqual(page.switches[15]!.holdMeasured, true, 'while the three the owner set are marked as exercised');
+    assertEqual(page.evidence.holdMeasuredIndices.join(','), '16,17,18', 'and the exercised set travels with the page, separately from the located-offset lists');
+  }
+
+  // 20. The HOLD WRITE: read-back confirmed, and an ignoring device must NOT read as ok.
+  {
+    const enumeration = new Uint8Array(readFileSync(fileURLToPath(new URL('../fixtures/preset-switches/preset-410-enumeration.bin', import.meta.url))));
+    const mock = makeEditBufferMock(framesFrom(enumeration));
+    const res = await makeDriver(mock).setPerPresetSwitch!(20, { holdActionCode: 0x08 });
+    assert(res.ok, `a HOLD-only write must confirm by read-back (got ${JSON.stringify(res)})`);
+    assertEqual(res.readback!.holdActionCode, 0x08, 'read-back HOLD code');
+    assertEqual(res.readback!.actionCode, 0x02, 'and the TAP side is untouched (PP#20 is Preset: Increment)');
+    assertEqual(res.readback!.holdMeasured, false, 'with the zero-stood-alone flag intact for a row nobody exercised');
+  }
+  {
+    const enumeration = new Uint8Array(readFileSync(fileURLToPath(new URL('../fixtures/preset-switches/preset-410-enumeration.bin', import.meta.url))));
+    const frames = framesFrom(enumeration);
+    const mock = new MockTransport('serial', 'mock-ignore-hold');
+    mock.isOpen = true;
+    mock.reply = (req) => (isIdentifyBroadcast(req) ? [handshakeReply(MODEL)] : req[5] === 0x03 ? frames : []);
+    const res = await makeDriver(mock).setPerPresetSwitch!(20, { holdActionCode: 0x08 });
+    assertEqual(res.ok, false, 'a device that ignores the HOLD write must not report ok:true');
+    assertEqual(res.reason, 'readback-mismatch', 'the verdict is the read-back, as for every other field');
+  }
+  {
+    const { app } = await buildTestApp(MODEL, stubDriver({
+      setPerPresetSwitch: async (i: number, p: unknown) => ({ ok: true, index: i, requested: p, readback: null })
+    }) as never);
+    const holdOnly = await app.inject({ method: 'PUT', url: '/preset/switches/5', payload: { holdActionCode: 8 } });
+    assertEqual(holdOnly.statusCode, 200, 'a HOLD-only patch → 200');
+    const tooWide = await app.inject({ method: 'PUT', url: '/preset/switches/5', payload: { holdActionCode: 65536 } });
+    assertEqual(tooWide.statusCode, 400, 'a HOLD code wider than 16 bits → 400');
+    assert(/holdActionCode must be an integer/.test((tooWide.json() as { error: string }).error), 'with the field named');
+    const negative = await app.inject({ method: 'PUT', url: '/preset/switches/5', payload: { holdActionCode: -1 } });
+    assertEqual(negative.statusCode, 400, 'and a negative one → 400');
+    const empty = await app.inject({ method: 'PUT', url: '/preset/switches/5', payload: {} });
+    assertEqual(empty.statusCode, 400, 'an empty patch is still 400 — the HOLD did not become a free pass');
+    await app.close();
   }
 
   // 10. Write-safety: read-only → 403 (both surfaces); `?dryRun=true` → 400, because a read-modify-write

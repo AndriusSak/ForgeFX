@@ -360,10 +360,21 @@ export interface PerformSlotWriteResult {
 
 /** The fields `setPerPresetSwitch` patches, in the byte domain. */
 export interface PerPresetSwitchPatch {
-  /** The 16-bit action code (0x04 = Effect: Bypass, 0x03 = Scene: Select — INFERRED, two samples). */
+  /** The 16-bit TAP action code — the CATEGORY's index in FM3-Edit's own list (0x04 = Effect, 0x03 = Scene …). */
   actionCode?: number;
-  /** The target byte: an index into the FM3's alphabetical FX-slot enumeration. */
+  /**
+   * The target byte. What it MEANS depends on the category and the function: an FX-slot index for an Effect row
+   * whose function is Bypass or Chan Select (measured on four blocks), but a scene number, a preset number, a
+   * layout number, a control-switch number (or nothing) elsewhere. An index whose target byte was never located
+   * refuses this field — writing it would be writing to an unobserved position.
+   */
   targetIndex?: number;
+  /**
+   * The 16-bit HOLD action code — the SAME code space as `actionCode`, stored in a second 24-wide u16 array at
+   * `marker+436 + 2·(index−1)`. NEW 2026-10-11: measured by setting three HOLDs (Looper, Utility, Control
+   * Switch), which read back as 0x08/0x05/0x07 in row order with every other row zero. 0 = Unassigned.
+   */
+  holdActionCode?: number;
 }
 
 /** The outcome of a per-preset switch write, MEASURED by a read-back of the edit buffer. */

@@ -599,10 +599,10 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   /** Write ONE per-preset switch (§3.8) — the WRITE side. The bound is EVIDENCE-DRIVEN, not hardcoded: an
    *  index is writable only while the codec has an OBSERVED offset for it, and a TARGET write additionally
    *  needs that index's target-byte offset to have been located. Anything else is refused 400 rather than
-   *  written to a guessed position. The target bound MOVES when the codec's table does — as of 2026-10-09
-   *  PP#1–PP#3 carry both offsets (marker+148/160/172), so all three accept a target write and PP#4+ still
-   *  refuse one; the `target byte offset has not been located` branch below is the guard for the next index
-   *  someone measures only half of. */
+   *  written to a guessed position. As of 2026-10-11 all 24 action-code offsets and 20 of the 24 target bytes
+   *  are located, and the HOLD action code (a second 24-wide array, located as a whole) is accepted for any
+   *  index; the `target byte offset has not been located` branch below is the guard for the next index someone
+   *  measures only half of. */
   const perPresetSwitchH = async (reply: StatusSink, index: number, b?: PerPresetSwitchPatch) => {
     if (!Number.isInteger(index) || index < 1 || index > PP_SWITCH_COUNT) {
       reply.code(400); return { ok: false, error: `index must be an integer 1..${PP_SWITCH_COUNT}` };
@@ -617,11 +617,14 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       };
     }
     const p: PerPresetSwitchPatch = b ?? {};
-    if (p.actionCode === undefined && p.targetIndex === undefined) {
-      reply.code(400); return { ok: false, error: 'at least one of actionCode, targetIndex is required' };
+    if (p.actionCode === undefined && p.targetIndex === undefined && p.holdActionCode === undefined) {
+      reply.code(400); return { ok: false, error: 'at least one of actionCode, targetIndex, holdActionCode is required' };
     }
     if (p.actionCode !== undefined && (!Number.isInteger(p.actionCode) || p.actionCode < 0 || p.actionCode > 0xffff)) {
       reply.code(400); return { ok: false, error: 'actionCode must be an integer 0..65535' };
+    }
+    if (p.holdActionCode !== undefined && (!Number.isInteger(p.holdActionCode) || p.holdActionCode < 0 || p.holdActionCode > 0xffff)) {
+      reply.code(400); return { ok: false, error: 'holdActionCode must be an integer 0..65535' };
     }
     if (p.targetIndex !== undefined && (!Number.isInteger(p.targetIndex) || p.targetIndex < 0 || p.targetIndex > 0xff)) {
       reply.code(400); return { ok: false, error: 'targetIndex must be an integer 0..255' };

@@ -685,7 +685,9 @@ class Gen3Driver implements DeviceDriver {
 
   /** Write ONE per-preset switch (§3.8) — the WRITE side, riding `#rewriteBody` exactly as the perform
    *  page does. Bounded by EVIDENCE, per field: an index with no observed offset in the codec's table is
-   *  refused, and a target write additionally needs that index's target byte to have been located. */
+   *  refused, and a target write additionally needs that index's target byte to have been located. The HOLD
+   *  action code (since 2026-10-11) needs no per-index check: its ARRAY is located as a whole, measured at
+   *  three exercised rows in row order — which is exactly why the read-back below covers it too. */
   async setPerPresetSwitch(index: number, patch: PerPresetSwitchPatch): Promise<PerPresetSwitchWriteResult> {
     const requested: PerPresetSwitchPatch = { ...patch };
     const res = await this.#rewriteBody((body) => {
@@ -701,7 +703,8 @@ class Gen3Driver implements DeviceDriver {
     const readback = parsePerPresetSwitches(res.body)?.switches.find((s) => s.index === index) ?? null;
     const ok = !!readback
       && (patch.actionCode === undefined || readback.actionCode === patch.actionCode)
-      && (patch.targetIndex === undefined || readback.targetIndex === patch.targetIndex);
+      && (patch.targetIndex === undefined || readback.targetIndex === patch.targetIndex)
+      && (patch.holdActionCode === undefined || readback.holdActionCode === patch.holdActionCode);
     return ok ? { ok: true, index, requested, readback } : { ok: false, index, reason: 'readback-mismatch', requested, readback };
   }
 
