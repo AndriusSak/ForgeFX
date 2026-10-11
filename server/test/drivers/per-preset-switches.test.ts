@@ -103,7 +103,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[11]!.confidence, 'measured', 'PP#12: marker+26 / marker+280');
     assertEqual(page.switches[12]!.confidence, 'measured', 'PP#13: marker+28 / marker+292 — the unit has more than twelve');
     assertEqual(page.switches[13]!.confidence, 'measured', 'PP#14: located by the category sweep (marker+30 / marker+304)');
-    assertEqual(page.switches[17]!.confidence, 'partial', 'PP#18: its ACTION CODE is observed but record+0 read zero — effect-parameter does not write it');
+    assertEqual(page.switches[17]!.confidence, 'partial', 'PP#18: its ACTION CODE is observed but record+0 read zero — the sweep\'s Effect function (Chan Inc/Dec) does not write it');
     assertEqual(page.switches[23]!.confidence, 'measured', 'PP#24: marker+50 / marker+424, the far end of the range');
     assertEqual(page.switches.length, 24, 'twenty-four rows: the switch count came from FM3-Edit and was then MEASURED');
     assertEqual(page.switches.filter((s) => s.confidence === 'unknown').length, 0, 'no row is unread: all 24 action codes are located');
@@ -338,13 +338,13 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
   }
 
   // 17. The NINTH capture (I): a CATEGORY SWEEP — PP#14..PP#23 given ten different functions in one edit. It
-  //     located every remaining slot AND showed that the action code names the CATEGORY (bypass, change-channel
-  //     and parameter all read 0x04) while the mode lives in the 12-byte record.
+  //     located every remaining slot AND showed that the action code names the CATEGORY (the three Effect
+  //     functions set that day all read 0x04) while the function lives in the marker+52 array.
   {
     const page = await pageOf('../fixtures/preset-switches/preset-410-pp14-pp23-categories.bin');
     const codes: Array<[number, number, string]> = [
       [14, 0x03, 'Scene'], [15, 0x03, 'Scene'], [16, 0x03, 'scene flavour #2'],
-      [17, 0x04, 'Effect: Change Channel'], [18, 0x04, 'Effect: Parameter'],
+      [17, 0x04, 'Effect function #2 (Chan Toggle)'], [18, 0x04, 'Effect function #3 (Chan Inc/Dec)'],
       [19, 0x02, 'Preset'], [20, 0x02, 'Preset'], [21, 0x05, 'Utility: Tuner'], [22, 0x08, 'Looper'], [23, 0x07, 'Control Switch']
     ];
     for (const [index, code, what] of codes) {

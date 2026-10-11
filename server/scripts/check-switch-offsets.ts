@@ -200,7 +200,7 @@ const STEPS: Step[] = [
     // THE CATEGORY SWEEP — PP#14..PP#23 given ten different functions in one edit. Two things come out of it at
     // once: every remaining action-code slot is located (so the 2-byte array is measured for all 24), and the
     // CODES are read for six categories. It also shows the action code names the FAMILY, not the function:
-    // bypass, change-channel and parameter rows all read 0x04.
+    // the three Effect functions set that day all read 0x04.
     //
     // NOTE ON THE `want` VALUES HERE: unlike every other step, this capture was read BEFORE these expectations
     // were written, so this step is a REGRESSION SNAPSHOT, not a prediction. It still earns its place — it pins
@@ -213,8 +213,8 @@ const STEPS: Step[] = [
       { rel: 30, want: 0x03, mustMove: true, what: 'PP#14 action code (marker+30) — Scene' },
       { rel: 32, want: 0x03, mustMove: true, what: 'PP#15 action code — Scene (a SECOND scene flavour)' },
       { rel: 34, want: 0x03, mustMove: true, what: 'PP#16 action code — Scene again, so 0x03 is the whole scene family' },
-      { rel: 36, want: 0x04, mustMove: true, what: 'PP#17 action code — Effect: Change Channel, and it reads the SAME code as Effect: Bypass' },
-      { rel: 38, want: 0x04, mustMove: true, what: 'PP#18 action code — Effect: Parameter, also 0x04' },
+      { rel: 36, want: 0x04, mustMove: true, what: 'PP#17 action code — an Effect function (the docs called it "Change Channel" then; FM3-Edit calls it Chan Toggle), reading the SAME code as Bypass' },
+      { rel: 38, want: 0x04, mustMove: true, what: 'PP#18 action code — Effect function #3 (Chan Inc/Dec), also 0x04' },
       { rel: 40, want: 0x02, mustMove: true, what: 'PP#19 action code — Preset (observed)' },
       { rel: 42, want: 0x02, mustMove: true, what: 'PP#20 action code — Preset again' },
       { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Utility (the assignment was "Utility: Tuner", and 0x05 is the UTILITY category)' },
@@ -225,14 +225,14 @@ const STEPS: Step[] = [
       { rel: 304, want: 3, mustMove: true, what: 'PP#14 record+0 → 3 = SCENE 3 (not an FX slot: a scene action stores a scene number)' },
       { rel: 316, want: 7, mustMove: true, what: 'PP#15 record+0 → 7 = scene 7 (the pair proves the field is the scene number)' },
       { rel: 328, want: 1, mustMove: true, what: 'PP#16 record+0 → 1 (the second scene flavour)' },
-      { rel: 340, want: 2, mustMove: true, what: 'PP#17 record+0 → 2 (Effect: Change Channel — a value of 2, which MIGHT be the FX-slot index of the block it changes; unmeasured, with the channel-looking byte at +4)' },
+      { rel: 340, want: 2, mustMove: true, what: 'PP#17 record+0 → 2 (that row was Chan Toggle — a value of 2, whose meaning was unmeasured then, with the +4 byte beside it)' },
       { rel: 364, want: 28, mustMove: true, what: 'PP#19 record+0 → 28 = a PRESET number' },
       { rel: 376, want: 1, mustMove: true, what: 'PP#20 record+0 → 1 (Preset: Increment)' },
       // The rest of the record: the fields a category writes when it does NOT use +0. Named as observations,
       // not decoded — the per-category layout is still open.
       { rel: 330, want: 1, mustMove: true, what: 'PP#16 record+2 → 1' },
       { rel: 344, want: 1, mustMove: true, what: 'PP#17 record+4 → 1' },
-      { rel: 354, want: 2, mustMove: true, what: 'PP#18 record+2 → 2 (Effect: Parameter writes +2, leaving +0 zero)' },
+      { rel: 354, want: 2, mustMove: true, what: 'PP#18 record+2 → 2 (that row was Effect function #3 / Chan Inc/Dec, writing +2 and leaving +0 zero)' },
       { rel: 360, want: 1, mustMove: true, what: 'PP#18 record+8 → 1' },
       { rel: 382, want: 255, mustMove: true, what: 'PP#20 record+6 → 255 (low byte of a u16 at +6)' },
       { rel: 383, want: 1, mustMove: true, what: 'PP#20 record+7 → 1 (high byte: 0x01FF = 511)' },
@@ -275,12 +275,12 @@ const STEPS: Step[] = [
     // functions never applied — they are marked as such rather than quietly deleted or retro-fitted. The list it implements is "ROUND 10 — the authoritative list" in
     // review-2026-10-09/HARDWARE-ROUND-PLAN.md; the open questions it is designed to answer are:
     //   • the seven unmeasured CATEGORY codes (Bank/Layout/Per-Preset/View/Setlist/Song/Song Section);
-    //   • whether a Change Channel row's record+0 is the FX-SLOT INDEX (three independent blocks: Chorus 1 = 2,
+    //   • whether a Chan Select row's record+0 is the FX-SLOT INDEX (three independent blocks: Chorus 1 = 2,
     //     Reverb 1 = 51, Delay 1 = 7) — which decides whether Axis may name effect rows again;
     //   • whether the marker+52 array is the HOLD half: the three HOLDs sit on rows 16/17/18, whose TAPs are
     //     UNCHANGED from the sweep and whose slots read 1/2/3 — so those three slots are a positive control;
     //   • whether +100…+147 (24 u16, zero in every capture) is the HOLD home: `+100 + 2·(i−1)`;
-    //   • function index vs allocation index: three Scene: Toggles (12/13/16) and two Parameters (18/19).
+    //   • function index vs allocation index: three Scene: Toggles (12/13/16) and two Chan Select rows (18/19).
     // A FAIL below is a RESULT, not a broken test: a prediction that fails is how the contiguous-target-array
     // reading was refuted. Anything this step cannot predict is named per INDEX (never as a blank cheque over
     // a region) and still printed, so no moved byte goes unreported.
@@ -303,12 +303,12 @@ const STEPS: Step[] = [
       { rel: 24, want: 0x02, mustMove: true,  what: 'PP#11 action code → Preset: Select 100' },
       { rel: 26, want: 0x03, mustMove: true,  what: 'PP#12 action code → Scene: Toggle' },
       { rel: 28, want: 0x03, mustMove: true,  what: 'PP#13 action code → Scene: Toggle (the second one)' },
-      { rel: 30, want: 0x04, mustMove: true,  what: 'PP#14 action code → Effect: Change Channel' },
-      { rel: 32, want: 0x04, mustMove: true,  what: 'PP#15 action code → Effect: Change Channel' },
+      { rel: 30, want: 0x04, mustMove: true,  what: 'PP#14 action code → Effect: Chan Select' },
+      { rel: 32, want: 0x04, mustMove: true,  what: 'PP#15 action code → Effect: Chan Select' },
       { rel: 34, want: 0x03, mustMove: false, what: 'PP#16 action code → Scene: Toggle (TAP UNCHANGED from the sweep — a positive control)' },
-      { rel: 36, want: 0x04, mustMove: false, what: 'PP#17 action code → Effect: Change Channel (TAP category unchanged)' },
-      { rel: 38, want: 0x04, mustMove: false, what: 'PP#18 action code → Effect: Parameter (TAP category unchanged)' },
-      { rel: 40, want: 0x04, mustMove: true,  what: 'PP#19 action code → Effect: Parameter (was Preset: Select)' },
+      { rel: 36, want: 0x04, mustMove: false, what: 'PP#17 action code → Effect: Chan Select (TAP category unchanged)' },
+      { rel: 38, want: 0x04, mustMove: false, what: 'PP#18 action code → Effect: Chan Select (TAP category unchanged)' },
+      { rel: 40, want: 0x04, mustMove: true,  what: 'PP#19 action code → Effect: Chan Select (was Preset: Select)' },
       { rel: 42, want: 0x02, mustMove: false, what: 'PP#20 action code → Preset: Increment (UNCHANGED — the fourth control row)' },
       { rel: 44, want: 0x05, mustMove: false, what: 'PP#21 action code → Utility: Tuner (unchanged)' },
       { rel: 46, want: 0x08, mustMove: false, what: 'PP#22 action code → Looper (unchanged category, different function)' },
@@ -335,19 +335,19 @@ const STEPS: Step[] = [
       { rel: 282, want: 5,   mustMove: true,  what: 'PP#12 record+2 → 5 = its SECONDARY (12 vs 13 decide which offset is which)' },
       { rel: 292, want: 3,   mustMove: true,  what: 'PP#13 record+0 → 3 = PRIMARY 3' },
       { rel: 294, want: 8,   mustMove: true,  what: 'PP#13 record+2 → 8 = SECONDARY 8' },
-      // THE NAME QUESTION: does a Change Channel row carry the FX-SLOT INDEX at +0? Three blocks, three values,
+      // THE NAME QUESTION: does a Chan Select row carry the FX-SLOT INDEX at +0? Three blocks, three values,
       // one hypothesis — and the channel byte beside it, predicted from the channel numbers that were set.
-      { rel: 304, want: 2,   mustMove: true,  what: 'PP#14 (Change Channel → Chorus 1) record+0 → 2 = the FX-slot index of Chorus 1' },
+      { rel: 304, want: 2,   mustMove: true,  what: 'PP#14 (Chan Select → Chorus 1) record+0 → 2 = the FX-slot index of Chorus 1' },
       { rel: 306, want: 1,   mustMove: true,  what: 'PP#14 record+2 → 1 = the CHANNEL (CORRECTED by the capture: the channel is at +2, not +4, and this row is channel B = 1)' },
       { rel: 308, mustMove: false, what: 'PP#14 record+4 stays 0 — the PREDICTED channel offset, WRONG: the channel is at +2 (see marker+306)' },
       { rel: 318, want: 3,   mustMove: true,  what: 'PP#15 record+2 → 3 = channel D (A=0·B=1·C=2·D=3 — a second channel, so the field and its encoding are both measured)' },
-      { rel: 316, want: 51,  mustMove: true,  what: 'PP#15 (Change Channel → Reverb 1) record+0 → 51 = the FX-slot index of Reverb 1' },
+      { rel: 316, want: 51,  mustMove: true,  what: 'PP#15 (Chan Select → Reverb 1) record+0 → 51 = the FX-slot index of Reverb 1' },
       { rel: 320, mustMove: false, what: 'PP#15 record+4 stays 0 — the PREDICTED channel offset, WRONG (see marker+318)' },
-      { rel: 340, want: 7,   mustMove: true,  what: 'PP#17 (Change Channel → Delay 1) record+0 → 7 = the FX-slot index of Delay 1 (a THIRD block, same question)' },
+      { rel: 340, want: 7,   mustMove: true,  what: 'PP#17 (Chan Select → Delay 1) record+0 → 7 = the FX-slot index of Delay 1 (a THIRD block, same question)' },
       { rel: 344, want: 1,   mustMove: false, what: 'PP#17 record+4 stays 1 — an UNEXPLAINED 1, stable across two captures (the sweep read 1 here too, with a different Effect function); it is NOT the channel, which is at +2 and reads 0 = channel A' },
       { rel: 364, mustMove: false, what: "PP#19 record+0 = 28 — the planned function could NOT be set, so the prediction never applied; 28 is GEQ 2's FX-slot index, and the byte is unchanged from the sweep ONLY BY COINCIDENCE (its PP#19 was Preset: Select 28), which is why this is a no-move and not a value claim" },
       { rel: 366, want: 1,   mustMove: true,  what: 'PP#19 record+2 → 1 = channel B — a THIRD row placing the channel at +2, agreeing with PP#14' },
-      { rel: 354, mustMove: true,  what: 'PP#18 record+2 → 0 — the planned function could not be set; as a Change Channel row on Amp 1 / channel A its WHOLE record reads zero (the field moved from the old row\'s value)' },
+      { rel: 354, mustMove: true,  what: 'PP#18 record+2 → 0 — the planned function could not be set; as a Chan Select row on Amp 1 / channel A its WHOLE record reads zero (the field moved from the old row\'s value)' },
       { rel: 360, mustMove: true,  what: 'PP#18 record+8 → 0 (the same row change)' },
       { rel: 372, mustMove: false, what: 'PP#19 record+8 stays 0 — the same row change (this is not the planned row)' },
       { rel: 424, mustMove: true,  what: 'PP#24 record+0 MOVES (a Control Switch row: value not decodable, only that it changes)' },
@@ -372,12 +372,12 @@ const STEPS: Step[] = [
       // slots read 1/1/1 while the HOLD codes appeared at +436 (below).
       { rel: 74, want: 1, mustMove: true, what: 'slot 12 = 1 = Scene #1 (Toggle) — 0 was Scene #0 (Select)' },
       { rel: 76, want: 1, mustMove: true, what: 'slot 13 = 1 — the SAME function ⇒ the SAME value (the REPEATS prediction that killed the allocation index)' },
-      { rel: 78, want: 1, mustMove: true, what: 'slot 14 = 1 = Effect #1 (Change Channel) — 0 was Effect #0 (Bypass)' },
+      { rel: 78, want: 1, mustMove: true, what: 'slot 14 = 1 = Effect #1 (Chan Select) — 0 was Effect #0 (Bypass)' },
       { rel: 80, want: 1, mustMove: true, what: 'slot 15 = 1 — the same function, the same value' },
       { rel: 82, mustMove: false, what: 'slot 16 stays 1 — the HOLD test\'s POSITIVE CONTROL: its TAP is unchanged and its HOLD is now Looper, and the slot did NOT take a HOLD value' },
       { rel: 84, want: 1, mustMove: true, what: 'slot 17 = 1 — it read 2 in the sweep, when this row held a different Effect function: the array tracks the FUNCTION, so it moved with the TAP and not with the HOLD' },
       { rel: 86, want: 1, mustMove: true, what: 'slot 18 = 1 — it read 3 in the sweep (a third Effect function) and follows the function, not the HOLD' },
-      { rel: 88, want: 1, mustMove: true, what: 'slot 19 = 1 = Change Channel (it read 0 as Scene/Preset #0 in the sweep)' },
+      { rel: 88, want: 1, mustMove: true, what: 'slot 19 = 1 = Chan Select (it read 0 as Scene/Preset #0 in the sweep)' },
       { rel: 90, mustMove: false, what: 'slot 20 stays 4 = Preset #4 (Increment) — unchanged row, so a stable function index' },
       { rel: 94, want: 4, mustMove: true, what: 'slot 22 = 4 = the Looper function index of Undo/Erase (0 with the sweep\'s looper function) — a within-category function change in a second category' },
       // REFUTED — the HOLD home. Kept as mustMove:false so the wrong reading cannot come back.
