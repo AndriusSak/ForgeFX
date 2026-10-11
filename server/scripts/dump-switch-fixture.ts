@@ -74,7 +74,12 @@ export async function main(argv: string[]): Promise<number> {
     // 24: PP#24's action code and target would sit at marker+50 and marker+424. Nothing below reads those
     // offsets — the parser only touches the table — this is a print bound, and it is labelled as one.
     const WINDOW_SWITCHES = 24;
-    const windowEnd = Math.max(PP_REGION_BYTES + 8, PP_MEASURED_OFFSETS[1]!.target! + 12 * (WINDOW_SWITCHES - 1) + 8);
+    // The window must ALSO cover the HOLD action-code array MEASURED on 2026-10-11: 24 u16 beginning at
+    // marker+436 (= 148 + 12×24, right after the last record). A window sized to the TAP side alone ended at
+    // +439 and cut the three HOLD bytes (8/5/7) off the print — they survived only because the script saves
+    // the whole dump before printing. The next structure must not be clip-able either.
+    const HOLD_ARRAY_END = 436 + 2 * 24 + 8;
+    const windowEnd = Math.max(PP_REGION_BYTES + 8, PP_MEASURED_OFFSETS[1]!.target! + 12 * (WINDOW_SWITCHES - 1) + 8, HOLD_ARRAY_END);
     for (let o = 0; o < windowEnd; o += 16) {
       const chunk = [...body.slice(block.at + o, block.at + o + 16)];
       const hex = chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ');

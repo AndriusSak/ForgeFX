@@ -83,6 +83,15 @@ const PP4_TARGET_REL = PP_MEASURED_OFFSETS[4]!.target!;
 const PP5_ACTION_REL = PP_MEASURED_OFFSETS[5]!.actionCode;
 const PP5_TARGET_REL = PP_MEASURED_OFFSETS[5]!.target!;
 
+/**
+ * The HOLD action-code array's base, relative to the marker: MEASURED 2026-10-11 as 148 + 12 × 24 = 436, i.e.
+ * immediately after the twenty-fourth 12-byte record. One u16 per switch, the same width and stride as the TAP
+ * action-code array at +4 — so a HOLD definition mirrors a TAP definition. Declared BEFORE `STEPS` because the
+ * step below uses it in its own initializer. Not yet a codec constant: the HOLD half is decoded but not wired,
+ * and this file must not invent a model the codec does not carry.
+ */
+const PP_HOLD_REL = 436;
+
 const STEPS: Step[] = [
   {
     from: '../test/fixtures/preset-perform/preset-410.bin',
@@ -252,10 +261,18 @@ const STEPS: Step[] = [
     allowedElsewhere: (o) => isPerformPageByte(o)
   },
   {
-    // ── ROUND 10 — the ENUMERATION (2026-10-11). COMMITTED BEFORE THE CAPTURE EXISTS. ──────────────────────
-    // This step was written to disk while the fixture did not yet exist (it reports PENDING until the dump
-    // lands), so every `want` here is a PREDICTION stated in advance — the one thing this project's method
-    // insists on. The list it implements is "ROUND 10 — the authoritative list" in
+    // ── ROUND 10 — the ENUMERATION (2026-10-11). READ, so this step is now a REGRESSION SNAPSHOT. ──────────
+    // The predictions were committed in ForgeFX a5c79f1 while the fixture did NOT exist, so their pre-dump
+    // wording is preserved in git — and the capture then did three things to them, each recorded inline:
+    //   • 7/7 unmeasured category codes read EXACTLY as predicted (0x01 Bank … 0x0D Song Section), which takes
+    //     the "code = the category's position in FM3-Edit's dropdown" reading to 13 measured codes, 13 exact;
+    //   • the CHANNEL hypothesis was CORRECTED: the channel is at record+2 (A=0·B=1·C=2·D=3, measured B and D)
+    //     and NOT at +4 as predicted, so the two +4 predictions are now mustMove:false;
+    //   • the HOLD HOME was REFUTED: +100…+147 stayed ZERO and the HOLD action codes appeared at
+    //     marker+436 + 2·(i−1) — three bytes (8, 5, 7 = Looper, Utility, Control Switch) found by the extras
+    //     line because they sat OUTSIDE the dump script's print window, which is now widened.
+    // Two rows (PP#18, PP#19) could not be set to the planned functions, so the predictions that named those
+    // functions never applied — they are marked as such rather than quietly deleted or retro-fitted. The list it implements is "ROUND 10 — the authoritative list" in
     // review-2026-10-09/HARDWARE-ROUND-PLAN.md; the open questions it is designed to answer are:
     //   • the seven unmeasured CATEGORY codes (Bank/Layout/Per-Preset/View/Setlist/Song/Song Section);
     //   • whether a Change Channel row's record+0 is the FX-SLOT INDEX (three independent blocks: Chorus 1 = 2,
@@ -297,6 +314,18 @@ const STEPS: Step[] = [
       { rel: 46, want: 0x08, mustMove: false, what: 'PP#22 action code → Looper (unchanged category, different function)' },
       { rel: 48, want: 0x07, mustMove: false, what: 'PP#23 action code → Control Switch (unchanged)' },
       { rel: 50, want: 0x07, mustMove: true,  what: 'PP#24 action code → Control Switch 4 (was Effect: Bypass)' },
+      // THE SEVEN NEW CATEGORIES WRITE record+0 TOO — their "which one" value, exactly like the categories
+      // measured before them: Bank 1 → 1, Layout 2 → 2, Per-Preset/View/Setlist/Song/Song Section 1 → 1. These
+      // were left as tolerated unknowns by the pre-dump step (the layout had never been seen) and are pinned
+      // now that the capture has read them — a value that CAN fail beats a documented unknown that cannot.
+      { rel: 148, want: 1, mustMove: true, what: 'PP#1 (Bank 1) record+0 → 1 — a BANK row writes its item number here (was 20 = a Bypass row\'s Filter 4)' },
+      { rel: 160, want: 2, mustMove: true, what: 'PP#2 (Layout 2) record+0 → 2 = the layout number (was 14 = FB Rtn 2)' },
+      { rel: 162, want: 1, mustMove: true, what: 'PP#2 record+2 → 1 — the Layout row writes a SECOND field, position unlocated (0 in every earlier capture)' },
+      { rel: 172, want: 1, mustMove: true, what: 'PP#3 (Per-Preset 1) record+0 → 1' },
+      { rel: 184, want: 1, mustMove: true, what: 'PP#4 (View 1) record+0 → 1' },
+      { rel: 196, want: 1, mustMove: true, what: 'PP#5 (Setlist 1) record+0 → 1' },
+      { rel: 208, want: 1, mustMove: true, what: 'PP#6 (Song 1) record+0 → 1' },
+      { rel: 220, want: 1, mustMove: true, what: 'PP#7 (Song Section 1) record+0 → 1' },
       // record+0 — the field whose MEANING is per-category.
       { rel: 232, want: 1,   mustMove: true,  what: 'PP#8 record+0 → 1 = scene 1 (was 29 = In 1)' },
       { rel: 244, want: 8,   mustMove: true,  what: 'PP#9 record+0 → 8 = scene 8' },
@@ -309,16 +338,18 @@ const STEPS: Step[] = [
       // THE NAME QUESTION: does a Change Channel row carry the FX-SLOT INDEX at +0? Three blocks, three values,
       // one hypothesis — and the channel byte beside it, predicted from the channel numbers that were set.
       { rel: 304, want: 2,   mustMove: true,  what: 'PP#14 (Change Channel → Chorus 1) record+0 → 2 = the FX-slot index of Chorus 1' },
-      { rel: 308, want: 2,   mustMove: true,  what: 'PP#14 record+4 → 2 = the CHANNEL number set (2)' },
+      { rel: 306, want: 1,   mustMove: true,  what: 'PP#14 record+2 → 1 = the CHANNEL (CORRECTED by the capture: the channel is at +2, not +4, and this row is channel B = 1)' },
+      { rel: 308, mustMove: false, what: 'PP#14 record+4 stays 0 — the PREDICTED channel offset, WRONG: the channel is at +2 (see marker+306)' },
+      { rel: 318, want: 3,   mustMove: true,  what: 'PP#15 record+2 → 3 = channel D (A=0·B=1·C=2·D=3 — a second channel, so the field and its encoding are both measured)' },
       { rel: 316, want: 51,  mustMove: true,  what: 'PP#15 (Change Channel → Reverb 1) record+0 → 51 = the FX-slot index of Reverb 1' },
-      { rel: 320, want: 4,   mustMove: true,  what: 'PP#15 record+4 → 4 = the CHANNEL number set (4)' },
+      { rel: 320, mustMove: false, what: 'PP#15 record+4 stays 0 — the PREDICTED channel offset, WRONG (see marker+318)' },
       { rel: 340, want: 7,   mustMove: true,  what: 'PP#17 (Change Channel → Delay 1) record+0 → 7 = the FX-slot index of Delay 1 (a THIRD block, same question)' },
-      { rel: 344, want: 1,   mustMove: false, what: 'PP#17 record+4 stays 1 = channel 1 (unchanged)' },
-      { rel: 364, want: 0,   mustMove: true,  what: 'PP#19 record+0 → 0: a Parameter row leaves +0 ZERO (was 28 = a preset number)' },
-      { rel: 354, mustMove: true,  what: 'PP#18 record+2 is written (a Parameter row — value not decodable, only that it moves)' },
-      { rel: 360, mustMove: true,  what: 'PP#18 record+8 is written (the same)' },
-      { rel: 366, mustMove: true,  what: 'PP#19 record+2 is written (its partner row, a DIFFERENT param/value)' },
-      { rel: 372, mustMove: true,  what: 'PP#19 record+8 is written' },
+      { rel: 344, want: 1,   mustMove: false, what: 'PP#17 record+4 stays 1 — an UNEXPLAINED 1, stable across two captures (the sweep read 1 here too, with a different Effect function); it is NOT the channel, which is at +2 and reads 0 = channel A' },
+      { rel: 364, mustMove: false, what: "PP#19 record+0 = 28 — the planned function could NOT be set, so the prediction never applied; 28 is GEQ 2's FX-slot index, and the byte is unchanged from the sweep ONLY BY COINCIDENCE (its PP#19 was Preset: Select 28), which is why this is a no-move and not a value claim" },
+      { rel: 366, want: 1,   mustMove: true,  what: 'PP#19 record+2 → 1 = channel B — a THIRD row placing the channel at +2, agreeing with PP#14' },
+      { rel: 354, mustMove: true,  what: 'PP#18 record+2 → 0 — the planned function could not be set; as a Change Channel row on Amp 1 / channel A its WHOLE record reads zero (the field moved from the old row\'s value)' },
+      { rel: 360, mustMove: true,  what: 'PP#18 record+8 → 0 (the same row change)' },
+      { rel: 372, mustMove: false, what: 'PP#19 record+8 stays 0 — the same row change (this is not the planned row)' },
       { rel: 424, mustMove: true,  what: 'PP#24 record+0 MOVES (a Control Switch row: value not decodable, only that it changes)' },
       // Rows that must NOT move at all: 16 (the HOLD-test control — only its HOLD changes), 18/19's +0 already
       // stated above, and the four unchanged rows 20/21/22/23 whose records were empty apart from the
@@ -333,14 +364,33 @@ const STEPS: Step[] = [
       { rel: 400, mustMove: false, what: 'PP#22 (Looper) record+0 stays 0 — the answer to "does every looper mode leave it empty?" is read from its extras' },
       { rel: 412, mustMove: false, what: 'PP#23 (Control Switch 1) record+0 stays 0' },
       // THE HOLD DISCRIMINATOR — the second array's four control slots, plus the predicted HOLD home.
-      { rel: 82, mustMove: false, what: 'slot 16 stays 1 — if the marker+52 array tracked the HOLD it must move (a Looper HOLD is now set here)' },
-      { rel: 84, mustMove: false, what: 'slot 17 stays 2 (TAP unchanged, HOLD now Utility: Tuner)' },
-      { rel: 86, mustMove: false, what: 'slot 18 stays 3 (TAP unchanged, HOLD now Control Switch 1)' },
-      { rel: 88, mustMove: true,  what: 'slot 19 becomes NON-ZERO (a Parameter row needs record bytes; it read 0 in the sweep)' },
-      { rel: 90, mustMove: false, what: 'slot 20 stays 4 (unchanged row)' },
-      { rel: 130, mustMove: true,  what: 'marker+130 = +100 + 2·(16−1) MOVES off zero if +100…+147 is the HOLD home (PP#16 HOLD = Looper)' },
-      { rel: 132, mustMove: true,  what: 'marker+132 = +100 + 2·(17−1) MOVES if it is the HOLD home (PP#17 HOLD = Utility: Tuner)' },
-      { rel: 134, mustMove: true,  what: 'marker+134 = +100 + 2·(18−1) MOVES if it is the HOLD home (PP#18 HOLD = Control Switch 1)' }
+      // THE +52 ARRAY = the TAP's FUNCTION INDEX WITHIN ITS CATEGORY (0 = the category's first entry). The
+      // pre-written discriminator was "a function index predicts REPEATS when two switches share a function,
+      // an allocation index predicts DISTINCT ascending ones" — the capture answered REPEATS: five Change
+      // Channel rows all read 1 and three Scene: Toggles all read 1, so the allocation reading is REFUTED.
+      // Reading it as the HOLD half is refuted too: the three HOLDs are Looper/Utility/Control Switch and these
+      // slots read 1/1/1 while the HOLD codes appeared at +436 (below).
+      { rel: 74, want: 1, mustMove: true, what: 'slot 12 = 1 = Scene #1 (Toggle) — 0 was Scene #0 (Select)' },
+      { rel: 76, want: 1, mustMove: true, what: 'slot 13 = 1 — the SAME function ⇒ the SAME value (the REPEATS prediction that killed the allocation index)' },
+      { rel: 78, want: 1, mustMove: true, what: 'slot 14 = 1 = Effect #1 (Change Channel) — 0 was Effect #0 (Bypass)' },
+      { rel: 80, want: 1, mustMove: true, what: 'slot 15 = 1 — the same function, the same value' },
+      { rel: 82, mustMove: false, what: 'slot 16 stays 1 — the HOLD test\'s POSITIVE CONTROL: its TAP is unchanged and its HOLD is now Looper, and the slot did NOT take a HOLD value' },
+      { rel: 84, want: 1, mustMove: true, what: 'slot 17 = 1 — it read 2 in the sweep, when this row held a different Effect function: the array tracks the FUNCTION, so it moved with the TAP and not with the HOLD' },
+      { rel: 86, want: 1, mustMove: true, what: 'slot 18 = 1 — it read 3 in the sweep (a third Effect function) and follows the function, not the HOLD' },
+      { rel: 88, want: 1, mustMove: true, what: 'slot 19 = 1 = Change Channel (it read 0 as Scene/Preset #0 in the sweep)' },
+      { rel: 90, mustMove: false, what: 'slot 20 stays 4 = Preset #4 (Increment) — unchanged row, so a stable function index' },
+      { rel: 94, want: 4, mustMove: true, what: 'slot 22 = 4 = the Looper function index of Undo/Erase (0 with the sweep\'s looper function) — a within-category function change in a second category' },
+      // REFUTED — the HOLD home. Kept as mustMove:false so the wrong reading cannot come back.
+      { rel: 130, mustMove: false, what: 'marker+130 (+100 + 2·15) stayed 0 — REFUTED: the HOLD half is NOT the +100…+147 span' },
+      { rel: 132, mustMove: false, what: 'marker+132 (+100 + 2·16) stayed 0 — REFUTED' },
+      { rel: 134, mustMove: false, what: 'marker+134 (+100 + 2·17) stayed 0 — REFUTED' },
+      // THE HOLD HALF, FOUND BY THE EXTRAS LINE: a second 24-wide u16 ACTION-CODE array at marker+436 + 2·(i−1)
+      // (436 = 148 + 12×24, i.e. immediately after the last 12-byte record). The three HOLDs set for this round
+      // read back as their categories' codes, in row order, and every other row stayed 0 (all HOLDs unassigned).
+      { rel: PP_HOLD_REL, mustMove: false, what: 'PP#1 HOLD stays 0 (Unassigned) — every HOLD row except 16/17/18 was left unassigned' },
+      { rel: PP_HOLD_REL + 2 * 15, want: 0x08, mustMove: true, what: 'PP#16 HOLD = 0x08 Looper — the HOLD half lives at marker+436 + 2·(i−1)' },
+      { rel: PP_HOLD_REL + 2 * 16, want: 0x05, mustMove: true, what: 'PP#17 HOLD = 0x05 Utility (the assignment was Utility: Tuner — 0x05 is the Utility category)' },
+      { rel: PP_HOLD_REL + 2 * 17, want: 0x07, mustMove: true, what: 'PP#18 HOLD = 0x07 Control Switch (Control Switch 1)' }
     ],
     // Named, per-INDEX unknowns — not a wildcard over the block. The seven newly enumerated categories have a
     // record layout nobody has seen yet, and three individual rows have a field whose position is unknown
