@@ -676,6 +676,47 @@ must cover only what is *genuinely* per-read; anything wider must be justified b
 `review-2026-10-12/placement-{before,during,after}-cell11.tap`, `placement-arm-0{1,2,3,4}.tap`,
 `placement-diff*.out`, `cell12/placement-*.tap`, `cell4-12/placement-*.tap`.
 
+## 4. WHAT record #3's bytes ENCODE — data 25 IS a content function, data 26 is NOT clean
+
+`scripts/probe-2e-record3.ts` (dry-run by default), run twice, each run a 6-write state chain, every write
+self-restoring and every restore proven byte-identical through the edit-buffer body. States, in order:
+`S0` nothing extra · `S1` chorus 2 at r1c1 · `S2` chorus 2 **and** comp 2 · `S3` comp 2 cleared · `S4` both
+cleared · `S5` comp 2 alone at r1c1 · `S6` cleared. Each stage = 6 reads + 8 dwell reads; **data 24 is
+excluded from every comparison** because it is the last member of the per-read volatile trio 22/23/24 (it took
+13 distinct values across 14 reads of ONE stage — including it makes a value that repeats exactly look like it
+does not).
+
+| state | run 1 record #3 (data 25..31) | run 2 (same chain, same order) |
+|---|---|---|
+| empty (S0/S4/S6) | `46 50 4a 55 1a 04 40` | `46 50 4a 55 1a 04 40` |
+| chorus 2 alone (S1/S3) | `4c 10 4a 55 1a 04 40` | `4c 10 4a 55 1a 04 40` |
+| comp 2 alone (S5) | `4d 10 4a 55 1a 04 40` | `4d 10 4a 55 1a 04 40` |
+| both placed (S2) | `52 10 4a 55 1a 04 40` | **`52 50 4a 55 1a 04 40`** |
+
+Pre-committed hypotheses, and what the chain answered:
+
+- **H_FLAG refuted** — a dirty/edited flag predicts the same value for 1 block and 2 blocks; the 2-block state
+  reads `52`, not `4c`/`4d`.
+- **H_COUNT refuted** — a count predicts chorus-alone = comp-alone (both are one block); they read `4c` and
+  `4d`, and both are stable over 14 reads each.
+- **H_HASH supported, with a caveat** — the value is state-dependent AND repeatable: S1 and S3 (the same state
+  reached by different edit histories) read identically, and the canonical `46 50` returns at S4 and S6. **But
+  data 26 is not a clean function of the content**: identical chains in two runs gave `10` and `50` at the
+  2-block state while data 25 stayed `52` both times. So **data 25 is the reliable content carrier**
+  (`46` empty, `4c` chorus alone, `4d` comp alone, `52` two blocks — identical in both runs) and data 26
+  carries a second, slowly-updating component (bit 6, `0x10` vs `0x50`) that is not explained yet. Data 27..31
+  never moved in any state.
+
+**The encoding is still NOT cracked**, and the negative results are recorded so they are not re-tried: no
+simple function of the reply reproduced the pair — XOR, byte sums (mod 128 / 256), 16- and 32-bit big-endian
+word sums, CRC-16/CCITT, CRC-32, Adler-32, non-zero counts and popcounts, over five regions of the reply
+(whole content, head, tail grid, bytes 28..355, bytes 22..26). A 5-septet float32 (`decode5SeptetFloat32`) at
+every offset 20..25 decodes to `0`. What it is NOT is a per-read value: within each state it held for the whole
+14-read stage.
+
+**Files added in ROUND 15 §4:** `scripts/probe-2e-record3.ts`, `review-2026-10-12/record3/` and
+`record3-run2/` (one tap per stage, named by state), `record3-run-0{1,2}.tap`, `record3-chain.json`.
+
 ---
 
 ## What is explicitly NOT decoded
@@ -687,8 +728,10 @@ must cover only what is *genuinely* per-read; anything wider must be justified b
 - ~~Whether the ~44 head records track placement (`H_head`, §7)~~ — **ANSWERED in ROUND 15 §3**: they do,
   but as ONE GLOBAL field, not a per-cell table. Record #3 (data 24..31, bytes 25/26) moves `46 50 → 4c 10`
   for a block placed in ANY of three different empty cells, holds for the whole dwell and reverts on the clear.
-  What those two bytes MEAN is still open, and so is whether a >1-block or non-empty-cell edit moves anything
-  else (the arm adds one block to a verified-empty cell).
+  ROUND 15 §4 then showed **data 25 IS a reproducible function of the grid content** (`46` empty, `4c` chorus
+  alone, `4d` comp alone, `52` two blocks, identical across two independent runs) while **data 26 is not a
+  clean function of it** (`0x10`/`0x50` for the same 2-block state in the two runs). What the numbers are —
+  hash, index, size — is still open, and so is the meaning of data 26's second component.
 - `0x1b`'s content bytes. ROUND 13's "addressed read of a table, at[2]/at[4] selectors, at[3] an index joint
   with the eid" survives; ROUND 14 adds that the selector replies carry nine content bytes, that the byte-9
   reply is the hole/default record, and that the hole record is time-varying. **The "21 bits" framing is dead —
