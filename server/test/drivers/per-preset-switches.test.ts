@@ -107,7 +107,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(page.switches[23]!.confidence, 'measured', 'PP#24: marker+50 / marker+424, the far end of the range');
     assertEqual(page.switches.length, 24, 'twenty-four rows: the switch count came from FM3-Edit and was then MEASURED');
     assertEqual(page.switches.filter((s) => s.confidence === 'unknown').length, 0, 'no row is unread: all 24 action codes are located');
-    assertEqual(page.switches.filter((s) => s.confidence === 'partial').length, 3, 'three partial rows (21, 22, 23) — the per-FIELD bound, exercised for real');
+    assertEqual(page.switches.filter((s) => s.confidence === 'partial').length, 2, 'two partial rows (21, 22) — the per-FIELD bound, exercised for real. PP#23 left this set on 2026-10-12: the owner set its Control Switch number 1→4 and marker+412 moved 0x00→0x03, which located its record+0. The count moved 3 → 2 with it; this line still asserted 3 after the codec changed, and only the full stack gate caught it');
     assertEqual(page.switches[0]!.action, 'unassigned', 'the unconfigured PP#1 reads as unassigned');
   }
 
