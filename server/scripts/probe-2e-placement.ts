@@ -165,6 +165,32 @@ export async function main(argv: string[]): Promise<number> {
       if (!stable) problems.push(`stage ${label} DRIFTS outside the mask — nothing in this arm can be attributed`);
       return out;
     };
+    /**
+     * DWELL TRACE — the discriminator inside the mask. Data 25/26 sat inside head record #3, they moved
+     * between the before and during stages of the first placement run and reverted with the clear, and yet
+     * ONE body dump moves them too (`probe-2e-dump-perturbation.ts`) — so they could be placement STATE or
+     * just a transient from recent traffic. A plain 8-read stage cannot separate the two (both are ~0.5 s).
+     * This reads the SAME six offsets many times over SECONDS with nothing else happening: a state byte holds
+     * for as long as the placement is in force; a transient decays. Printed per read, in order.
+     */
+    const dwellTrace = async (label: string, n: number): Promise<void> => {
+      if (n <= 0) return;
+      const seen: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const heard = await session.transport.request(longQuery(), { timeoutMs: 1200, quietMs: 80 });
+        const f = heard.find((x) => x[5] === 0x01 && x[6] === 0x2e && x.length > 100);
+        if (f) {
+          const d = f.slice(CONTENT_BASE, f.length - 2);
+          seen.push(MASK.map((o) => d[o]!.toString(16).padStart(2, '0')).join(''));
+        }
+        await sleep(250);
+      }
+      const uniq = [...new Set(seen)];
+      console.log(`  dwell ${label} (${seen.length} reads over ~${(seen.length * 0.25).toFixed(1)}s, data 22-27 per read):`);
+      console.log(`    ${seen.join(' ')}`);
+      console.log(`    distinct: ${uniq.length} → ${uniq.join(' | ')}  ${uniq.length === 1 ? '(SETTLED — one value held across the whole dwell)' : '(NOT settled inside the dwell)'}`);
+    };
+
     const writeStage = (label: string, frames: number[][]): string => {
       mkdirSync(outdir, { recursive: true });
       const p = join(outdir, `placement-${label}.tap`);
@@ -198,6 +224,8 @@ export async function main(argv: string[]): Promise<number> {
     console.log('DURING:');
     const sDuring = await stage('during');
     const pDuring = writeStage('during', sDuring);
+    // dwell BEFORE the restore: the placement is in force and nothing else is happening.
+    await dwellTrace('with the block PLACED', Math.max(0, Number(arg('--dwell') ?? 0)));
 
     console.log(`\nRESTORE — placeCell(${cellRow}, ${cellCol}, 0)`);
     const w2 = await session.driver.placeCell?.(cellRow, cellCol, 0);
@@ -210,6 +238,8 @@ export async function main(argv: string[]): Promise<number> {
     console.log('AFTER:');
     const sAfter = await stage('after');
     const pAfter = writeStage('after', sAfter);
+    // and the same trace once the placement is gone: a STATE byte must go back; a transient is already gone.
+    await dwellTrace('after the CLEAR', Math.max(0, Number(arg('--dwell') ?? 0)));
 
     // ── the independent restore proof ──
     const d1 = await dumpRaw();

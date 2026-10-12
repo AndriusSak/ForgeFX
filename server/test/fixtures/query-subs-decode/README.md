@@ -584,16 +584,20 @@ So: **the edit-buffer body dump transiently perturbs data 25/26/27 for about one
 next group the reply is back to the values two no-intervention groups agreed on. The `fn=0x13` status dump
 moves nothing. Reproduced on a second run with the same verdict (`dump-perturbation-02.tap`).
 
-**The operative rules this gives the `0x2e` arms:**
-- A mask of `22,23,24` is **incomplete for any run that dumps the body between stages**. The correct mask for
-  such a run is **22..27**, and the bytes it hides sit inside head records **#2 and #3** — so a change confined
-  to those two records is not visible to that arm. That blind spot must be stated with the result.
-- Alternatively: leave a **settle gap of one 4-read group** after any body dump and assert 25/26/27 read
-  `46/50/4a` before capturing a stage. (Those three values are what two independent no-intervention groups
-  produced — a same-session observation, not a device constant.)
+**The operative rules this gives the `0x2e` arms** — CORRECTED the same evening by §3, and the correction
+matters more than the finding that prompted it:
+
+- Mask the **derived trio 22/23/24** for the release comparison. **Do NOT mask 25/26/27**: masking them hides
+  head record **#3**, which is the one record that answers `H_head` (§3). The first ROUND 15 placement run
+  masked 22..27 and reported `preset-static metadata` — a **false negative produced by the mask**, not by the
+  device.
+- Use a **dwell trace** (many reads over seconds, nothing else happening, per-read values printed) to tell the
+  two apart: a per-read/dump value moves *within* the dwell, a placement STATE byte holds for the whole dwell
+  and reverts when the placement is undone. That is a cheaper and more honest discriminator than widening the
+  mask over the answer.
 - The ROUND 14 `H_head` null (§7b) used `--mask 22,23,24`; its three stage taps were written at 15:57 and its
-  "0 of 44 head records changed" is what it reported. Nothing here contradicts that result — it is a caveat:
-  if a body dump preceded a stage capture in that run, record #3 could have flagged, and it did not.
+  "0 of 44 head records changed" is what it reported. §3 does NOT contradict it: that arm toggled BYPASS, and a
+  bypass write does not move record #3 (measured: 25/26 read `46/50` in all three of its stages).
 
 **Files added in ROUND 15 §1:** `scripts/probe-2e-volatility.ts`, `scripts/probe-2e-dump-perturbation.ts`,
 `review-2026-10-12/volatility-2e.tap` + `-01.tap`, `dump-perturbation-01.tap` + `-02.tap`,
@@ -622,6 +626,56 @@ is now DATED by construction rather than reconstructed by hand.
 
 **Files added in ROUND 15 §2:** `scripts/standing-read.ts`, `~/repos/stack/standing-read.jsonl`.
 
+## 3. `H_head` IS ANSWERED — the `0x2e` HEAD is a per-placement STATE TABLE, and one body dump does not hide it
+
+The arm the ROUND 14 plan left open, run three times on the live unit with the owner's go-ahead.
+**Instrument:** `scripts/probe-2e-placement.ts` (`--go`; dry-run by default) — it places a NOT-placed block
+instance into a **verified-empty** cell and clears it again, so the existing chain is never touched and the
+restore is a single clear of a cell that was empty before. Three writes per run: `placeCell(r,c,0x4f)`,
+`placeCell(r,c,0)`, nothing else. No slot is written.
+
+| arm | cell (route) | landing (`fn=0x13`) | restore proof (edit-buffer BODY) | release differ (`--mask 22,23,24`) |
+|---|---|---|---|---|
+| 1 | r1c1 | placed ✔ / removed ✔ | BYTE-IDENTICAL ✔ | **1 head record + 1 tail cell, reverted** |
+| 2 | r1c2 | placed ✔ / removed ✔ | BYTE-IDENTICAL ✔ | **1 head record + 1 tail cell, reverted** |
+| 3 | r4c12 | placed ✔ / removed ✔ | BYTE-IDENTICAL ✔ | **1 head record + 1 tail cell, reverted** |
+
+In all three runs the SAME record moved, with the SAME values:
+
+```
+record #3 (data 24..31)   unplaced:  00 46 50 4a 55 1a 04 40
+                          placed:    00 4c 10 4a 55 1a 04 40        ← only data 25 and 26 move
+```
+
+The tail cell that appeared is always the cell that was written (col 0 row 0 / col 1 row 0 / col 11 row 3),
+and the `after` stage is byte-identical to `before` — so the pre-committed outcome table resolves to
+**`per-placement state table`**: one head record and one tail cell moving together and reverting.
+
+**It is STATE, not a transient.** A **dwell trace** (12-20 reads over 3-5 s with nothing else happening,
+per-read values printed) holds `4c/10` for the whole dwell while the block is placed, and holds `46/50` for the
+whole dwell once it is cleared. A per-read or dump-derived value cannot do that — it moves inside the dwell.
+
+**It is a single GLOBAL placement field, not a per-cell record.** Three different cells — two adjacent in the
+top row and the far corner of the bottom row — move the SAME record #3 to the SAME values. Prediction written
+down before arm 3 ("global field ⇒ record #3 moves again for a distant cell") and it held.
+
+**It is not "any write".** ROUND 14's bypass arm (a param write) left data 25/26 at `46/50` in all three of its
+stages, and the `fn=0x13` status dump moves nothing.
+
+**What it is NOT.** Data 25/26's SEMANTICS are undecoded — nothing here says whether the pair is a hash, a
+count, a "grid edited" flag or a bitfield, and the values are observations from this preset, not device
+constants. Two further measured wrinkles worth keeping: ONE body dump perturbs 25/26 transiently with values
+that never included `4c` (so the dump's effect and the placement's are distinguishable), and one read in the
+r1c2 dwell sampled `4b/50` — a single intermediate sample, unexplained.
+
+**The methodological lesson.** The first run of the arm masked 22..27 (the mask derivation in §1) and reported
+`preset-static metadata`: **masking the perturbed bytes hid the very record that answers the question.** A mask
+must cover only what is *genuinely* per-read; anything wider must be justified by a dwell, not assumed.
+
+**Files added in ROUND 15 §3:** `scripts/probe-2e-placement.ts`, `scripts/probe-grid-baseline.ts`,
+`review-2026-10-12/placement-{before,during,after}-cell11.tap`, `placement-arm-0{1,2,3,4}.tap`,
+`placement-diff*.out`, `cell12/placement-*.tap`, `cell4-12/placement-*.tap`.
+
 ---
 
 ## What is explicitly NOT decoded
@@ -630,7 +684,11 @@ is now DATED by construction rather than reconstructed by hand.
   `+22..+24` trio. The region's TAIL is the repo's own grid layout and IS decoded (§7).
 - What `0x03` byte 5 *counts*. Its mechanism on `0x5e` is now measured — a free-running ≈93.8 units/s counter,
   mod 128 (§6) — and `0x3a`'s is write-driven, but what either number MEANS is open.
-- Whether the ~44 head records track placement (`H_head`, §7) — the one falsifiable test left there.
+- ~~Whether the ~44 head records track placement (`H_head`, §7)~~ — **ANSWERED in ROUND 15 §3**: they do,
+  but as ONE GLOBAL field, not a per-cell table. Record #3 (data 24..31, bytes 25/26) moves `46 50 → 4c 10`
+  for a block placed in ANY of three different empty cells, holds for the whole dwell and reverts on the clear.
+  What those two bytes MEAN is still open, and so is whether a >1-block or non-empty-cell edit moves anything
+  else (the arm adds one block to a verified-empty cell).
 - `0x1b`'s content bytes. ROUND 13's "addressed read of a table, at[2]/at[4] selectors, at[3] an index joint
   with the eid" survives; ROUND 14 adds that the selector replies carry nine content bytes, that the byte-9
   reply is the hole/default record, and that the hole record is time-varying. **The "21 bits" framing is dead —
