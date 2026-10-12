@@ -447,6 +447,29 @@ const STEPS: Step[] = [
     allowedElsewhere: (o) => isPerformPageByte(o)
   },
   {
+    // R11-B/C — the field-offset confirmation. The owner's field LABELS decided which field means what; this
+    // step checks that each field sits where the model says: "field n is at record + 2n". Predictions written
+    // 2026-10-12 in review-2026-10-09/HARDWARE-ROUND-PLAN.md BEFORE this capture existed (hence PENDING until
+    // it lands), and the row's current values were read with a tool from preset-410-r11-p0c.
+    //   PP#17 (Effect: Chan Toggle) = [block 2, primary A, secondary B] -> primary to D must move record+2 only,
+    //     which separates "primary at +2" from "2nd-press at +2" — the hypothesis that would put the 2nd-press
+    //     options (0/1/2) there cannot produce 3.
+    //   PP#18 (Effect: Chan Inc/Dec) = [block 0, Inc/Dec 2, Wrap 0, Lower 0, Upper 1] -> a five-field function,
+    //     the only case where the last field is +8; setting Upper Limit to 3 and the block to Cab 1 (anchor 1)
+    //     tests both at once, and a confirming block value would let the anchor table cover function 3 too.
+    from: '../test/fixtures/preset-switches/preset-410-r11-p0c.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11-bc-confirm.bin',
+    predictions: [
+      { rel: 148 + 12 * 16 + 2, want: 3, mustMove: true, what: 'PP#17 record+2 (primary channel) 0 → 3 = D' },
+      { rel: 148 + 12 * 16 + 4, mustMove: false, what: 'PP#17 record+4 (secondary channel) stays 1 = B — the control for the row above' },
+      { rel: 148 + 12 * 17, want: 1, mustMove: true, what: 'PP#18 record+0 (the Effect block) 0 → 1 = Cab 1' },
+      { rel: 148 + 12 * 17 + 4, mustMove: false, what: 'PP#18 record+4 (Wrap) stays 0' },
+      { rel: 148 + 12 * 17 + 6, mustMove: false, what: 'PP#18 record+6 (Lower Limit) stays 0' },
+      { rel: 148 + 12 * 17 + 8, want: 3, mustMove: true, what: 'PP#18 record+8 (Upper Limit) 1 → 3 — the fifth field of a five-field function' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
     // The RESTORE half of R11-A. "Restored" here does not rest on the route's verdict (which echoes what we
     // sent) but on a fresh dump agreeing with the pre-write capture; this step pins the byte, and the
     // sha256 comparison is stated in the ROUND 11 result text.
