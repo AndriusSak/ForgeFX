@@ -222,12 +222,17 @@ So `byte 9 ≠ 0` does not produce a distinct mode record: it lands on the **DEF
 the device gives for an address that holds nothing. ROUND 13 read "byte 9 ≠ 0 → `01 00 00`" as a device
 constant; it is a *time-stamped reading of the hole record*, and the hole record is what moved.
 
-**What is NOT established:** why it moved. It is not a fast clock — it was byte-identical at 14:20, 14:26 and
-14:50. The preset name and the placed-eid set did not change. Nothing was written to the unit by any ROUND 12–14
-probe (all read-only; ROUND 13's bypass arms self-restored and were proven restored through `fn=0x13`).
-**A value that moves between sessions without a write is a defect candidate, not a decode**, and must not be
-used as a stable identity. Whoever picks this up: read `fn=0x0d` (preset) + this record together, and note
-anything that changed on the unit in between.
+**What is NOT established:** why it moved — but every candidate trigger has been excluded. It is not a fast
+clock (byte-identical at 14:20, 14:26 and 14:50). The preset name and the placed-eid set did not change.
+Nothing was written to the unit by any ROUND 12–14 probe (all read-only; ROUND 13's bypass arms self-restored
+and were proven restored through `fn=0x13`). The unit's owner confirms he did not touch it during the window,
+and `journalctl -k` shows **no USB connect/disconnect at all since 10:43:41** — the device stayed enumerated
+across the change, so it is not a re-enumeration or a power-cycle artefact either. So this is an **uncommanded
+internal state change**: a defect candidate, not a decode, and never a stable identity.
+
+Whoever picks this up: the cheap instrument is a standing read — log this record (plus `fn=0x0d` preset and
+`fn=0x13` placed set) at the head of every future probe run, so a drift gets a time series for free instead of
+costing a round.
 
 `byte 11 ≠ 0` DID reproduce byte-for-byte across both runs: `1b 14 4c 7a 0a 00 00 00 00`.
 
