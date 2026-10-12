@@ -466,22 +466,50 @@ const STEPS: Step[] = [
       { rel: 148 + 12 * 16 + 4, mustMove: false, what: 'PP#17 record+4 (secondary channel) stays 1 = B — the control for the row above' },
       { rel: 148 + 12 * 17, want: 1, mustMove: true, what: 'PP#18 record+0 (the block field) 0 → 1 = Cab 1' },
       { rel: 148 + 12 * 17 + 4, mustMove: false, what: 'PP#18 record+4 stays 0' },
-      // REFUTED, and now pinned so the reading cannot come back: I predicted the owner's "Upper Limit" control
-      // would write record+8 (making a five-field function's last field the fifth slot). It did not move at all,
-      // while record+6 moved 0 → 2 — the value of the control he describes as showing LETTERS A–D, A → C. So
-      // "field n sits at record + 2n" does NOT hold for this row: the menu's ORDER is not the record's order,
-      // and a field's offset has to be measured per (category, function) like the action codes are.
-      { rel: 148 + 12 * 17 + 6, want: 2, mustMove: true, what: 'PP#18 record+6 0 → 2 (SNAPSHOT, transcribed after the capture: the control the owner changed wrote HERE, not at +8)' },
-      { rel: 148 + 12 * 17 + 8, mustMove: false, what: 'PP#18 record+8 stayed 1 — REFUTED: "Upper Limit" is not at record+8, so field order ≠ byte order on this row' },
+      // THE FIELD-ORDER CHECK, and the only place it can be checked properly: a FIVE-field function, whose last
+      // field is the fifth slot. The owner read the row out afterwards — Effect = Cab 1, Increment/Decrement =
+      // +2, Wrap = Wrap, Lower limit = C, Upper limit = B — and every one of those lands on its own byte:
+      // +0 = 1, +2 = 2, +4 = 0, +6 = 2 (C), +8 = 1 (B). So "field n sits at record + 2n" HOLDS.
+      // A first version of this step said the model was REFUTED, because the byte at +8 did not move while +6
+      // did. That was my instruction error, not the model's: I asked for a NUMBER (3) on a field that displays
+      // LETTERS, so the owner changed Lower limit A → C. Lesson in the plan file: an impossible instruction is
+      // evidence about the FIELD — ask what the screen shows before calling anything refuted.
+      { rel: 148 + 12 * 17 + 6, want: 2, mustMove: true, what: 'PP#18 record+6 (Lower limit) 0 → 2 = A → C — the field order IS the byte order' },
+      { rel: 148 + 12 * 17 + 8, mustMove: false, what: 'PP#18 record+8 (Upper limit) stays 1 = B — untouched because my instruction asked for a number on a letter field' },
       // PP#1 was REWRITTEN between the two captures (Looper: Half Speed → Effect: Chan Toggle, block 1, both
-      // channels B) and nobody asked for it. Pinned rather than tolerated so it stays visible in every gate run:
-      // if it is the owner's own edit, these lines document it; if it is not, the editor rewrote an unrelated
-      // row and that is a finding this check must not let pass silently. OPEN — see ROUND 11 → R11-B/C RESULTS.
-      { rel: PP_ACTION_OFFSET, want: 0x04, mustMove: true, what: 'PP#1 action code 0x08 → 0x04 (Effect) — unrequested change, open question' },
-      { rel: PP_FUNCTION_INDEX_BASE, want: 2, mustMove: true, what: 'PP#1 function index 5 → 2 = Chan Toggle — unrequested change, open question' },
-      { rel: 148, want: 1, mustMove: true, what: 'PP#1 record+0 → 1 — unrequested change, open question' },
-      { rel: 150, want: 1, mustMove: true, what: 'PP#1 record+2 → 1 (primary channel B) — unrequested change, open question' },
-      { rel: 152, want: 1, mustMove: true, what: 'PP#1 record+4 → 1 (secondary channel B) — unrequested change, open question' }
+      // channels B). The owner says it was probably his own unintentional edit, so it is not evidence of an
+      // editor bug — but it stays PINNED rather than tolerated: a tolerated byte would let a real
+      // "the editor rewrote an unrelated row" scenario pass silently forever, which is worth one printed line.
+      { rel: PP_ACTION_OFFSET, want: 0x04, mustMove: true, what: 'PP#1 action code 0x08 → 0x04 (Effect) — the owner\'s own stray edit (stated 2026-10-12), pinned so it stays visible' },
+      { rel: PP_FUNCTION_INDEX_BASE, want: 2, mustMove: true, what: 'PP#1 function index 5 → 2 = Chan Toggle — same stray edit' },
+      { rel: 148, want: 1, mustMove: true, what: 'PP#1 record+0 → 1 — same stray edit' },
+      { rel: 150, want: 1, mustMove: true, what: 'PP#1 record+2 → 1 (primary channel B) — same stray edit' },
+      { rel: 152, want: 1, mustMove: true, what: 'PP#1 record+4 → 1 (secondary channel B) — same stray edit' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // R11-B/C extra — the ISOLATING edit for the one Effect function whose block field had never been set by an
+    // edit: function 2 (Chan Toggle). A Toggle row's record+0 read 2, which equals Chorus 1's anchor index, but
+    // "a value that happens to match an anchor" is not a measurement — the row could have meant something else.
+    // So `PUT /preset/switches/17 {"targetIndex":51}` wrote a KNOWN block (Reverb 1) through the route, and the
+    // edit buffer was then read with a dump. This is what turned the CHAN TOGGLE half of ppTargetIsFxSlot from
+    // label-derived (the editor calls the field "Effect") into a wire measurement.
+    from: '../test/fixtures/preset-switches/preset-410-r11-bc-confirm.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11-pp17-target51.bin',
+    predictions: [
+      { rel: 148 + 12 * 16, want: 51, mustMove: true, what: 'PP#17 record+0 (the "Effect" field) 2 → 51 = Reverb 1 — the byte IS the FX-slot index' },
+      { rel: 148 + 12 * 16 + 2, mustMove: false, what: 'PP#17 record+2 (primary channel, D) stays 3 — a target write must not disturb the channel fields' },
+      { rel: 148 + 12 * 16 + 4, mustMove: false, what: 'PP#17 record+4 (secondary channel, B) stays 1' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // …and its restore, which lands back on the byte-identical buffer (same sha256 as preset-410-r11-bc-confirm).
+    from: '../test/fixtures/preset-switches/preset-410-r11-pp17-target51.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11-pp17-target-restored.bin',
+    predictions: [
+      { rel: 148 + 12 * 16, want: 2, mustMove: true, what: 'PP#17 record+0 back to 2 = Chorus 1 — target restored through the route and confirmed by dump' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
   },
