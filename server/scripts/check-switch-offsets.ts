@@ -41,7 +41,7 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, parsePerPresetSwitches, PP_ACTION_OFFSET, PP_TARGET_OFFSET, PP_MEASURED_OFFSETS } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, parsePerPresetSwitches, PP_ACTION_OFFSET, PP_TARGET_OFFSET, PP_MEASURED_OFFSETS, PP_FUNCTION_INDEX_BASE } from 'forgefx-midi/devices/gen3';
 
 interface Prediction {
   /** Offset from the marker. */
@@ -460,12 +460,28 @@ const STEPS: Step[] = [
     from: '../test/fixtures/preset-switches/preset-410-r11-p0c.bin',
     to: '../test/fixtures/preset-switches/preset-410-r11-bc-confirm.bin',
     predictions: [
+      // HELD (wrote these before the capture existed): the Toggle row's field offsets, and that its SECONDARY
+      // channel is its own field. This is what closed R11-B on the wire rather than on a menu label.
       { rel: 148 + 12 * 16 + 2, want: 3, mustMove: true, what: 'PP#17 record+2 (primary channel) 0 → 3 = D' },
       { rel: 148 + 12 * 16 + 4, mustMove: false, what: 'PP#17 record+4 (secondary channel) stays 1 = B — the control for the row above' },
-      { rel: 148 + 12 * 17, want: 1, mustMove: true, what: 'PP#18 record+0 (the Effect block) 0 → 1 = Cab 1' },
-      { rel: 148 + 12 * 17 + 4, mustMove: false, what: 'PP#18 record+4 (Wrap) stays 0' },
-      { rel: 148 + 12 * 17 + 6, mustMove: false, what: 'PP#18 record+6 (Lower Limit) stays 0' },
-      { rel: 148 + 12 * 17 + 8, want: 3, mustMove: true, what: 'PP#18 record+8 (Upper Limit) 1 → 3 — the fifth field of a five-field function' }
+      { rel: 148 + 12 * 17, want: 1, mustMove: true, what: 'PP#18 record+0 (the block field) 0 → 1 = Cab 1' },
+      { rel: 148 + 12 * 17 + 4, mustMove: false, what: 'PP#18 record+4 stays 0' },
+      // REFUTED, and now pinned so the reading cannot come back: I predicted the owner's "Upper Limit" control
+      // would write record+8 (making a five-field function's last field the fifth slot). It did not move at all,
+      // while record+6 moved 0 → 2 — the value of the control he describes as showing LETTERS A–D, A → C. So
+      // "field n sits at record + 2n" does NOT hold for this row: the menu's ORDER is not the record's order,
+      // and a field's offset has to be measured per (category, function) like the action codes are.
+      { rel: 148 + 12 * 17 + 6, want: 2, mustMove: true, what: 'PP#18 record+6 0 → 2 (SNAPSHOT, transcribed after the capture: the control the owner changed wrote HERE, not at +8)' },
+      { rel: 148 + 12 * 17 + 8, mustMove: false, what: 'PP#18 record+8 stayed 1 — REFUTED: "Upper Limit" is not at record+8, so field order ≠ byte order on this row' },
+      // PP#1 was REWRITTEN between the two captures (Looper: Half Speed → Effect: Chan Toggle, block 1, both
+      // channels B) and nobody asked for it. Pinned rather than tolerated so it stays visible in every gate run:
+      // if it is the owner's own edit, these lines document it; if it is not, the editor rewrote an unrelated
+      // row and that is a finding this check must not let pass silently. OPEN — see ROUND 11 → R11-B/C RESULTS.
+      { rel: PP_ACTION_OFFSET, want: 0x04, mustMove: true, what: 'PP#1 action code 0x08 → 0x04 (Effect) — unrequested change, open question' },
+      { rel: PP_FUNCTION_INDEX_BASE, want: 2, mustMove: true, what: 'PP#1 function index 5 → 2 = Chan Toggle — unrequested change, open question' },
+      { rel: 148, want: 1, mustMove: true, what: 'PP#1 record+0 → 1 — unrequested change, open question' },
+      { rel: 150, want: 1, mustMove: true, what: 'PP#1 record+2 → 1 (primary channel B) — unrequested change, open question' },
+      { rel: 152, want: 1, mustMove: true, what: 'PP#1 record+4 → 1 (secondary channel B) — unrequested change, open question' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
   },
