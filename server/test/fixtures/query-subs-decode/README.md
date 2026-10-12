@@ -370,6 +370,54 @@ exactly one head record changing 1:1 with the one tail cell ⇒ a per-placement 
 preset-static metadata; changes with no write ⇒ volatile, mask it; nothing moves ⇒ the region is a device
 constant. **Not yet run.**
 
+## 8. Task 2's SYMMETRY half: the at1 and at3 axes are NOT one flat index (`H_FLAT` refuted)
+
+**Provenance:** `ForgeFX/server/scripts/probe-1b-symmetry.ts`, READ-ONLY (no writes at all), run on the live FM3,
+preset `"USA Mk IV"`, same 13 placed eids. Tap `1b-symmetry.tap`, log `review-2026-10-12/probe-1b-symmetry.out`.
+
+Five 64-row sweeps of the nine-byte content `C9 = data[5..13]`, all with at0 = at2 = at4 = 0:
+`V(0x46)` walks at3 with at1 fixed at `0x46`; `V(0x3a)` the same at `0x3a`; `U(D)` walks at1 with at3 fixed
+at `D` for D ∈ {0x00, 0x01, 0x08}.
+
+`H_FLAT` says `C9 = T(at1 + at3)`, which predicts `U_D(b) == V_E(b + (D − E))` — a shift of exactly `D − E`.
+
+| comparison | best Δ (scanning −63…+63) | rows compared | mismatch at best Δ | mismatch at the PREDICTED Δ = D−E |
+|---|---|---|---|---|
+| `U(0x01)` vs `V(0x46)` | +42 | 22 | 8/22 = 0.364 | **Δ = −69 — OUTSIDE the scan; 0 rows comparable** |
+| `U(0x08)` vs `V(0x46)` | +41 | 23 | 9/23 = 0.391 | Δ = −62 → 2 rows, 2 differ |
+| `U(0x01)` vs `V(0x3a)` | +27 | 37 | 29/37 = 0.784 | Δ = −57 → 7 rows, 5 differ (0.714) |
+| `U(0x08)` vs `V(0x3a)` | −5 | 59 | 46/59 = 0.780 | Δ = −50 → 14 rows, 13 differ (0.929) |
+| `U(0x01)` vs `U(0x00)` — SAME axis | 0 | 64 | 11/64 = 0.172 | (reference row) |
+| `U(0x08)` vs `U(0x01)` — SAME axis | 0 | 64 | 13/64 = 0.203 | (reference row) |
+
+- **`H_FLAT` is REFUTED.** At the shift the hypothesis predicts, the mismatch is 0.71–0.93 over whatever rows
+  exist — never 0. There is no shift anywhere in the scanned range that makes the at1 map a translate of an
+  at3 map (`U(0x01)` vs `V(0x3a)`: the best of all 127 shifts still mismatches 78% of its rows).
+- **`H_TWO` is not cleanly supported either, and the reason matters.** Against `V(0x46)` the best shift agrees
+  on 14 of 22 rows (0.64) against an in-run null of 0.25 — above chance, but (a) only 22 rows exist there and
+  (b) it is NOT the predicted shift. Both maps are dominated by their modal token (`00 00 00…` is 46% of all
+  320 readings pooled), so shared modal structure alone can produce that. **Recorded as unexplained, not as a
+  finding.**
+- **What the same-axis rows DO establish:** moving at3 from `0x00` to `0x01` changes **11 of 64** rows of the
+  at1 axis; from `0x01` to `0x08`, **13 of 64**. So at3 is a *perturbation of the at1-keyed records* rather
+  than a second offset into one table — which is a strictly better description than "both bytes address things"
+  and is what refutes the flat-index reading.
+- **Reproduction, and a design limit worth stating.** `V(0x46)` = **23 distinct** and `V(0x3a)` = **37
+  distinct** reproduce ROUND 13's table exactly on a fresh tap. But for `E = 0x46` the predicted shift
+  `D − E` falls outside a ±63 scan, so that pair cannot test the hypothesis at all — the test is only sound
+  where the two fixed values are close, and `E = 0x3a` is the pair that carries the refutation.
+
+**STABILITY half (task 2's second lever) is NOT run.** It needs a scene change (`fn=0x0c`), which is a WRITE,
+and no write has been approved on this unit since ROUND 13's self-restoring bypass arms. The tool carries the
+arm behind `--with-scene` and refuses to run it by default; the anchor set and the four-stage design are in the
+handover. The read-only half wrote nothing.
+
+### Files added in ROUND 14 §8
+
+| file | produced by | what it holds |
+|---|---|---|
+| `1b-symmetry.tap` | `probe-1b-symmetry.ts` (read-only) | the five 64-row sweeps (two at3 maps, three at1 maps) plus controls |
+
 ---
 
 ## What is explicitly NOT decoded
