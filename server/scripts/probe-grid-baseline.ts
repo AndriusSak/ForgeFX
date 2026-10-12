@@ -76,18 +76,27 @@ async function editBufferBody(session: { transport: { request: (f: number[], o?:
   return { hex: Buffer.from(body).toString('hex'), len: body.length };
 }
 
-/** Differencing ranges of two equal-length hex strings. */
-function diffHex(a: string, b: string): { len: number; ranges: [number, number][] } {
+/** Differencing two equal-length hex strings.
+ *
+ *  `bytes` and `runs` are EXACT: `bytes` is the number of differing bytes and `runs` the maximal runs of
+ *  ADJACENT differing bytes. `merged` coalesces runs separated by no more than 8 B, purely to keep a print
+ *  short — a merged span may therefore contain bytes that are IDENTICAL, and its length is a SPAN length,
+ *  not a count. Report `bytes`/`runs`; use `merged` only for the reading of offsets. (Measured 2026-10-12:
+ *  an edit buffer 23 differing bytes in 18 runs away from slot 410 printed as "10 differing region(s)",
+ *  because the old single `ranges` field merged over an undisclosed <= 8 B gap and was labelled a count.) */
+function diffHex(a: string, b: string): { len: number; bytes: number; runs: [number, number][]; merged: [number, number][] } {
   const n = Math.min(a.length, b.length) / 2;
   const at: number[] = [];
   for (let i = 0; i < n; i++) if (a.slice(i * 2, i * 2 + 2) !== b.slice(i * 2, i * 2 + 2)) at.push(i);
-  const ranges: [number, number][] = [];
-  if (at.length) {
+  const group = (gap: number): [number, number][] => {
+    const out: [number, number][] = [];
+    if (!at.length) return out;
     let s = at[0]!, prev = at[0]!;
-    for (const k of at.slice(1)) { if (k - prev > 8) { ranges.push([s, prev]); s = k; } prev = k; }
-    ranges.push([s, prev]);
-  }
-  return { len: n, ranges };
+    for (const k of at.slice(1)) { if (k - prev > gap) { out.push([s, prev]); s = k; } prev = k; }
+    out.push([s, prev]);
+    return out;
+  };
+  return { len: n, bytes: at.length, runs: group(1), merged: group(8) };
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -120,11 +129,11 @@ export async function main(argv: string[]): Promise<number> {
     const dd = diffHex(d1.hex, d2.hex);
     console.log(`   dump A: ${d1.len} B  sha ${sha(d1.hex)}`);
     console.log(`   dump B: ${d2.len} B  sha ${sha(d2.hex)}`);
-    if (dd.ranges.length === 0) {
+    if (dd.bytes === 0) {
       console.log('   ORACLE: STABLE — the body reads byte-identical with no write between. It can carry the arm\'s restore proof.');
     } else {
-      console.log(`   ORACLE: NOT STABLE — ${dd.ranges.length} differing region(s):`);
-      for (const [a, b] of dd.ranges.slice(0, 12)) console.log(`     body ${a}..${b} (${b - a + 1} B)`);
+      console.log(`   ORACLE: NOT STABLE — ${dd.bytes} differing byte(s) in ${dd.runs.length} run(s):`);
+      for (const [a, b] of dd.runs.slice(0, 12)) console.log(`     body ${a}..${b} (${b - a + 1} B)`);
       problems.push('edit-buffer body is not byte-stable across two reads — it cannot serve as the restore oracle');
     }
     mkdirSync(outdir, { recursive: true });
@@ -200,12 +209,13 @@ export async function main(argv: string[]): Promise<number> {
         const sHex = Buffer.from(storedBody).toString('hex');
         const sd = diffHex(d1.hex, sHex);
         console.log(`   stored slot ${ref.number} “${b.name}”: body ${storedBody.length} B  sha ${sha(sHex)}  vs edit buffer ${d1.len} B`);
-        if (sd.ranges.length === 0) {
+        if (sd.bytes === 0) {
           console.log('   IN SYNC — the owner has no unsaved edits; re-selecting the slot is a SAFE last-resort undo.');
         } else {
-          console.log(`   NOT IN SYNC — ${sd.ranges.length} differing region(s) ⇒ the edit buffer holds UNSAVED EDITS.`);
+          console.log(`   NOT IN SYNC — ${sd.bytes} differing byte(s) in ${sd.runs.length} run(s) ⇒ the edit buffer holds UNSAVED EDITS.`);
           console.log('     ⇒ re-selecting/loading the preset would DISCARD them. The arm must restore by its own reverse write and must NOT fall back to a reload.');
-          for (const [a, bb] of sd.ranges.slice(0, 8)) console.log(`       body ${a}..${bb} (${bb - a + 1} B)`);
+          // spans are MERGED over gaps <= 8 B (readable offsets, not a count — `bytes` above is the count).
+          for (const [a, bb] of sd.merged.slice(0, 12)) console.log(`       body ${a}..${bb} (span ${bb - a + 1} B; merged, may contain identical bytes)`);
         }
       } catch (e) { console.log(`   stored-slot dump failed: ${(e as Error).message}`); }
     } else {
