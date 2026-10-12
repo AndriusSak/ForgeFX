@@ -230,17 +230,18 @@ So `byte 9 ≠ 0` does not produce a distinct mode record: it lands on the **DEF
 the device gives for an address that holds nothing. ROUND 13 read "byte 9 ≠ 0 → `01 00 00`" as a device
 constant; it is a *time-stamped reading of the hole record*, and the hole record is what moved.
 
-**What is NOT established:** why it moved — but every candidate trigger has been excluded. It is not a fast
-clock (byte-identical at 14:20, 14:26 and 14:50). The preset name and the placed-eid set did not change.
-Nothing was written to the unit by any ROUND 12–14 probe (all read-only; ROUND 13's bypass arms self-restored
-and were proven restored through `fn=0x13`). The unit's owner confirms he did not touch it during the window,
-and `journalctl -k` shows **no USB connect/disconnect at all since 10:43:41** — the device stayed enumerated
-across the change, so it is not a re-enumeration or a power-cycle artefact either. So this is an **uncommanded
-internal state change**: a defect candidate, not a decode, and never a stable identity.
+**REVISED in §9 — this was not purely "uncommanded".** The record is **scene-dependent**, and the
+13:18–13:57 value `01 00 00 00 00 02` is exactly the scene-1 value of the map measured in §9, so a scene change
+between 13:57 and 14:20 accounts for that half of the move. It is not a fast clock (byte-identical at 14:20,
+14:26, 14:50), the preset name and placed-eid set did not change, nothing was written by any ROUND 12–14 probe
+at that time, and `journalctl -k` shows **no USB connect/disconnect since 10:43:41** — the unit stayed
+enumerated, so it is not a re-enumeration or power-cycle artefact.
 
-Whoever picks this up: the cheap instrument is a standing read — log this record (plus `fn=0x0d` preset and
-`fn=0x13` placed set) at the head of every future probe run, so a drift gets a time series for free instead of
-costing a round.
+**What remains unexplained is the OTHER value**: `1b 14 4c 7a 0a 02`, read from 14:20 to ≈15:2x, whose first
+byte `0x1b` is not a legal scene index. So the field has at least two regimes and §9's map holds in the current
+one. **Report the scene index alongside this record** — a standing read of (hole record, `fn=0x0d` preset,
+`fn=0x13` placed set, scene index) at the head of every probe costs four frames and would date the next regime
+change instead of costing a round.
 
 `byte 11 ≠ 0` DID reproduce byte-for-byte across both runs: `1b 14 4c 7a 0a 00 00 00 00`.
 
@@ -384,6 +385,35 @@ the four verdicts; the parent session re-ran all four before adoption and all fo
 those bytes (or use frames that are stable per stage), or a genuine one-record change is indistinguishable from
 the trio's drift. The tool labels that case `volatile / unattributable` rather than guessing.
 
+### 7b. `H_head` HAS BEEN RUN — the region does not reflect BYPASS
+
+**Provenance:** `scripts/probe-2e-head-bypass.ts` (ONE self-restoring bypass toggle, 3 long replies per stage,
+one tap PER STAGE), decided offline by `scripts/diff-2e-head-vs-grid.ts … --mask 22,23,24`. Taps
+`2e-head-bypass-{before,during,after}.tap`; logs `review-2026-10-12/probe-2e-head-bypass.out` and
+`review-2026-10-12/diff-2e-head-bypass.out`. Target eid `0x3a`, preset `"USA Mk IV"` throughout.
+
+| stage | long replies | non-trio bytes within the stage | trio distinct |
+|---|---|---|---|
+| before | 3 | STABLE | 3/3 (per-read, as documented) |
+| during (bypassed) | 3 | STABLE | 3/3 |
+| after (restored) | 3 | STABLE | 3/3 |
+
+The write's landing and the restore were both proved through the **`fn=0x13` status dump** — a different path
+from the one that was compared: `bypassed=false → true (✔ LANDED) → false (RESTORED)`.
+
+**Result: 0 of 44 head records changed, 0 tail grid cells changed, in both the before→during and
+before→after deltas.** The consistency line confirms the index mapping first (`content 576B = head 355B + tail
+221B`, parser needs 221B ✔), so the null is a real null and not a misaligned window.
+
+**That lands the pre-committed fifth outcome:** the region does **not** carry bypass state. Combined with the
+source's own note that a scene switch never changes the grid structure, this means `H_head` as originally
+posed ("does the head track a block's state") needs a **PLACEMENT** change — moving a block between grid cells
+— which is a structural preset edit with a weaker restore-proof (the only oracle for placement is the same
+`0x2e` grid reply being diffed). **Proposed, not run.**
+
+Minor fix landed with it: the differ's summary printed `reverted=false` on a no-change run, which reads as
+"a change failed to revert" — the opposite of what happened. It now prints `n/a (nothing changed)`.
+
 ## 8. Task 2's SYMMETRY half: the at1 and at3 axes are NOT one flat index (`H_FLAT` refuted)
 
 **Provenance:** `ForgeFX/server/scripts/probe-1b-symmetry.ts`, READ-ONLY (no writes at all), run on the live FM3,
@@ -421,10 +451,23 @@ at `D` for D ∈ {0x00, 0x01, 0x08}.
   `D − E` falls outside a ±63 scan, so that pair cannot test the hypothesis at all — the test is only sound
   where the two fixed values are close, and `E = 0x3a` is the pair that carries the refutation.
 
-**STABILITY half (task 2's second lever) is NOT run.** It needs a scene change (`fn=0x0c`), which is a WRITE,
-and no write has been approved on this unit since ROUND 13's self-restoring bypass arms. The tool carries the
-arm behind `--with-scene` and refuses to run it by default; the anchor set and the four-stage design are in the
-handover. The read-only half wrote nothing.
+### 8c. Task 2's STABILITY half HAS BEEN RUN — the content is scene-INVARIANT, except the hole record
+
+**Provenance:** `scripts/probe-1b-symmetry.ts --with-scene` (ONE self-restoring scene change, 5 reads per anchor
+per stage, 8 anchors, 4 stages). Tap `1b-symmetry-scene.tap`; log
+`review-2026-10-12/probe-1b-symmetry-scene.out`. Scene writes `{ok:true}` both ways, device read back `0 → 1 → 0`.
+
+Stages A (scene 0) · A′ (no write) · B (scene 1) · C (scene 0 restored). Every anchor was stable **within** every
+stage (5/5 identical), so the design's own gate passed and a change between stages is attributable.
+
+| anchor | A · A′ · B · C |
+|---|---|
+| `C9(0x46, at3=0)`, `C9(0x46, at3=1)`, `C9(0x46, at3=8)`, `C9(0x2a, at3=0)`, `C9(0x3a, at3=0)`, `C9(0x25, at3=0)`, `C9(0x2e, at3=0)` | **identical across all four stages** |
+| `C9(0x24, at3=0)` — the HOLE record | **SCENE-DEPENDENT**: B differs, C reverts |
+
+**Verdict: `H_SCENE_DEPENDENT`, from one anchor out of eight.** The `0x1b` content is **not** scene state — with
+the single exception of the hole/default record, which is followed up in §9 and turns out to be the scene index
+itself.
 
 ### 8b. Independent re-derivation of §8 — agrees on every published number, and adds three caveats
 
@@ -458,7 +501,46 @@ reproduced the same-axis rows independently as at3-vs-at3: `0x00↔0x01` 11/64, 
 
 | file | produced by | what it holds |
 |---|---|---|
-| `1b-symmetry.tap` | `probe-1b-symmetry.ts` (read-only) | the five 64-row sweeps (two at3 maps, three at1 maps) plus controls |
+| `1b-symmetry.tap` | `probe-1b-symmetry.ts` (read-only) | the five 64-row sweeps (two at3 maps, three at1 maps) plus controls. **Holds NINE sweeps: it APPENDS, and the discarded first version of the tool wrote four of them here** — take the LAST occurrence per `(at1, at3)` |
+| `1b-symmetry-scene.tap` | `probe-1b-symmetry.ts --with-scene` | the §8c scene arm: 8 anchors × 5 reads × 4 stages (A, A′ no-write, B scene 1, C restored) |
+| `1b-hole-vs-scene.tap` | `probe-hole-vs-scene.ts` | the §9 sweep: the hole record at each of the eight scenes, with the `0x46` control |
+| `2e-head-bypass-{before,during,after}.tap` | `probe-2e-head-bypass.ts` | the §7b arm: 3 long `0x2e` replies per stage, **one tap per stage** so the stages cannot be conflated |
+
+---
+
+## 9. The "hole" record's first byte IS THE SCENE INDEX — 8 for 8
+
+**Provenance:** `scripts/probe-hole-vs-scene.ts` (one self-restoring scene write per step, original scene
+restored and re-read at the end), tap `1b-hole-vs-scene.tap`, log
+`review-2026-10-12/probe-hole-vs-scene.out`. Predictions committed before the first frame.
+
+| scene | device read-back | C9(0x24, at3=0) | C9(0x46, at3=0) — control |
+|---|---|---|---|
+| 0 | 0 | `00 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 1 | 1 | `01 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 2 | 2 | `02 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 3 | 3 | `03 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 4 | 4 | `04 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 5 | 5 | `05 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 6 | 6 | `06 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+| 7 | 7 | `07 00 00 00 00 02 00 00 00` | `47 42 00 …` |
+
+**Eight scenes → eight distinct values, byte 0 equal to the scene index, byte 5 constant `02`, bytes 6-8 zero.**
+The control anchor did not move at all, so this is not a link-wide artefact. The scene write landed every time
+(read back) and the original scene 0 was restored and confirmed.
+
+This is the record that the at2-selector returns and that the 49 unused eids answer — so §2's "hole/default
+record" is now partly decoded: **on this unit, in this regime, it reports the current scene.**
+
+**What this does NOT yet explain, and must not be smoothed over.** The value read from 14:20 to ≈15:2x,
+`1b 14 4c 7a 0a 02 00 00 00`, has first byte `0x1b` — not a legal scene index. So the same address resolves to
+at least two different regimes, and the 8-for-8 map above is measured in the *current* one. Two readings of one
+field in two regimes is a **state we have not characterised**, not a refutation of the map and not evidence
+against it.
+
+**Cheap instrument, and the reason to add it now:** the hole record is worth four frames at the head of every
+probe run — (hole record, `fn=0x0d` preset name, `fn=0x13` placed set, **scene index**). That dates the next
+regime change instead of costing a round, which is exactly what today's version could not do.
 
 ---
 

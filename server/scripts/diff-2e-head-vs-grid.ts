@@ -129,9 +129,16 @@ function diff(a: Stage, b: Stage): Delta {
 
 function main(argv: string[]): number {
   const arg = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
-  const files = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && argv[i - 1] === '--model') && !(i > 0 && argv[i - 1] === '--reply'));
+  const files = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && argv[i - 1] === '--model') && !(i > 0 && argv[i - 1] === '--reply') && !(i > 0 && argv[i - 1] === '--mask'));
   if (files.length < 2 || files.length > 3) { console.log('usage: npx tsx v2-head-diff.ts <before.tap> <after.tap> [--model 0x11] [--reply last|first|<n>]\n   or: npx tsx v2-head-diff.ts <before.tap> <during.tap> <after.tap> [--model 0x11] [--reply last|first|<n>]'); return 1; }
   const model = arg('--model') !== undefined ? parseInt(arg('--model')!, 16) : 0x11;
+  // --mask <dataOffsets>: content offsets to IGNORE in every stage, in this tool's `data` space (data = wire-12,
+  // i.e. content[i] = frame.slice(12,-2)[i]). It exists for one measured reason: the per-read volatile trio
+  // sits at data 22/23/24, which lands INSIDE head records #2 and #3, so a genuine one-record change would be
+  // indistinguishable from that known drift. Masking is ZEROING for the comparison only — the output SAYS it
+  // masked, and the masked bytes are never reported as unchanged.
+  const maskList = (arg('--mask') ?? '').split(',').map((x) => x.trim()).filter((x) => x.length > 0).map((x) => parseInt(x, 10));
+  const mask = new Set(maskList.filter((n) => Number.isFinite(n)));
   // --reply accepts ONE selector for all stages, or a COMMA list, one per stage (e.g. --reply 0,63)
   const replySels = (arg('--reply') ?? 'last').split(',');
   const selFor = (i: number) => (replySels[i] ?? replySels[replySels.length - 1] ?? 'last').trim();
@@ -178,6 +185,9 @@ function main(argv: string[]): number {
     console.log(`  first grid cell bit = FM3_BASE_BIT (${FM3_BASE_BIT}) within the region; 8-byte head records are anchored at data 0 (the reply content base); 1 head record = data[i*8 .. i*8+8)`);
     console.log(`  head (data) length = ${headLenData}B ⇒ ${Math.floor(headLenData / 8)} full 8-byte HEAD records + ${headLenData % 8} trailing byte(s)`);
 
+    if (mask.size) console.log(`MASK: data offset(s) ${[...mask].sort((a, b) => a - b).join(', ')} are ZEROED in every stage before comparison (they are genuinely volatile), so any change reported below excludes them.`);
+    else console.log('MASK: none. If this run toggles anything on a live unit, pass --mask 22,23,24 — the per-read volatile trio sits INSIDE head records #2/#3 and will otherwise read as a spurious one-record change.');
+
     // ── load stages ──
     const labels = files.length === 3 ? ['before', 'during', 'after'] : ['before', 'after'];
     const stages: Stage[] = files.map((p, i) => {
@@ -189,6 +199,8 @@ function main(argv: string[]): number {
       const frame = repIndex === null ? null : longs[repIndex]!.bytes;
       if (!frame) return { path: p, label: labels[i]!, replyCount: longs.length, repIndex, frame: null, content: null, head: null, cells: null, cellKey: null };
       const content = frame.slice(CONTENT_BASE_WIRE, frame.length - FOOTER_WIRE);
+      // Apply --mask for the COMPARISON (zeroing only). Printed values therefore show masked offsets as 00.
+      for (const m of mask) if (m >= 0 && m < content.length) content[m] = 0;
       const head = content.slice(0, headLenData);
       let cells: Cell[] = [];
       try { cells = parseGen3GridLayout(frame, model); } catch { cells = []; }
@@ -230,7 +242,11 @@ function main(argv: string[]): number {
     const headChg = headIdx.size;
     const tailChg = cellKeyChanged.size;
     const sawChange = headChg > 0 || tailChg > 0;
-    const reverted = sawChange && stages[stages.length - 1]!.frame!.join(',') === before.frame!.join(',');
+    // PARENT FIX (2026-10-12): the revert test compares the CONTENT (masked as requested), not the raw frame.
+    // Raw-frame equality is unreachable whenever a masked offset is genuinely volatile — the per-read trio at
+    // data 22-24 differs between any two reads, so `after === before` could never hold and every run would
+    // report "did not revert" for that reason alone.
+    const reverted = sawChange && stages[stages.length - 1]!.content!.join(',') === before.content!.join(',');
 
     const showDelta = (name: string, d: Delta) => {
       console.log(`\n── ${name} ──`);
@@ -256,7 +272,9 @@ function main(argv: string[]): number {
       : headChg === 1 && tailChg === 1 && reverted ? 'per-placement state table'
       : 'volatile / unattributable';
 
-    console.log(`\nsummary: head records changed=${headChg} (of ${Math.floor(headLenData / 8)}) · tail cells changed=${tailChg} · reverted(after==before)=${reverted}`);
+    // `reverted` is only meaningful when something changed — printing "false" for a no-change run reads as
+    // "a change did not revert", which is the opposite of what happened. Say n/a explicitly.
+    console.log(`\nsummary: head records changed=${headChg} (of ${Math.floor(headLenData / 8)}) · tail cells changed=${tailChg} · reverted(after==before)=${sawChange ? String(reverted) : 'n/a (nothing changed)'}`);
     console.log(`VERDICT: ${verdict} — ${reason}`);
     return 0;
   }).catch((e: unknown) => { console.log(`ERROR: ${(e as Error).message}`); return 1; });

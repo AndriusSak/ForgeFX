@@ -163,7 +163,72 @@ export async function main(argv: string[]): Promise<number> {
       console.log('Re-run with --with-scene once that is approved. Read-only otherwise: nothing was written.');
       return 0;
     }
-    console.log('\n(the scene arm would go here — see the README for the anchor set and the 4-stage design)');
+
+    // ── STABILITY half — the SCENE arm. ONE self-restoring scene change. ─────────────────────────────
+    // PREDICTIONS, written before the write: H_SCENE_INVARIANT says every anchor is byte-identical across all
+    // four stages (the content is preset-static, not scene state). H_SCENE_DEPENDENT says the anchors that are
+    // per-block records change in stage B and revert in C. The arm is INVALID if A' (the no-write stage)
+    // drifts, because then a change between stages cannot be attributed to the scene write.
+    const ANCHORS: Array<[string, number[]]> = [
+      ['C9(0x46, at3=0)', [0x00, 0x46, 0x00, 0x00, 0x00]],
+      ['C9(0x46, at3=1)', [0x00, 0x46, 0x00, 0x01, 0x00]],
+      ['C9(0x46, at3=8)', [0x00, 0x46, 0x00, 0x08, 0x00]],
+      ['C9(0x2a, at3=0)', [0x00, 0x2a, 0x00, 0x00, 0x00]],
+      ['C9(0x3a, at3=0)', [0x00, 0x3a, 0x00, 0x00, 0x00]],
+      ['C9(0x25, at3=0)', [0x00, 0x25, 0x00, 0x00, 0x00]],
+      ['C9(0x2e, at3=0)', [0x00, 0x2e, 0x00, 0x00, 0x00]],
+      ['C9(0x24, at3=0) HOLE', [0x00, 0x24, 0x00, 0x00, 0x00]],
+    ];
+    const N = 5;
+    const cur = (await session.driver.getScene?.())?.index ?? -1;
+    if (cur < 0) { console.log('\nABORT: could not read the current scene index — refusing to change it blind. Nothing written.'); return 2; }
+    const s2 = (cur + 1) % 8;
+    console.log(`\nSTABILITY arm — scene ${cur} → ${s2} → ${cur}, ${N} reads per anchor per stage, ${ANCHORS.length} anchors.`);
+    console.log('  H_SCENE_INVARIANT: every anchor identical across all four stages · H_SCENE_DEPENDENT: stage B differs, C reverts');
+
+    const stage = async (label: string): Promise<{ scene: number; vals: Map<string, string[]> }> => {
+      const vals = new Map<string, string[]>();
+      for (const [name, at] of ANCHORS) {
+        const v: string[] = [];
+        for (let i = 0; i < N; i++) v.push((await read(at)) ?? '(silent)');
+        vals.set(name, v);
+      }
+      const scene = (await session.driver.getScene?.())?.index ?? -1;
+      console.log(`  ${label.padEnd(14)} scene reads ${scene} · ${ANCHORS.map(([n]) => `${new Set(vals.get(n)!).size === 1 ? '·' : 'X'}`).join('')} (· stable / X drift within the stage)`);
+      return { scene, vals };
+    };
+
+    const A = await stage(`A (scene ${cur})`);
+    const Ap = await stage('A′ (no write)');
+    const w1 = await session.driver.setScene?.(s2);
+    await sleep(600);
+    const B = await stage(`B (scene ${s2})`);
+    const r1 = await session.driver.setScene?.(cur);
+    await sleep(600);
+    const C = await stage(`C (scene ${cur})`);
+
+    const key = (s: { vals: Map<string, string[]> }, n: string) => [...new Set(s.vals.get(n)!)].sort().join(' | ');
+    let withinStageDrift = false;
+    for (const s of [A, Ap, B, C]) for (const [n] of ANCHORS) if (new Set(s.vals.get(n)!).size !== 1) withinStageDrift = true;
+    const apDiffers = ANCHORS.some(([n]) => key(A, n) !== key(Ap, n));
+    console.log(`\n  scene writes: set ${JSON.stringify(w1)} / restore ${JSON.stringify(r1)} · scene now ${(await session.driver.getScene?.())?.index}`);
+    console.log('\n  per-anchor across stages (A · A′ · B · C):');
+    for (const [n] of ANCHORS) {
+      const k = [A, Ap, B, C].map((s) => key(s, n));
+      const changedAtB = k[2] !== k[0];
+      const revertedAtC = k[3] === k[0];
+      console.log(`    ${n.padEnd(22)} ${changedAtB ? (revertedAtC ? 'SCENE-DEPENDENT (B differs, C reverts)' : 'CHANGED WITHOUT REVERTING') : 'identical across all stages'}`);
+    }
+    const changed = ANCHORS.filter(([n]) => key(A, n) !== key(B, n));
+    const reverted = changed.filter(([n]) => key(C, n) === key(A, n));
+    console.log(`\n  VERDICT: ${withinStageDrift || apDiffers
+      ? 'INCONCLUSIVE — the no-write stage (A′) is not stable, so a change cannot be attributed to the scene.'
+      : changed.length === 0
+        ? 'H_SCENE_INVARIANT — all anchors identical across a scene change, so this content is NOT scene state.'
+        : changed.length === reverted.length
+          ? `H_SCENE_DEPENDENT — ${changed.length} anchor(s) changed at B and reverted at C.`
+          : `PARTIAL — ${changed.length} changed at B, ${reverted.length} reverted; do not publish a reading.`}`);
+    if (withinStageDrift) console.log('  (within-stage drift was seen: the ·/X column above marks the anchors involved.)');
     return 0;
   } finally {
     await session.close();
