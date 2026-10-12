@@ -21,23 +21,50 @@ which names two of them and predicts lengths — so the question could be put to
 | `0x1b` | **23 bytes**, address-dependent | one address reads `06` in a data byte where the others read zero |
 | `0x2e` | **590 bytes** — or **23 bytes** when byte 7 is `0x01` | byte 7 is a SELECTOR: non-zero switches this sub from the table to a single small record. Upstream calls `0x2e` a LAYOUT MAP and expects 755B on an FM9; 590 on an FM3 is the same shape at a different geometry |
 
-**The 590-byte table, described but NOT decoded.** Two replies taken seconds apart differ only in the echoed
-address byte, THREE data bytes (`+34`–`+36`) and the checksum — so the bulk is stable. Its interior is dominated by
-the 8-byte pattern `40 20 10 08 04 02 01 00` repeated ~20–24 times, interleaved with all-zero regions and a handful
-of varying 8-byte groups (e.g. `43 36 19 2c 16 71 00 40`, `72 74 34 1b 24 04 33 05`). One byte of the SHORT
-`0x2e` reply varied between runs (`00` → `01` at `+12`), so that reply is not fully static either.
+**The 590-byte reply, described but NOT decoded** (read it with `scripts/inspect-layout-map.ts`):
 
-**Nothing above is a MEANING.** "590 bytes, table-shaped, stable, address-selectable" describes the frames. No byte
-of any of the three replies has been decoded, and the varying bytes are exactly why a decode must be built on a
-comparison against a KNOWN state rather than on one capture.
+- Data region 576 bytes (header `0..11` and the checksum+`F7` stripped).
+- **Three volatile bytes only** — data-relative `+22`, `+23`, `+24` — which differ between EVERY pair of replies,
+  including two replies of the same preset and same address. Everything else is byte-identical.
+- Zero bytes 241/576. **220 bytes hold a single-bit value** (`0x40/0x20/0x10/0x08/0x04/0x02/0x01`), i.e. the
+  region is bit-level data, not a list of ids and lengths.
+- The run `40 20 10 08 04 02 01 00` starts at 20 offsets, with IRREGULAR deltas (8, 8, 16, 8, 8, 32, 8, 24 …) —
+  so it is not a fixed-stride record table.
+- The one byte of the SHORT `0x2e` reply also varied between runs (`00` → `01` at `+12`).
 
-**Next steps this fixture enables, with no new capture:**
+**Dependence tests — `before.tap` / `during.tap` / `after.tap`** (2026-10-12, same day):
 
-1. Sweep byte 8 of the address over eids whose state is known from the preset — the amp at `0x3a`, the twelve
-   placed blocks the `fn=0x13` status dump lists (`2a 2b 2e 3a 3e 42 46 4e 52 5a 5e 76`), and an eid for a block
-   that is NOT placed — and see which reply bytes track that state. `0x03` is the editor's most-used poll, so a
-   per-eid state read is the natural reading; it is falsifiable by bypassing a block through the route this stack
-   already has, re-reading, and restoring. **Predictions first, as always.**
-2. Decode the 590-byte table against a truth source already in the tree: the block/eid structure and the editor's
-   own layout (`ForgeFX/server/src/devices.ts`). Start from the ~20 repeating 8-byte groups versus the twelve
-   placed eids.
+| step | what was done | result |
+|---|---|---|
+| `before` | read the map | baseline |
+| `during` | `PUT /preset/switches/5 {"holdActionCode":7}` — a change to the **edit buffer** | diff `before`→`during`: **only the three volatile bytes + the checksum** |
+| `after` | `PUT … {"holdActionCode":0}` — restore, read again | diff `before`→`after`: **only the three volatile bytes + the checksum** |
+
+So the reply is **not derived from the edit buffer** — and therefore not from the loaded preset either, since a
+preset loads INTO that buffer. Combined with the address test (a zero address region and a `00 3a …` region return
+the same table), it behaves as a **static, model-side table** read once at connect — which matches what the
+upstream capture that named it was (a connect + enum sweep).
+
+**A hypothesis the data KILLS, kept because a killed hypothesis is a result:** the map is **not** a per-block
+geometry table. `FM3_BLOCK_GEOMETRY` gives the repo 28 blocks with `cols × rows`, and no block id in the reply is
+followed by its own `cols`/`rows`. (`scripts/inspect-layout-map.ts` runs that check every time and prints
+`NO HITS`.)
+
+**Nothing above is a MEANING.** "576 bytes, bit-level, stable, address- and state-independent" describes the
+frames. No byte of any of the three replies has been decoded.
+
+**Next steps this fixture enables, with no new capture — in the order they should be tried:**
+
+1. **The three volatile bytes (`+22`/`+23`/`+24`).** Read the map twice inside ONE connection and twice across
+   connections, and see whether the trio is session-scoped (a nonce/counter) or per-read. This is cheap, it is
+   the only part of the reply that moves, and until it is explained nobody can use the reply's bytes as a stable
+   identity (the rule the cab-slot region already taught: never build on a volatile region).
+2. **The bit-level shape.** 220 of 576 bytes are single-bit values, which is what a bit-packed structure looks
+   like — NOT a table of ids. The next test is a decode attempt against a truth source already in the tree: the
+   per-family parameter tables (`blockParams.ts`, per-family param counts) and the editor layouts
+   (`ForgeFX/server/src/devices.ts`). A bitmap hypothesis predicts one bit per parameter, so a family's bit-run
+   length should equal its param count — falsifiable offline.
+3. **`0x03` / `0x1b` per-eid sweep against a known state.** These ARE address-dependent, so sweep byte 8 over eids
+   whose state the preset already tells us — the amp at `0x3a`, the twelve placed blocks the `fn=0x13` status
+   dump lists (`2a 2b 2e 3a 3e 42 46 4e 52 5a 5e 76`), and an eid for a block that is NOT placed — then bypass one
+   block through the route this stack already has, re-read, and restore. Predictions first, as always.
