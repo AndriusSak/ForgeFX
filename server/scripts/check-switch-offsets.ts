@@ -41,7 +41,7 @@
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, PP_ACTION_OFFSET, PP_TARGET_OFFSET, PP_MEASURED_OFFSETS } from 'forgefx-midi/devices/gen3';
+import { parsePresetDump, decodeRawPatch, findPerPresetSwitchBlock, parsePerPresetSwitches, PP_ACTION_OFFSET, PP_TARGET_OFFSET, PP_MEASURED_OFFSETS } from 'forgefx-midi/devices/gen3';
 
 interface Prediction {
   /** Offset from the marker. */
@@ -400,6 +400,62 @@ const STEPS: Step[] = [
       isPerformPageByte(o) ||
       ENUM_UNDECODED_RECORD_ROWS.some((i) => o >= at + 148 + 12 * (i - 1) && o < at + 148 + 12 * (i - 1) + 12) ||
       (o >= at + 52 && o < at + 100)
+  },
+  {
+    // R11-P0-C (2026-10-12): the owner set PP#1 → Looper: Half Speed, PP#2 → Utility: Scene Level + Save and
+    // PP#3 → Control Switch: Latching so that "the editor lists its entries in index order" — the ONE step of
+    // the owner's menu read-out that is an assumption rather than a measurement — could be tested. The three
+    // indices below were written down in review-2026-10-09/HARDWARE-ROUND-PLAN.md ("R11-P0-C") BEFORE the dump,
+    // and each is the LAST entry of its list (5 of six, 4 of five, 1 of two): deliberately non-zero and
+    // unique, because a FIRST entry would predict 0 under every candidate ordering and prove nothing.
+    //
+    // Everything else may differ, and does: between these two captures the owner rewrote rows freely, so the
+    // rest of the block is USER DATA, not model output. The allowance is therefore the WHOLE block, named as
+    // such — the teeth here are the six predicted bytes (the three indices and their rows' action codes).
+    from: '../test/fixtures/preset-switches/preset-410-enumeration.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11-p0c.bin',
+    predictions: [
+      { rel: PP_ACTION_OFFSET, want: 0x08, mustMove: true, what: 'PP#1 action code → 0x08 Looper' },
+      { rel: PP2_ACTION_REL, want: 0x05, mustMove: true, what: 'PP#2 action code → 0x05 Utility' },
+      { rel: PP3_ACTION_REL, want: 0x07, mustMove: true, what: 'PP#3 action code → 0x07 Control Switch' },
+      { rel: 52, want: 5, mustMove: true, what: 'PP#1 function index = 5 = Looper: Half Speed (PREDICTED — the menu order IS the wire index)' },
+      { rel: 54, want: 4, mustMove: true, what: 'PP#2 function index = 4 = Utility: Scene Level + Save (PREDICTED)' },
+      { rel: 56, want: 1, mustMove: true, what: 'PP#3 function index = 1 = Control Switch: Latching (PREDICTED)' },
+      // Regression snapshots, TRANSCRIBED after the capture — labelled as such, not sold as predictions. The
+      // same dump read two Effect rows at indices 2 and 3, which is the wire's own evidence that those entries
+      // exist (until now only Effect: Bypass = 0 and Chan Select = 1 had been seen).
+      { rel: 52 + 2 * 16, want: 2, mustMove: true, what: 'PP#17 function index = 2 (snapshot: Effect: Chan Toggle)' },
+      { rel: 52 + 2 * 17, want: 3, mustMove: true, what: 'PP#18 function index = 3 (snapshot: Effect: Chan Inc/Dec)' }
+    ],
+    allowedElsewhere: (o, at) => isPerformPageByte(o) || (o >= at + 4 && o < at + PP_HOLD_REL + 2 * 24)
+  },
+  {
+    // R11-A (2026-10-12) — THE HOLD WRITE, first time on a real unit. Pre-registered in
+    // review-2026-10-09/HARDWARE-ROUND-PLAN.md: PP#5 HOLD := Control Switch (0x07) through
+    // `PUT /preset/switches/5`, then read the EDIT BUFFER with a dump (the independent path — the route's own
+    // read-back is the path that wrote). The subject was chosen because its HOLD slot was ALREADY 0 in the
+    // pre-write capture: a slot already holding the value being written proves nothing about a write landing.
+    //
+    // What the two captures below show: exactly ONE byte moved, at marker+444 = 436 + 2×4 — PP#5's slot, in the
+    // HOLD array's own stride — and the restore's dump is byte-identical to the pre-write one (same sha256).
+    // The allowance is the perform page only, so "nothing else moved" is enforced rather than assumed.
+    from: '../test/fixtures/preset-switches/preset-410-r11-p0c.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11a-hold-pp5-after.bin',
+    predictions: [
+      { rel: PP_HOLD_REL + 2 * 4, want: 0x07, mustMove: true, what: 'PP#5 HOLD = 0x07 Control Switch — the first HOLD this stack has written to a real unit' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // The RESTORE half of R11-A. "Restored" here does not rest on the route's verdict (which echoes what we
+    // sent) but on a fresh dump agreeing with the pre-write capture; this step pins the byte, and the
+    // sha256 comparison is stated in the ROUND 11 result text.
+    from: '../test/fixtures/preset-switches/preset-410-r11a-hold-pp5-after.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11a-hold-pp5-restored.bin',
+    predictions: [
+      { rel: PP_HOLD_REL + 2 * 4, want: 0, mustMove: true, what: 'PP#5 HOLD back to 0 (Unassigned) — the restore, confirmed by dump and not by a same-path read-back' }
+    ],
+    allowedElsewhere: (o) => isPerformPageByte(o)
   }
 ];
 
@@ -421,6 +477,11 @@ export async function main(): Promise<number> {
   // The offsets must live in the DATA, and this script must not drift from them: every prediction below was
   // written against this table, so a change to it has to be re-stated here WITH a capture that proves it.
   const table = PP_MEASURED_OFFSETS;
+  // R11-P0-C's capture, decoded through the SHIPPED codec: the three rows the owner set on 2026-10-12 must NAME
+  // themselves out of PP_FUNCTION_NAMES. This is what keeps the menu read-out under the gate instead of in a
+  // document — a name edited wrongly, or a list trimmed, fails here rather than shipping.
+  const r11Rel = '../test/fixtures/preset-switches/preset-410-r11-p0c.bin';
+  const r11 = existsSync(new URL(r11Rel, import.meta.url)) ? parsePerPresetSwitches(load(r11Rel)) : null;
   const claims: Array<[string, boolean]> = [
     ['PP#1 action @4', table[1]?.actionCode === 4],
     ['PP#1 target @148', table[1]?.target === 148],
@@ -450,7 +511,11 @@ export async function main(): Promise<number> {
     ['the table holds all 24 OBSERVED indices', Object.keys(table).length === 24],
     ['exactly four rows have no located record+0 (18, 21, 22, 23)',
       [18, 21, 22, 23].every((i) => table[i] !== undefined && table[i]!.target === undefined)
-      && [14, 15, 16, 17, 19, 20].every((i) => table[i]!.target !== undefined)]
+      && [14, 15, 16, 17, 19, 20].every((i) => table[i]!.target !== undefined)],
+    // The 2026-10-12 menu read-out, checked against a real capture through the shipped decoder.
+    ['R11-P0-C capture: PP#1 decodes as Looper: Half Speed', r11?.switches[0]?.functionName === 'Half Speed'],
+    ['R11-P0-C capture: PP#2 decodes as Utility: Scene Level + Save', r11?.switches[1]?.functionName === 'Scene Level + Save'],
+    ['R11-P0-C capture: PP#3 decodes as Control Switch: Latching', r11?.switches[2]?.functionName === 'Latching']
   ];
   for (const [what, ok] of claims) {
     if (!ok) { console.log(`FAIL: the codec table no longer says "${what}" — the predictions below were written against that table`); bad++; }

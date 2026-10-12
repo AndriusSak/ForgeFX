@@ -57,8 +57,16 @@ export async function main(argv: string[]): Promise<number> {
     const code = (c: number | null, label?: string | null): string =>
       c === null ? 'code null (no observed offset)' : `code 0x${c.toString(16).padStart(2, '0')} (${label ?? 'unmeasured'})`;
     for (const s of block.switches.slice(0, Object.keys(PP_MEASURED_OFFSETS).length + 1)) {
+      // The anchor name is printed ONLY where the codec's own rule allows one (`targetIsFxSlot`). Printing it
+      // beside any located target byte was an over-claim of the same class the Axis panel was fixed for: this
+      // dump called a Looper row's record+0 "Amp 1" and a HOLD code 7 "Delay 1", neither of which is an FX slot.
+      const target = s.targetIndex === null
+        ? 'unlocated'
+        : s.targetIsFxSlot
+          ? `${s.targetIndex} (${s.targetLabel ?? 'unlabelled FX slot'})`
+          : `${s.targetIndex} (no FX-slot name — this row's category does not store one)`;
       console.log(`  PP#${s.index}  ${code(s.actionCode, s.action)}` +
-        ` → target ${s.targetIndex} (${s.targetLabel ? `${s.targetLabel} [FX-slot name — measured with Effect: Bypass only]` : 'unlabelled'})  [${s.confidence}]`);
+        ` → target ${target}  ${s.functionName ? `[tap: ${s.functionName}] ` : ''}[${s.confidence}]`);
     }
     // The RAW marker-relative window. The offsets the model reads are a handful, and a byte that moved where
     // the model says it should not is the interesting result — so print the bytes rather than only the
