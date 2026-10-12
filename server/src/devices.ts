@@ -727,9 +727,24 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
     mergedRanges[fam] = merged;
   }
 
-  // rangeSections: same static-then-cache merge (per family).
+  // rangeSections: the fn=0x1F CHANNEL-BLOCK WIRE STRIDE is a device-true, statically-measured constant
+  // (e.g. FM3 CABINET = 106; FM3_RANGE_SECTIONS, hardware-derived). The live self-describe walk CANNOT
+  // recover it: the cache builder writes `stride: sec.size` — the number of ordinary records the walk
+  // happened to observe for that block (FM3 CABINET: 63) — which is NOT the record stride. A cache row
+  // therefore refines a family's metadata (sectionTag / recordCount / instanceTags) but MUST NEVER
+  // override a stride the static profile already knows: `#channelSlice` multiplies that stride by the
+  // active channel to index the bulk body, so a wrong stride silently reads a DIFFERENT window of the
+  // SAME bytes. MEASURED 2026-10-12: a cache rebuild turned Cab Room Diffusion 0 → 52.287 (and Room
+  // Level 36.5 → 50, Mic Spacing 17 → 50) over a byte-identical edit buffer (one unrelated Tap Tempo
+  // byte) — a served value that is not a function of the device state alone. Only a family the static
+  // table lacks takes the cache's stride as a best-effort fallback (better than the itemCount/4 guess).
   const mergedSections: RangeSections = { ...staticProfile.rangeSections };
-  for (const [fam, meta] of Object.entries(built.rangeSections ?? {})) mergedSections[fam] = meta as unknown as RangeSections[string];
+  for (const [fam, meta] of Object.entries(built.rangeSections ?? {})) {
+    const stat = mergedSections[fam];
+    mergedSections[fam] = stat && stat.stride > 0
+      ? { ...(meta as RangeSections[string]), stride: stat.stride }
+      : (meta as RangeSections[string]);
+  }
 
   return {
     ...staticProfile,
