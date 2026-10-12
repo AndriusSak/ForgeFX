@@ -524,6 +524,37 @@ const STEPS: Step[] = [
       { rel: PP_HOLD_REL + 2 * 4, want: 0, mustMove: true, what: 'PP#5 HOLD back to 0 (Unassigned) — the restore, confirmed by dump and not by a same-path read-back' }
     ],
     allowedElsewhere: (o) => isPerformPageByte(o)
+  },
+  {
+    // R11-E (2026-10-12) — PP#21/#22/#23's record+0 LOCATED FOR PP#23. These three rows are the ones whose
+    // record+0 had no located offset, so a target write on them is refused per FIELD; in eighteen captures
+    // their whole 12-byte records had NEVER moved, so the field could not be ranked from them at all (the
+    // offline differential in review-2026-10-12/ANALYSIS-PP2123-OFFSETS.md could only propose record+0 on the
+    // strength of the PP#24 sibling). The owner then made exactly one configured change — per-preset switch
+    // #23 (Control Switch: Momentary), its Control Switch NUMBER 1 -> 4, nothing else — and this step is the
+    // prediction, written down BEFORE the capture existed, that only PP#23's record+0 moves and that it takes
+    // the zero-based number.
+    //
+    // MEASURED when it landed: the owner's edit moved EXACTLY ONE body byte in the whole preset —
+    // marker+412, 0x00 -> 0x03 — with the block's action code (marker+48 = 0x07 Control Switch) and function
+    // index (marker+96 = 0x00 Momentary) unchanged and PP#21/PP#22 untouched. That is why the allowance here
+    // is NOT the perform page but NOTHING: the two captures differ in one byte, so any other byte moving is a
+    // real failure rather than a tolerated unknown.
+    from: '../test/fixtures/preset-switches/preset-410-r11-pp17-target-restored.bin',
+    to: '../test/fixtures/preset-switches/preset-410-r11b-cs4.bin',
+    predictions: [
+      { rel: 148 + 12 * 22, want: 0x03, mustMove: true, what: 'PP#23 record+0 → 0x03 — the Control Switch LOCATION field, and zero-based (CS 4), which is what removes PP#23 from the unlocated set' },
+      { rel: 48, want: 0x07, mustMove: false, what: 'PP#23 action code stays 0x07 Control Switch' },
+      { rel: 96, want: 0x00, mustMove: false, what: 'PP#23 function index stays 0 (Momentary) — only the NUMBER was changed' },
+      { rel: 148 + 12 * 20, mustMove: false, what: 'PP#21 record+0 stays 0x00 (row untouched — the control)' },
+      { rel: 148 + 12 * 21, mustMove: false, what: 'PP#22 record+0 stays 0x00 (row untouched — the control)' },
+      { rel: 148 + 12 * 22 + 2, mustMove: false, what: 'PP#23 record+2 stays 0x00' },
+      { rel: 148 + 12 * 22 + 4, mustMove: false, what: 'PP#23 record+4 stays 0x00' },
+      { rel: 148 + 12 * 22 + 6, mustMove: false, what: 'PP#23 record+6 stays 0x00' },
+      { rel: 148 + 12 * 22 + 8, mustMove: false, what: 'PP#23 record+8 stays 0x00' },
+      { rel: 148 + 12 * 22 + 10, mustMove: false, what: 'PP#23 record+10 stays 0x00' }
+    ],
+    allowedElsewhere: () => false
   }
 ];
 

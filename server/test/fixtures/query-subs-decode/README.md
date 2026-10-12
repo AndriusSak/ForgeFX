@@ -868,6 +868,47 @@ positive control eid 62 / pid 25 agrees, and **5/5 probed GLOBAL pids agree** �
 So the PID-INDEXED GLOBAL read is confirmed by an independent opcode, and the "GLOBAL is inert/unreadable"
 posture in older notes is stale in BOTH directions.
 
+---
+
+## 8. PP#23's record+0 is LOCATED — the owner's one-switch edit moved EXACTLY ONE byte
+
+Offline first: an exhaustive differential over all eighteen `preset-410-*` captures
+(`ANALYSIS-PP2123-OFFSETS.md`, `tools/diff-pp2123.py`) showed that **no byte of PP#21/#22/#23's 12-byte records
+ever changed** — all 36 bytes are `0x00` in every capture — so the field could not be ranked from the corpus at
+all, and the report could only propose **record+0** on the strength of its sibling (PP#24, a Control Switch
+row, writes `0x03` at its own record+0 when its number is 4). That proposal was written down, with exact
+predicted bytes and a checker, BEFORE the capture existed.
+
+**The owner then made exactly one configured change** — per-preset switch **#23** (Control Switch: Momentary),
+its Control Switch **number 1 → 4**, nothing else, not saved — and the edit buffer was dumped with
+`scripts/dump-switch-fixture.ts` to `test/fixtures/preset-switches/preset-410-r11b-cs4.bin` (sha256
+`1ba818ab26dc`).
+
+**MEASURED: the edit moved EXACTLY ONE body byte in the whole preset — `marker+412`, `0x00` → `0x03`** (checked
+against both `preset-410-r11-pp17-target-restored.bin` and `preset-410-r11-bc-confirm.bin`: one differing byte
+each). The block's action code (`marker+48` = `0x07` Control Switch) and function index (`marker+96` = `0x00`
+Momentary) are unchanged, and PP#21/PP#22 are untouched.
+
+**Prediction PASSED 12/12** (`tools/check-pp2123-prediction.py`, exit 0): `record+0` IS the Control Switch
+LOCATION field and it holds the **zero-based** number — CS 4 reads `0x03`, an alternate outcome the checker also
+covers (`0x04` would have meant a one-based encoding). So **PP#23 leaves the "record+0 unlocated" set**, and its
+offset is the model's own formula, `148 + 12 × (23 − 1) = 412`. PP#21 (Utility: Tuner) and PP#22 (Looper) stay
+unlocated: their records have still never moved, and the same experiment on either of them is open.
+
+**Pinned as a gate step.** `scripts/check-switch-offsets.ts` gained the R11-E step
+(`preset-410-r11-pp17-target-restored.bin → preset-410-r11b-cs4.bin`) with ten predictions — the locating byte,
+the two controls, and the untouched fields — and `allowedElsewhere: () => false`, i.e. **any other byte moving
+is a failure rather than a tolerated unknown**, because the two captures differ in exactly one byte. The script
+reports `MODEL HOLDS on every captured step`, `extras: none`.
+
+**NOT yet shipped to the product:** `perPresetSwitches`' table still refuses a target write on rows 21/22/23
+per FIELD. Row 23's evidence now exists, so wiring it (one offset entry + a test + the codec rebuild) is a real
+shippable item — it changes a shipped path, so it needs the full `verify-stack.sh` gate.
+
+**Files added in ROUND 15 §8:** `test/fixtures/preset-switches/preset-410-r11b-cs4.bin`,
+`scripts/check-switch-offsets.ts` (the R11-E step), `tools/bodies/preset-410-r11b-cs4.hex`,
+`pp23-capture-01.tap`.
+
 **Files added in ROUND 15 §7:** the five reports + `tools/` under `review-2026-10-12/`,
 `scripts/probe-2e-lever-type.ts`, `scripts/probe-global-pidindex.ts`, `lever-type-01.tap`,
 `lever-type/*.tap`, `armG-01.tap`, `lever-check.tap`.
