@@ -717,6 +717,29 @@ every offset 20..25 decodes to `0`. What it is NOT is a per-read value: within e
 **Files added in ROUND 15 §4:** `scripts/probe-2e-record3.ts`, `review-2026-10-12/record3/` and
 `record3-run2/` (one tap per stage, named by state), `record3-run-0{1,2}.tap`, `record3-chain.json`.
 
+## 5. Record #3 is NOT time-driven and NOT a settling effect — but data 26 is bimodal across runs
+
+Two long read-only traces and one long held dwell, all on the live unit (`scripts/trace-2e-record3.ts`,
+`scripts/probe-2e-placement.ts --dwell 80`):
+
+- **100 reads over ~50 s with NOTHING happening: data 25..31 held one value, `46 50 4a 55 1a 04 40`**, the
+  whole time (only data 24 moved — 54 distinct values, the per-read trio again). ⇒ it is not time-driven.
+- **A placement held for 80 reads over 20 s: `4c 10` on every read. After the clear, 80 reads: `46 50` on
+  every read.** ⇒ there is no delayed settle and no drift while a state is held.
+- Two further runs of the §4 state chain (runs 3 and 4) reproduced the same content values for empty
+  (`46 50`), chorus 2 alone (`4c 10`) and comp 2 alone (`4d 10`) — **but data 26 took `0x50` for the
+  two-block state in two runs and `0x10` in the other two**, and in run 3 the ONE-block state showed BOTH
+  `4c 10` and `4b 50` inside a single 12-read stage. A `4b 50` sample had already been recorded once
+  mid-dwell in the ROUND 15 placement arm.
+
+So the honest position after four runs: **data 25 looks like a reproducible function of grid content**
+(`46` empty, `4c` chorus 2 alone, `4d` comp 2 alone, `52` two extra blocks) and **data 26 is bimodal for the
+two-block state** (`0x10`/`0x50`), with rare mixed samples (`4b 50`) that are not explained by time, by
+settling, or by any content difference we have captured. The encoding of data 25 remains uncracked.
+
+**Files added in ROUND 15 §5:** `scripts/trace-2e-record3.ts`, `review-2026-10-12/trace-record3-01.tap`,
+`placement-settle-01.tap`, `record3-run-0{3,4}.tap`, `record3-run{3,4}/`.
+
 ---
 
 ## What is explicitly NOT decoded
