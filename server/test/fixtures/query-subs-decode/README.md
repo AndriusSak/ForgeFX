@@ -901,7 +901,7 @@ the two controls, and the untouched fields — and `allowedElsewhere: () => fals
 is a failure rather than a tolerated unknown**, because the two captures differ in exactly one byte. The script
 reports `MODEL HOLDS on every captured step`, `extras: none`.
 
-**NOT yet shipped to the product:** `perPresetSwitches`' table still refuses a target write on rows 21/22/23
+**NOT yet shipped to the product:** `perPresetSwitches`' table still refuses a target write on rows 21/22 only — PP#23 LEFT that set on 2026-10-12, when the owner's Control Switch 1→4 edit moved `marker+412` and located its `record+0` (see `forgefx-midi` commit e98a409)
 per FIELD. Row 23's evidence now exists, so wiring it (one offset entry + a test + the codec rebuild) is a real
 shippable item — it changes a shipped path, so it needs the full `verify-stack.sh` gate.
 

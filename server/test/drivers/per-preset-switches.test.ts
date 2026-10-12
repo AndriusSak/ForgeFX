@@ -261,7 +261,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp2.actionCode, 0x03, 'PP#2 carries the scene-select code (the owner\'s second switch)');
     assertEqual(pp2.targetIndex, 1, 'and its target byte reads 1 — the number is the observation');
     assertEqual(page.evidence.actionCodeIndices.length, 24, 'all 24 action-code offsets are observed');
-    assertEqual(page.evidence.targetByteIndices.join(','), '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,24', 'while the located record+0 set still skips 21, 22, 23 — NOT a range, and not a count');
+    assertEqual(page.evidence.targetByteIndices.join(','), '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,23,24', 'while the located record+0 set still skips 21 and 22 only — NOT a range, and not a count. 23 JOINED the set on 2026-10-12 (its Control Switch 1→4 edit moved marker+412), so the skip is now the pair 21/22, not the triple 21/22/23');
   }
 
   // 11. The THIRD capture (C): PP#1 → Delay 2, and the flat-target-array reading refuted. PP#2's action
@@ -329,7 +329,7 @@ export async function runPerPresetSwitchDriverTests(): Promise<void> {
     assertEqual(pp12.actionCode, 0x04, 'PP#12 action code reads 0x04 at marker+26 — the stride covers the whole range');
     assertEqual(pp12.targetIndex, 3, 'PP#12 target reads 3 = Chorus 2 at marker+280 (predicted, then read)');
     assertEqual(pp12.targetLabel, 'Chorus 2', 'named by the anchor measured on 2026-10-07');
-    assertEqual(page.switches.filter((s) => s.confidence === 'partial').length, 3, 'and the three unlocated record+0 rows (21, 22, 23) are the only gap left');
+    assertEqual(page.switches.filter((s) => s.confidence === 'partial').length, 2, 'and the two unlocated record+0 rows (21, 22) are the only gap left — PP#23 left it on 2026-10-12. This is the THIRD place in this file that carried the 3-row claim: the codec change moved the count, the gate caught one assertion, and fixing only the reported line just exposed the next, so the claim has to be grepped for across the whole file, not patched where it first failed');
   }
 
   // 16. The EIGHTH capture (H): the unit has TWENTY-FOUR per-preset switches, not twelve — tested rather than
