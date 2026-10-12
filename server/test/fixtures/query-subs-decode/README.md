@@ -793,6 +793,66 @@ this stack's is known to), and why at3 ≠ 0 puts a REAL eid into the tag-02 cla
 **Files added in ROUND 15 §6:** `scripts/probe-1b-modes.ts`, `review-2026-10-12/1b-modes-01.tap`,
 `review-2026-10-12/ANALYSIS-1B-CONTENT.md`, `review-2026-10-12/tools/analyze-1b-content.py`.
 
+## 7. ROUND 15 — the four offline mines, and the three arms they pre-registered
+
+Four analyses were run OFFLINE (no serial port) over the committed corpus, each delivering a report plus a
+re-runnable tool under `review-2026-10-12/`, and each pre-registering one hardware arm. Three of those arms
+have now been run.
+
+| report | headline |
+|---|---|
+| `ANALYSIS-1B-CONTENT.md` (744 lines, 2708 replies) | the `0x1b` content = a c0..c4 PREFIX + a c5 TAG + c6-c8 always zero; the prefix is the variable (§6) |
+| `ANALYSIS-03-BYTE5.md` (379 replies) | see below — bytes 5-7 are ONE 21-bit free-running counter |
+| `ANALYSIS-2E-HEAD-RECORDS.md` (64 pinned taps, 835 replies) | **42 of 44 head records are ONE value in the whole corpus**; only #2 (per-read trio) and #3 move |
+| `ANALYSIS-PP2123-OFFSETS.md` (18 captures) | no byte of PP#21/#22/#23's records EVER changes, so the field cannot be ranked from them; record+0 is the rank-1 candidate via the PP#24 sibling |
+| `ANALYSIS-GLOBAL-READ-PATH.md` | **the premise is stale** — ADR-0003 was superseded by ADR-0004 and P13 (`ForgeFX 0ad0d86`); GLOBAL is served by pid from the eid-1 `fn=0x1F` body, so the live risk is a silently WRONG value, not a missing one |
+
+**1. `0x03` bytes 5-7 are ONE 21-bit counter (MEASURED, offline, no new hardware run).** `b5` = bits 0-6,
+`b6` = bits 7-13, `b7` = bits 14-20, counting at **93.754 units/s, mod 128³** — a single-clock fit over all
+74 eid-0x5e reads from 4 taps spanning 7629 s gives **rmse 2.6 units (~0.34 ppm)**, and the rate is
+cadence-independent (18 ms / 68 ms / 500 ms / 20 s idle / 30 s idle). "Data 5 is a mod-128 counter" is only
+its LOW-BYTE projection and "bytes 6/7 are static" is refuted; the mod-128 wrap was seen directly (`7e → 00`).
+The amp `0x3a` is different in kind: b5 steps **+1 per WRITE to that block** and is flat over an 18-read
+43 s read-only contrast, with b6/b7 never moving. **Bypass is REFUTED for the whole of bytes 5-7** — two rows
+with identical bypass state differ (`73 0e 01` vs `75 0e 01`). Only one bit of b5 cannot be decided from the
+corpus (a `+1`-per-write counter alternates bit0 exactly like ¬bypassed); separating that needs a non-bypass
+write, which is the next arm.
+
+**2. Lever A (model change in place) — H_TYPE REFUTED, measured on the unit.**
+`scripts/probe-2e-lever-type.ts` (dry-run by default) changed ONE bypassed block's model ordinal and changed
+it back: comp `0x2e`, type 16 "Rockguy Compressor" → 17 "Dynami-Comp Soft" → 16. The prediction was "a model
+change with the instance set unchanged moves NO head record". Result: **head record #3 moved — `46 50` →
+`4a 10` — with ZERO tail grid cells moving**, and reverted when the model was restored. So **data 25 is not
+placement-keyed: it tracks a block's MODEL too.** (The differ's generic verdict line reads
+`volatile / unattributable` because its table is written around tail-cell moves; for a param change with no
+tail move, "1 head record changed and reverted" is the finding.) Known data-25 values are now `46` base,
+`4a` comp model 17, `4c` chorus 2 placed, `4d` comp 2 placed, `52` both — all ≥ 0x46, which keeps a
+content-digest reading alive and is the next bounded test (checksum the BODY over those states, not the reply).
+
+**3. A type change is NOT cleanly reversible by writing the type back.** After the inverse write the
+edit-buffer body still differed in **3 bytes (7060, 7122, 7123)**; the arm's fallback reloaded the captured
+before-dump into the edit buffer (`loadPresetBytes`, NO slot written) and a fresh dump then read
+**byte-identical (sha `2353c8fa6fb89e0f`, the same sha every arm tonight produced)**. The unit was verified
+restored afterwards through an independent dump. **Lesson: for a param whose family re-initialises on change,
+the reverse write is not the restore — the body reload is.**
+
+**4. Arm G (GLOBAL position check) — the positional read is CONFIRMED.** `scripts/probe-global-pidindex.ts`
+(read-only) compares the pid-indexed eid-1 body against the independent `fn=0x01 sub 0x1a` per-pid read:
+positive control eid 62 / pid 25 agrees, and **5/5 probed GLOBAL pids agree** — 110 `65534`, 111 `8025`,
+7115 `42597`, 7116 `32767`, 3602 `1` vs `0` (Δ1, inside the 2-unit quantization tolerance of a 65534 scale).
+So the PID-INDEXED GLOBAL read is confirmed by an independent opcode, and the "GLOBAL is inert/unreadable"
+posture in older notes is stale in BOTH directions.
+
+**Files added in ROUND 15 §7:** the five reports + `tools/` under `review-2026-10-12/`,
+`scripts/probe-2e-lever-type.ts`, `scripts/probe-global-pidindex.ts`, `lever-type-01.tap`,
+`lever-type/*.tap`, `armG-01.tap`, `lever-check.tap`.
+
+**NOT run, pre-committed and waiting:** Lever B (add or remove a routing CABLE — predicts record #3 moves
+with data 26 changing while data 25 holds; `ANALYSIS-2E-HEAD-RECORDS.md` (d)) was deliberately NOT executed
+here: every form of it touches the owner's actual signal chain (a real cable has to be removed and re-made),
+and the safe form needs the source row of a target cell's feed to be READ first so the break lands on a
+branch (Out 2) rather than the chain. That is the next round's first item, prediction already written.
+
 ---
 
 ## What is explicitly NOT decoded
