@@ -553,6 +553,77 @@ regime change instead of costing a round, which is exactly what today's version 
 
 ---
 
+# ROUND 15 (2026-10-12, same unit, preset `"USA Mk IV"`) — the volatile set is DERIVED, and the oracle moves the subject
+
+Two read-only measurements, both on the live FM3, taken because the ROUND 14 mask (`--mask 22,23,24`) turned
+out to be a guess that the first ROUND 15 pairing contradicted. Nothing was written in either run.
+
+## 1. The per-read volatile set is 22/23/24 — but a body dump adds 25/26/27 for ~one read group
+
+**`scripts/probe-2e-volatility.ts`** (16 consecutive long `sub=0x2e` replies, ONE connection, nothing
+written, `sub 0x99` silent as the negative control, reply length and address echo asserted constant):
+**570 of 576 data offsets read one value in all 16 reads**; the offsets with a non-constant value are
+**22, 23 and 24** and nothing else. The derived mask equals the documented trio — 16 reads do not extend it.
+
+**The constraint is that the mask is only valid while the reply is undisturbed.** The first ROUND 15 pairing
+(two reads taken immediately after two edit-buffer BODY dumps) moved **22, 23, 25 and 27** — 24 did *not*
+move and 25/27 did. That is the same reply, the same preset, no write anywhere, and a different volatile
+FOOTPRINT, which is what "some preceding traffic leaves the region looking different" looks like.
+`scripts/probe-2e-dump-perturbation.ts` measured it as four read groups in one connection (4 reads each):
+
+| group | intervention before it | data 25 / 26 / 27 |
+|---|---|---|
+| A | none | `46` / `50` / `4a` — single values |
+| A2 | none (the self-drift control) | `46` / `50` / `4a` — **identical to A** |
+| B | one edit-buffer body dump (`fn 0x77/0x78/0x79`) | `{3c,44,46,7a}` / `{10,50}` / `{2a,4a}` — **moved** |
+| B2 | none | `46` / `50` / `4a` — back to canonical |
+| B3 | none | `46` / `50` / `4a` — holds |
+| C | one `fn=0x13` status dump | `46` / `50` / `4a` — unmoved |
+
+So: **the edit-buffer body dump transiently perturbs data 25/26/27 for about one 4-read group**, and by the
+next group the reply is back to the values two no-intervention groups agreed on. The `fn=0x13` status dump
+moves nothing. Reproduced on a second run with the same verdict (`dump-perturbation-02.tap`).
+
+**The operative rules this gives the `0x2e` arms:**
+- A mask of `22,23,24` is **incomplete for any run that dumps the body between stages**. The correct mask for
+  such a run is **22..27**, and the bytes it hides sit inside head records **#2 and #3** — so a change confined
+  to those two records is not visible to that arm. That blind spot must be stated with the result.
+- Alternatively: leave a **settle gap of one 4-read group** after any body dump and assert 25/26/27 read
+  `46/50/4a` before capturing a stage. (Those three values are what two independent no-intervention groups
+  produced — a same-session observation, not a device constant.)
+- The ROUND 14 `H_head` null (§7b) used `--mask 22,23,24`; its three stage taps were written at 15:57 and its
+  "0 of 44 head records changed" is what it reported. Nothing here contradicts that result — it is a caveat:
+  if a body dump preceded a stage capture in that run, record #3 could have flagged, and it did not.
+
+**Files added in ROUND 15 §1:** `scripts/probe-2e-volatility.ts`, `scripts/probe-2e-dump-perturbation.ts`,
+`review-2026-10-12/volatility-2e.tap` + `-01.tap`, `dump-perturbation-01.tap` + `-02.tap`,
+`volatility-2e.json`, `dump-perturbation.json`.
+
+## 2. The standing read (the instrument ROUND 14 asked for) — and the hole record's current regime
+
+`scripts/standing-read.ts` takes the four frames in one connection and **appends a dated JSONL line** to
+`~/repos/stack/standing-read.jsonl`: the hole record (`fn=0x01 sub=0x1b` at `[00 24 00 00 00]`), the preset
+name (`fn=0x0d`), the placed set (`fn=0x13`) and the scene index (`fn=0x0c`), with two controls (negative
+`sub 0x99` silent; the reply must have arrived). It is exported as `standingRead(session)` so any probe can
+put it at its head.
+
+Readings today, local time (the log stores UTC):
+
+| when | preset | scene | hole record (`payload[5..13]`) |
+|---|---|---|---|
+| 16:17 | `USA Mk IV` | 0 | `00 00 00 00 00 02 00 00 00` |
+| 16:21 | `USA Mk IV` | 0 | `00 00 00 00 00 02 00 00 00` |
+| 16:32 | `USA Mk IV` | 0 | `00 00 00 00 00 02 00 00 00` |
+
+All three are the **scene-index regime** (§9): scene 0, byte 0 = `00`. The other regime (`1b 14 4c 7a 0a 02 …`,
+whose byte 0 is not a legal scene index) is not present in any reading taken after 15:3x local, and the
+stack sent no frame that could have ended it — its end is therefore still undated, and the next transition
+is now DATED by construction rather than reconstructed by hand.
+
+**Files added in ROUND 15 §2:** `scripts/standing-read.ts`, `~/repos/stack/standing-read.jsonl`.
+
+---
+
 ## What is explicitly NOT decoded
 
 - The meaning of `0x2e`'s 576-byte region's **HEAD** (~44 8-byte records, all 20 one-hot ladders) and of the
