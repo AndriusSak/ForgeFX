@@ -740,6 +740,59 @@ settling, or by any content difference we have captured. The encoding of data 25
 **Files added in ROUND 15 §5:** `scripts/trace-2e-record3.ts`, `review-2026-10-12/trace-record3-01.tap`,
 `placement-settle-01.tap`, `record3-run-0{3,4}.tap`, `record3-run{3,4}/`.
 
+## 6. `0x1b`: the "hole record regime" and the "sentinel page" are ONE variable — the c0..c4 PREFIX
+
+Offline mining of the whole `0x1b` corpus (`review-2026-10-12/ANALYSIS-1B-CONTENT.md`, 2708 replies over 30
+taps) plus the pre-registered read-only arm it wrote (`scripts/probe-1b-modes.ts`, run 2026-10-12 17:37 on
+preset `USA Mk IV`, scene 0, standing read green).
+
+**Corpus invariants (MEASURED, hold on every row):** the reply echoes the 5-byte address (2708/2708, zero
+mismatches); content bytes c6/c7/c8 are ZERO in 2708/2708; address byte 7 (at0) nonzero ⇒ content all-zero,
+113/113; with at0 = at2 = at4 = 0 the content is reproducible per (at1, at3) — 380 pairs, no exceptions; at2
+and at4 are MODE bytes whose magnitude is ignored (15/15 each); the scene moves only the hole record (8/8)
+and everything else is scene-invariant (24/24, `1b-symmetry-scene.tap`).
+
+**The live arm's decisive row — and why the corpus misled it.** For the at4 ≠ 0 page the arm predicted the
+"sentinel" `1b 14 4c 7a 0a 03` (real eid) / `… 02` (hole eid). It read instead:
+
+| request | arm predicted | MEASURED 17:37 |
+|---|---|---|
+| Q1 `00 24 00 00 00` (hole, plain) | `00 00 00 00 00 02` | `00 00 00 00 00 02` ✔ |
+| Q2 `00 2a 00 00 00` (Out 1, plain) | `7f 7f 01 …` | `7f 7f 01 …` ✔ |
+| Q3 `00 46 00 00 00` (Delay 1, plain) | `47 42 00 …` | `47 42 00 …` ✔ |
+| Q4 `00 24 00 00 01` (hole, at4=1) | sentinel tag 02 | **`00 00 00 00 00 02`** ✘ |
+| Q5 `00 2a 00 00 01` (Out 1, at4=1) | sentinel tag 03 | **`00 00 00 00 00 03`** ✘ |
+| Q6/Q7 (at4 = 2 / 15) | == Q5 | == Q5 ✔ (at4's VALUE is ignored) |
+| Q8 `00 24 01 00 00` (hole, at3=1) | == Q1 | == Q1 ✔ (hole record is at3-independent) |
+| Q9 `00 2a 01 00 00` (Out 1, at3=1) | a value / a mask | **`00 00 00 00 00 02`** (tag 02 = the hole class) |
+| Q10 `sub 0x99` | SILENT | SILENT ✔ |
+
+**What that means, checked against the tap timestamps:** the prefix **c0..c4 is the variable**, and the tag
+byte **c5 is stable per address class** (03 = a real eid reached through the at4 page, 02 = the hole/default
+class, 00 = plain). Grouping every at4 ≠ 0 request in the corpus by tap:
+
+| tap (local) | content of the at4 ≠ 0 page |
+|---|---|
+| 13:57 `1b-address-selectors` | `1b 14 4c 7a 0a 00` ×15 (eid 0x46) |
+| 14:26 `…-rerun` | `1b 14 4c 7a 0a 00` ×15 (same requests) |
+| 14:19–14:43 `1b-fixed-records` | `1b 14 4c 7a 0a 03` ×308 real eids · `… 02` ×112 hole eids · all-zero ×14 · `01 60 03` ×7 · `01 00 00 …` ×7 (eid 0x3a) |
+| 15:33 `1b-symmetry` | 116 sentinel rows |
+| **17:37 (this arm)** | **`00 00 00 00 00 03` / `00 00 00 00 00 02`** — the same tags, a ZERO prefix |
+
+So the thing ROUND 14 called "the hole record's second regime" (`1b 14 4c 7a 0a 02` where byte 0 is not a
+legal scene) and the thing ROUND 14/15 called "the sentinel page" are **the same state**: the 5-byte prefix
+c0..c4 is either `00 00 00 00 00` (with c0 = the scene index for the hole record) or the constant
+`1b 14 4c 7a 0a` — and it flipped between 15:33 and 17:37 while the tag byte did not. **Any invariance claim
+computed over taps that mix the two prefix forms is a claim about a mixture**, which is exactly how the arm's
+Q4/Q5 predictions came to be wrong.
+
+**Consequences.** Report the prefix form with every `0x1b` value (the arm does); treat "the sentinel" as a
+prefix state, not a page; and note the two open questions this leaves: what makes the prefix flip (no frame of
+this stack's is known to), and why at3 ≠ 0 puts a REAL eid into the tag-02 class (Q9).
+
+**Files added in ROUND 15 §6:** `scripts/probe-1b-modes.ts`, `review-2026-10-12/1b-modes-01.tap`,
+`review-2026-10-12/ANALYSIS-1B-CONTENT.md`, `review-2026-10-12/tools/analyze-1b-content.py`.
+
 ---
 
 ## What is explicitly NOT decoded
@@ -755,7 +808,12 @@ settling, or by any content difference we have captured. The encoding of data 25
   alone, `4d` comp alone, `52` two blocks, identical across two independent runs) while **data 26 is not a
   clean function of it** (`0x10`/`0x50` for the same 2-block state in the two runs). What the numbers are —
   hash, index, size — is still open, and so is the meaning of data 26's second component.
-- `0x1b`'s content bytes. ROUND 13's "addressed read of a table, at[2]/at[4] selectors, at[3] an index joint
+- `0x1b`'s content MEANING is still open, but ROUND 15 §6 shrank it: the content is c0..c4 (a PREFIX that
+  takes two forms, `00 00 00 00 00` — with c0 = the scene index for the hole record — or the constant
+  `1b 14 4c 7a 0a`) plus c5 (a TAG stable per address class: 00 plain, 02 hole/default, 03 a real eid reached
+  through the at4 page) plus c6-c8 (ZERO in 2708/2708). So "the hole record's second regime" and "the
+  sentinel page" are ONE prefix state. Open: what flips the prefix, and why at3 ≠ 0 maps a real eid to tag 02.
+  ROUND 13's "addressed read of a table, at[2]/at[4] selectors, at[3] an index joint
   with the eid" survives; ROUND 14 adds that the selector replies carry nine content bytes, that the byte-9
   reply is the hole/default record, and that the hole record is time-varying. **The "21 bits" framing is dead —
   count the bytes from the tool, not from a sentence.**
