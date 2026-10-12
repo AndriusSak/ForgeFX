@@ -220,8 +220,9 @@ const STEPS: Step[] = [
       { rel: 44, want: 0x05, mustMove: true, what: 'PP#21 action code — Utility (the assignment was "Utility: Tuner", and 0x05 is the UTILITY category)' },
       { rel: 46, want: 0x08, mustMove: true, what: 'PP#22 action code — Looper (observed)' },
       { rel: 48, want: 0x07, mustMove: true, what: 'PP#23 action code — Control Switch (the owner confirmed this switch was Control Switch, not Layout)' },
-      // record+0, the "which one" byte — a scene number here, a preset number there, and ZERO for the four
-      // categories that do not select a target at all (18, 21, 22, 23) — hence no predictions for those.
+      // record+0, the "which one" byte — a scene number here, a preset number there, and ZERO in this capture for
+      // the rows whose category did not select one (18, 21, 22, 23) — hence no predictions for those. NOTE: a zero
+      // in THIS capture is what those rows read; PP#18 later left the unlocated set when an edit moved its byte.
       { rel: 304, want: 3, mustMove: true, what: 'PP#14 record+0 → 3 = SCENE 3 (not an FX slot: a scene action stores a scene number)' },
       { rel: 316, want: 7, mustMove: true, what: 'PP#15 record+0 → 7 = scene 7 (the pair proves the field is the scene number)' },
       { rel: 328, want: 1, mustMove: true, what: 'PP#16 record+0 → 1 (the second scene flavour)' },
@@ -236,8 +237,8 @@ const STEPS: Step[] = [
       { rel: 360, want: 1, mustMove: true, what: 'PP#18 record+8 → 1' },
       { rel: 382, want: 255, mustMove: true, what: 'PP#20 record+6 → 255 (low byte of a u16 at +6)' },
       { rel: 383, want: 1, mustMove: true, what: 'PP#20 record+7 → 1 (high byte: 0x01FF = 511)' },
-      // Tuner, Looper and the Control Switch row left the WHOLE record zero — 21, 22 and 23. Those are
-      // the four rows whose record+0 the codec therefore refuses to read or write.
+      // Tuner, Looper and the Control Switch row left the WHOLE record zero — 21, 22 and 23. Those are the THREE
+      // rows whose record+0 the codec still has no offset for, so a target write on them is refused per FIELD.
       { rel: 388, mustMove: false, what: 'PP#21 (Tuner) record stayed ALL ZERO — nothing to locate' },
       { rel: 400, mustMove: false, what: 'PP#22 (Looper) record stayed ALL ZERO' },
       { rel: 412, mustMove: false, what: 'PP#23 (Control Switch) record stayed ALL ZERO' },
@@ -572,13 +573,15 @@ export async function main(): Promise<number> {
     ['PP#24 target @424', table[24]?.target === 424],
     ['PP#14 action @30', table[14]?.actionCode === 30],
     ['PP#23 action @48', table[23]?.actionCode === 48],
-    // The count is 24 and every ACTION CODE is located; FOUR rows have no located record+0 (18, 21, 22, 23),
-    // because those categories leave that byte at zero — so the per-FIELD bound is the live claim, not a
+    // The count is 24 and every ACTION CODE is located; THREE rows have no located record+0 (21, 22, 23),
+    // because those rows have only ever read zero there — so the per-FIELD bound is the live claim, not a
     // per-index one. This is what keeps a stride or a "they all have targets" assumption from slipping in.
+    // PP#18 was the fourth until 2026-10-12, when the Cab 1 edit moved its record+0 (marker+352) and so LOCATED
+    // it: a zero is not an observation, but a byte that changes with its field is.
     ['the table holds all 24 OBSERVED indices', Object.keys(table).length === 24],
-    ['exactly four rows have no located record+0 (18, 21, 22, 23)',
-      [18, 21, 22, 23].every((i) => table[i] !== undefined && table[i]!.target === undefined)
-      && [14, 15, 16, 17, 19, 20].every((i) => table[i]!.target !== undefined)],
+    ['exactly three rows have no located record+0 (21, 22, 23)',
+      [21, 22, 23].every((i) => table[i] !== undefined && table[i]!.target === undefined)
+      && [14, 15, 16, 17, 18, 19, 20].every((i) => table[i]!.target !== undefined)],
     // The 2026-10-12 menu read-out, checked against a real capture through the shipped decoder.
     ['R11-P0-C capture: PP#1 decodes as Looper: Half Speed', r11?.switches[0]?.functionName === 'Half Speed'],
     ['R11-P0-C capture: PP#2 decodes as Utility: Scene Level + Save', r11?.switches[1]?.functionName === 'Scene Level + Save'],
