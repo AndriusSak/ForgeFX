@@ -538,6 +538,15 @@ at least two different regimes, and the 8-for-8 map above is measured in the *cu
 field in two regimes is a **state we have not characterised**, not a refutation of the map and not evidence
 against it.
 
+**And a tap-backed fact about who wrote what.** `setScene` on this unit is **not** `fn=0x0c` — the FM3 profile
+sets `sceneChannelWriteMode: 'fm3-edit-fn01'`, so a scene write is `fn=0x01 sub=0x24 0x00`. Grepping every tap
+in this directory for that frame: it appears in **exactly two files**, `1b-symmetry-scene.tap` (2 — scene 1,
+then the restore to 0) and `1b-hole-vs-scene.tap` (8 — the sweep), both authorised, both self-restoring, both
+ending at scene 0. **No other tap here holds a scene write, including all of ROUND 12/13** — so the
+13:57 → 14:20 change in the hole record has no frame of this stack's behind it, and the two scene arms are the
+only scene writes ROUND 14 made. (`fn=0x0c` frames exist only as the GET SCENE *read*, `… 0c 7f 67 f7`, in
+those same two taps.)
+
 **Cheap instrument, and the reason to add it now:** the hole record is worth four frames at the head of every
 probe run — (hole record, `fn=0x0d` preset name, `fn=0x13` placed set, **scene index**). That dates the next
 regime change instead of costing a round, which is exactly what today's version could not do.
