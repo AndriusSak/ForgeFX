@@ -370,6 +370,20 @@ exactly one head record changing 1:1 with the one tail cell ⇒ a per-placement 
 preset-static metadata; changes with no write ⇒ volatile, mask it; nothing moves ⇒ the region is a device
 constant. **Not yet run.**
 
+**The instrument exists and is proven able to fail (offline, 2026-10-12).**
+`scripts/diff-2e-head-vs-grid.ts` takes two or three taps (before / during / after) and prints one verdict line;
+it imports the repo's REAL `parseFm3GridLayout` rather than reimplementing the grid, and DERIVES the head/tail
+boundary from `FM3_REGION_OFFSET` / `FM3_BASE_BIT` at runtime (it prints the boundary in all four index
+conventions: region start = mido 366 = wire 367 = payload 360 = **data 355**, so head = 355 data bytes = 44
+8-byte records + 3 trailing bytes). `scripts/make-2e-head-selftest-taps.ts` writes four synthetic taps forcing
+the four verdicts; the parent session re-ran all four before adoption and all four fired, including the
+`device constant (nothing changed)` case a worthless tool could not return.
+
+**Operational caveat for the run, found while building it:** the documented per-read volatile trio sits at
+**data 22–24**, which lands inside head records **#2 and #3** at the data-0 anchor. An `H_head` run must mask
+those bytes (or use frames that are stable per stage), or a genuine one-record change is indistinguishable from
+the trio's drift. The tool labels that case `volatile / unattributable` rather than guessing.
+
 ## 8. Task 2's SYMMETRY half: the at1 and at3 axes are NOT one flat index (`H_FLAT` refuted)
 
 **Provenance:** `ForgeFX/server/scripts/probe-1b-symmetry.ts`, READ-ONLY (no writes at all), run on the live FM3,
@@ -412,7 +426,35 @@ and no write has been approved on this unit since ROUND 13's self-restoring bypa
 arm behind `--with-scene` and refuses to run it by default; the anchor set and the four-stage design are in the
 handover. The read-only half wrote nothing.
 
-### Files added in ROUND 14 §8
+### 8b. Independent re-derivation of §8 — agrees on every published number, and adds three caveats
+
+An independent child re-derived §8 from `1b-symmetry.tap` alone (own parser, 584 pairs, echo check 0 mismatches)
+without reading this README or the tool. **Every published number reproduced**: `V(0x46)` = 23 distinct,
+`V(0x3a)` = 37 distinct, the at1 maps at 8 / 9 / 8 distinct, and the whole translation table
+(`U(0x01)` vs `V(0x46)` best Δ=42 → 8 of 22 differ; `U(0x08)` vs `V(0x3a)` best Δ=−5 → 46 of 59). It also
+reproduced the same-axis rows independently as at3-vs-at3: `0x00↔0x01` 11/64, `0x00↔0x08` 13/64, `0x01↔0x08`
+13/64.
+
+**Three caveats it found that this section did not state. They are all now part of the record:**
+
+1. **`1b-symmetry.tap` contains NINE 64-row sweeps, not five — `FORGEFX_TAP` APPENDS.** The first (superseded)
+   version of the tool ran four at1-sweeps into the same file before the fixed version added its five. A reader
+   parsing that tap must segment it (the second block starts after the four warm-up control pairs at indices
+   260–263) or, as the analyses here do, take the LAST occurrence of each `(at1, at3)` tuple. Both the parent
+   and the child took the last; the numbers agree. **From here on, name the tap per run** — an appending tap
+   that cannot be told apart from a sibling run's is not provenance, which is the rule the handover already
+   carries.
+2. **The at1 maps are byte-identical ACROSS runs.** The run-1 and run-2 sweeps of the same tuple diff by **0**:
+   `at3=0x00` three times, `at3=0x01` twice, `at3=0x08` twice. So the at1 axis is reproducible across separate
+   sessions ~10 minutes apart — which is the opposite of the hole record's behaviour and makes it the *right*
+   axis to key anything on.
+3. **Ratios computed on a handful of rows are artefacts, and the null is pooling-dependent.** For the
+   `at1=0x3a` pairs the argmin can land at |Δ|≈62 with only **2** compared rows and a ratio of 0.5 that means
+   nothing (at Δ=0 that pair differs ~0.86). And "chance" is not one number: `sum(p²)` = **0.250** over the five
+   distinct maps, **0.299** over all nine runs, **0.370** over the first block alone. §8 quotes 0.250; say which
+   pooling a null came from.
+
+**Files added in ROUND 14 §8**
 
 | file | produced by | what it holds |
 |---|---|---|
