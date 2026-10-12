@@ -89,6 +89,13 @@ each, restore proven through the fn=0x13 status dump — a different path than t
 | `0x5e` | 5 reads × 3 stages | **DRIFTS 5/5** | byte 5 advances **+6 per READ** (64,6a,70,76,7c …); byte 6 steps at a write | the field moves **on reads alone** — no write is needed |
 | drift control (no write) | `0x3a`, `0x25`, `0x2a` | stable | — | those eids are stable without a write; `0x5e` is not |
 
+> **"+6 per READ" IS REFUTED — see the ROUND 14 §6 cadence test.** The step is not per read: it is a
+> **free-running counter at ≈93.8 units/s, mod 128**, sampled when the reply is built. At the arm's fixed
+> 64 ms cadence that is *exactly* 6.0 units, which is why a hand-read of the arm looked per-read — the
+> description does not survive its own drift control, which read at 128 ms and moved +12 per read. Measured
+> against idle windows with **zero frames on the bus**: 20 s → +85, 30 s → +1, both matching the clock
+> within 1 unit where the counter predicts +6; 19 reads across 351 ms → +33 where the counter predicts +114.
+
 **Verdicts, honestly split**
 
 - **H1 (pure request echo) REFUTED** for `0x03`: identical requests give per-eid and time-varying data.
@@ -96,7 +103,8 @@ each, restore proven through the fn=0x13 status dump — a different path than t
   not the only thing that moves this field (see `0x5e`), and this design cannot separate a bypass-induced step
   from the read-driven drift. **Nothing about the bypass flag is published.**
 - **What IS established:** `0x03[sel=01]` is a genuine per-eid read whose bytes 5-7 are **not usable as stable
-  identity** — at least one placed block's field advances on reads alone.
+  identity** — and ROUND 14 §6 shows *why* for byte 5 on `0x5e`: it is a free-running counter, so it moves
+  whether or not you read it.
 - **`0x1b` is the stable one**: per-eid, reproducible, unmoved by reads and writes. It is the better candidate
   for a next round, and its `sel=00`/`sel=01` split (data vs all-zero) is a clean selector.
 
@@ -263,6 +271,18 @@ between two independent reads: `0x2e[sel=1]` returns trailer `02` for exactly 16
 the 16 eids whose zeroed-tail `0x1b` record is the default/hole record. The eid space's holes are therefore
 visible from two different sub-actions.
 
+## 5b. `0x03` byte 5 on `0x5e` is a FREE-RUNNING COUNTER at ≈93.8 units/s — "+6 per READ" is refuted (§6)
+
+Landed by the ROUND 14 §6 cadence test below; the correction is repeated here because the old wording is
+quoted in three places.
+
+## 5c. `sub=0x2e` IS `SUB_LAYOUT_MAP` — part of that region was never anonymous (§7)
+
+The region is not an unexplained bitfield: `SUB_LAYOUT_MAP = 0x2e` (`forgefx-midi/src/devices/gen3/simResponders.ts`)
+and the repo's own `parseFm3GridLayout` decodes the reply's TAIL to grid cells whose effectIds are **exactly** the
+13 placed eids from an independent `fn=0x13` dump (`SET-EQUAL=true`). The 20 one-hot ladders live in the
+**head**, which stays unexplained. Full detail in §7.
+
 ## 5. What ROUND 14 does NOT claim
 
 - The five content bytes `1b 14 4c 7a 0a` are **not decoded**. They are not a name, not a param count (the
@@ -277,13 +297,88 @@ visible from two different sub-actions.
 |---|---|---|
 | `1b-fixed-records.tap` | `probe-1b-fixed-records.ts` (read-only) | selector sweeps, `at[1]` sweeps under each selector, the `0x2e` selector sweep 0x00..0x0f, and the `0x2e[1]` vs `0x1b[at4=1]` eid comparison |
 | `1b-address-selectors-rerun.tap` | `probe-1b-structure.ts --index-sweep 0x46` (read-only) | the ROUND 13 sweep re-run at 14:26; TX sequence byte-identical to `1b-address-selectors.tap` (13:57), one record different |
+| `03-cadence-5e.tap` | `probe-03-cadence.ts` (read-only) | the §6 cadence test: 64 ms / 500 ms / tight read blocks, two idle windows with zero frames, and the `0x3a` contrast |
+
+## 6. `0x03[sel=01]` byte 5 on `0x5e` is a free-running counter at ≈93.8 units/s — NOT a per-read step
+
+**Provenance:** `ForgeFX/server/scripts/probe-03-cadence.ts` (READ-ONLY), run on the live FM3, same preset
+(`fn=0x0d` = "USA Mk IV") and same 13 placed eids. Tap `03-cadence-5e.tap`, log
+`review-2026-10-12/probe-03-cadence.out`. Predictions for three candidate mechanisms were committed in the tool
+header before the first frame was sent.
+
+The discriminator is the **idle window**: nothing is sent for 20 s / 30 s, so a per-read counter can only move
+by its per-read step, while a free-running clock must move by rate × time. Frames arriving during each window
+were COUNTED (`transport.onFrame`), not assumed away.
+
+| block | Δt | reads | measured Δ | clock (≈93.8/s, mod 128) | counter (+6/read) |
+|---|---|---|---|---|---|
+| A (8 reads @64 ms) | 68–70 ms each | 1 | **+6/+7** | 6–7 | 6 |
+| **I20** (idle, 0 frames) | 20 024 ms | 1 | **+85** | 86 | 6 |
+| **I30** (idle, 0 frames) | 30 050 ms | 1 | **+1** | 2 | 6 |
+| B (8 reads @500 ms) | ~500 ms each | 1 | **+46…+48** | 47 | 6 |
+| C (20 tight reads) | 18–19 ms each | 1 | **+1/+2** | 2 | 6 |
+| **C first→last** | 351 ms | 19 | **+33** | 33 | 114 |
+| contrast: `0x3a` over a 20 s idle | 20 037 ms | 1 | **0** | 87 | 6 |
+
+- **I20/I30 carry ZERO frames** and still move — by +85 and +1. The counter predicts +6 for both. Note the
+  30 s case is the wrap: 93.78 × 30.05 s = 2818 units, and `2818 mod 128 = 2`, so the field lands 2 units above
+  where it started — the residue is *not* 125 only because the two reads themselves take 50 ms. Both windows
+  agree with the clock **within 1 unit**, and both are impossible for any per-read step.
+- **C first→last is the cleanest refutation of the counter**: 19 reads, +33 measured, +114 predicted.
+- **The contrast is what makes it specific**: in the same 20 s, `0x5e` moved +85 and eid `0x3a` moved **0**.
+  So this is not a bus-wide or global clock leaking into every reply; `0x3a`'s byte 5 is genuinely
+  write-driven (`+1` per write, unchanged across a 33 s idle in the ROUND 12 arm).
+- **The stability control had to be a NON-drifting eid.** A first version of this tool used the target itself
+  as its own control and aborted with `3b 3d 3f` — i.e. it failed on exactly the behaviour under test. Fixed:
+  eid `0x46` answers `39 39 39` and the target's own drift is reported, not policed. **A stability control
+  must be measured on a row you do not expect to move.**
+- Rate from this run: 93.74–94.0 units/s (I20 93.74, I30 93.74, B 94.0, C 94.0), independently agreeing with
+  an offline fit of the ROUND 12 arm taps at 93.78 units/s.
+- **Consequence for the record:** the ROUND 12 arm's "byte 5 advances +6 per READ" is a CADENCE ARTEFACT — 6.0
+  units is exactly 64 ms at 93.8/s. Their own drift control read at 128 ms and moved +12 per read, so the
+  description did not survive its own control. Nothing about the bypass flag changes; the "cannot separate
+  bypass-induced step from drift" verdict is now explained rather than merely cautious.
+
+## 7. `sub=0x2e` IS `SUB_LAYOUT_MAP` — the region is two structures, and the ladders live in the unexplained head
+
+**Provenance:** offline only, no hardware. `forgefx-midi/src/devices/gen3/simResponders.ts` names
+`SUB_LAYOUT_MAP = 0x2e`; the repo's `parseGen3GridLayout` / `parseFm3GridLayout`
+(`forgefx-midi/src/gen3/axe-fx-iii/gridLayout.ts`) decode it, with `FM3_REGION_OFFSET = 366`, `FM3_BASE_BIT = 6`,
+a column-major 12×4 grid, one 32-bit big-endian record per cell, empty cell = all zero. Run against
+`2e-volatility-64sample.tap`, the parser returns **13 cells whose effectIds are exactly the 13 placed eids** from
+the independent `fn=0x13` status dump (`SET-EQUAL=true`).
+
+**So the 576-byte region is not one anonymous bitfield:**
+- **tail** (the grid region) — decoded by the repo, matches the placed set;
+- **head** — 8-byte-periodic, holds **all 20** one-hot ladders (`40 20 10 08 04 02 01`, longest run 7, every one
+  starting at offset ≡ 7 mod 8, range 39…343), and is **not decoded**.
+
+Three further hypotheses for the ladders were killed offline, so they are not worth hardware time:
+1. **"The ladders are grid/cell fields"** — no: they all lie *before* the grid region the repo's own offsets
+   define, and no ladder byte is inside it.
+2. **"record count = number of families"** — no: the head holds ~44 8-byte records; the repo's counts are 47
+   catalog families / 46 eid-map entries / 40 block families / 48 grid cells. None matches.
+3. **"a family record can index its params"** — no: a record is 8 B, and the largest family (GLOBAL, 173 params)
+   cannot be indexed by 64 bits. Also "the region is a preset-body u16 param array" dies on stride (measured
+   period 8, not 2) and on size (576 B = 288 u16 matches no FM3 family).
+
+**What this changes:** task 4's premise ("name the ladder, or leave it killed") resolves as *neither wholly* —
+the region is partly named already, and the remaining question is scoped to the head. The one falsifiable test
+left there is `H_head`: move ONE block to another grid cell (or toggle its bypass) with the no-write drift
+control and 5 reads per stage, and count **how many of the ~44 head records change**. Pre-committed meanings:
+exactly one head record changing 1:1 with the one tail cell ⇒ a per-placement state table; zero ⇒ the head is
+preset-static metadata; changes with no write ⇒ volatile, mask it; nothing moves ⇒ the region is a device
+constant. **Not yet run.**
 
 ---
 
 ## What is explicitly NOT decoded
 
-- The meaning of `0x2e`'s 576-byte region, of its ~20 one-hot ladders, or of the `+22..+24` trio.
-- What `0x03`'s bytes 5-7 count, and why one block's advances on reads while another's waits for a write.
+- The meaning of `0x2e`'s 576-byte region's **HEAD** (~44 8-byte records, all 20 one-hot ladders) and of the
+  `+22..+24` trio. The region's TAIL is the repo's own grid layout and IS decoded (§7).
+- What `0x03` byte 5 *counts*. Its mechanism on `0x5e` is now measured — a free-running ≈93.8 units/s counter,
+  mod 128 (§6) — and `0x3a`'s is write-driven, but what either number MEANS is open.
+- Whether the ~44 head records track placement (`H_head`, §7) — the one falsifiable test left there.
 - `0x1b`'s content bytes. ROUND 13's "addressed read of a table, at[2]/at[4] selectors, at[3] an index joint
   with the eid" survives; ROUND 14 adds that the selector replies carry nine content bytes, that the byte-9
   reply is the hole/default record, and that the hole record is time-varying. **The "21 bits" framing is dead —
