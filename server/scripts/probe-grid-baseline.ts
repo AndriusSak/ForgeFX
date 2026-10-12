@@ -50,6 +50,9 @@ import { parsePresetDump, decodeRawPatch } from 'forgefx-midi/devices/gen3';
 const MODEL = 0x11;
 const EDIT_BUFFER = 0x3fff;
 const CONTENT_BASE = 12;
+/** DERIVED mask (probe-2e-volatility + probe-2e-dump-perturbation, 2026-10-12): per-read 22/23/24 plus the
+ *  25/26/27 transient a body dump leaves — and this script dumps the body, so the wide mask is the right one. */
+const MASK = [22, 23, 24, 25, 26, 27];
 const TRIO = [22, 23, 24];
 const hex = (b: readonly number[]) => b.map((x) => x.toString(16).padStart(2, '0')).join(' ');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -139,10 +142,14 @@ export async function main(argv: string[]): Promise<number> {
       dumpCells.set(k, d);
     }
     console.log(`   dump path: ${g.model} “${g.name}” grid ${g.rows}x${g.cols} · ${g.cells.length} cell(s) decode`);
-    for (let row = 1; row <= g.rows; row++) {
+    // THE DUMP PATH IS 0-BASED (parseGen3GridLayout loops row/col from 0); the WRITE contract
+    // (`placeCell` / PUT /preset/grid/cell) is 1-BASED. Both are printed so no reader has to guess which
+    // base a number is in — a one-cell slip lands a block in the wrong cell.
+    console.log('     dump(r,c) 0-based  →  route row/col (1-based, what a write takes):');
+    for (let row = 0; row < g.rows; row++) {
       const line: string[] = [];
-      for (let col = 1; col <= g.cols; col++) line.push((dumpCells.get(`${row},${col}`) ?? '?').padEnd(13));
-      console.log(`     row ${row}: ${line.join('')}`);
+      for (let col = 0; col < g.cols; col++) line.push((dumpCells.get(`${row},${col}`) ?? 'empty').padEnd(13));
+      console.log(`     ${row} (route row ${row + 1}): ${line.join('')}`);
     }
 
     const longReplies: number[][] = [];
@@ -155,10 +162,13 @@ export async function main(argv: string[]): Promise<number> {
     console.log(`   sub=0x2e: ${longReplies.length}/${reads} long reply(ies)${longReplies[0] ? ` · ${longReplies[0].length}B` : ''}`);
     if (longReplies.length === reads) {
       const contents = longReplies.map((f) => f.slice(CONTENT_BASE, f.length - 2));
-      const minusTrio = (c: readonly number[]): string => hex(c.map((b, i) => (TRIO.includes(i) ? 0 : b)));
-      const stable = new Set(contents.map(minusTrio)).size === 1;
-      console.log(`   sub=0x2e stability outside the volatile trio ${TRIO.join('/')}: ${stable ? 'STABLE' : 'DRIFT'}`);
-      if (!stable) problems.push('sub=0x2e reply drifts outside the volatile trio across reads');
+      const minusMask = (c: readonly number[]): string => hex(c.map((b, i) => (MASK.includes(i) ? 0 : b)));
+      const stable = new Set(contents.map(minusMask)).size === 1;
+      // NOTE the mask is 22..27, not the documented trio 22..24: THIS script dumped the body twice just
+      // above, and `probe-2e-dump-perturbation.ts` measured that a body dump transiently moves data 25/26/27
+      // for about one 4-read group. Comparing against the trio here would flag our own oracle as drift.
+      console.log(`   sub=0x2e stability outside the derived mask ${MASK.join('/')} (trio + the body-dump transient): ${stable ? 'STABLE' : 'DRIFT'}`);
+      if (!stable) problems.push(`sub=0x2e reply drifts outside the derived mask ${MASK.join(',')} across reads`);
       const stage = join(outdir, 'placement-baseline-2e.tap');
       writeFileSync(stage, longReplies.map((f) => `${Date.now()} RX ${hex(f)}`).join('\n') + '\n');
       console.log(`   wrote ${stage} (usable as the arm's BEFORE stage)`);
@@ -168,19 +178,19 @@ export async function main(argv: string[]): Promise<number> {
 
     // ── 4. empty cells ──────────────────────────────────────────────────────────────────────────
     const empties: string[] = [];
-    for (let row = 1; row <= g.rows; row++) for (let col = 1; col <= g.cols; col++) {
+    for (let row = 0; row < g.rows; row++) for (let col = 0; col < g.cols; col++) {
       const d = dumpCells.get(`${row},${col}`);
-      if (d === undefined || d === 'empty') empties.push(`r${row}c${col}`);
+      if (d === undefined || d === 'empty') empties.push(`route r${row + 1}c${col + 1}`);
     }
     const occupied = [...dumpCells.entries()].filter(([, d]) => d.startsWith('block'));
-    console.log(`\n── 4. move targets ──`);
-    console.log(`   occupied block cells: ${occupied.length} → ${occupied.map(([k, d]) => `${k}:${d}`).join(' · ')}`);
+    console.log(`\n── 4. move targets (ALL coordinates below are the 1-BASED route pair a write takes) ──`);
+    console.log(`   occupied block cells: ${occupied.length} → ${occupied.map(([k, d]) => { const [r, c] = k.split(',').map(Number); return `r${r! + 1}c${c! + 1}:${d}`; }).join(' · ')}`);
     console.log(`   EMPTY cells (verified-empty candidates): ${empties.length} → ${empties.join(' ')}`);
     if (empties.length === 0) problems.push('no empty cell to move a block into — the placement arm is not runnable');
 
     // ── 5. is the edit buffer in sync with the stored slot? ─────────────────────────────────────
     console.log('\n── 5. edit buffer vs the STORED slot (does the reload-last-resort undo exist?) ──');
-    const ref = await session.driver.presetRef();
+    const ref = (await session.driver.presetRef?.()) ?? { number: -1, name: '<unavailable>' };
     console.log(`   presetRef: number ${ref.number} · name “${ref.name}”`);
     if (ref.number > 0 && session.driver.backupPreset) {
       try {
