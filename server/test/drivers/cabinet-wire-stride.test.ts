@@ -1,5 +1,5 @@
 // The fn=0x1F channel-block WIRE STRIDE is a device-true CONSTANT; a device-cache rebuild must not
-// change it.
+// change it — and the cache contributes NOTHING to wire geometry.
 //
 // INCIDENT (measured on the owner's FM3, 2026-10-12, preset 410 "USA Mk IV", Cab eid 62):
 //   The unit's own screen read Room Diffusion = 0. The server served 52.287 for the SAME block, from a
@@ -12,7 +12,7 @@
 //
 // ROOT CAUSE: blockParams indexes the bulk body at `base + pid`, where
 //   base = min(activeChannel, channelCount-1) * stride   (#channelSlice, gen3.ts)
-// and `stride` comes from profile.rangeSections[family].stride. runtimeProfileFrom merges the device
+// and `stride` comes from profile.rangeSections[family].stride. runtimeProfileFrom merged the device
 // cache's rangeSections OVER the static ones, and the cache builder writes `stride: sec.size`
 // (forgefx-midi/src/cache/assign.ts) — the number of ordinary records the self-describe walk happened
 // to observe, NOT the device's channel-block stride. For the FM3 Cab the walk recorded stride 63 while
@@ -21,6 +21,14 @@
 // (wrong): the block decoded a DIFFERENT 14-record window of the same body, so every Room/Air value
 // moved while the hardware held still. Served value = f(device bytes, channel base), and the base
 // depends on the cache — which is why a cache rebuild silently changed what the app displayed.
+//
+// THE HARDENING (this round): the merge fix upstream (36537e2) only preserved the STRIDE — it still
+// spread the cache meta's sectionTag/recordCount over the static row, and it still let a cache row for
+// a family the static table LACKS supply a stride. Bad strides are already PERSISTED in the
+// deviceCaches store (services/deviceCache.ts putDoc) and can also arrive from imports/cloud pulls, so
+// any read-side path that takes a stride from a cache row is a latent repeat. runtimeProfileFrom now
+// returns the STATIC rangeSections verbatim (no overlay at all). Cases 1-2 pin that; cases 3-5 keep the
+// original end-to-end incident reproduction.
 //
 // Both bases are pinned below against the REAL captured Cab body (GET /preset/blocks/62/raw): at base
 // 318 index 318+59 yields raw 0 (Diffusion 0, the unit's screen) and at base 189 index 189+59 yields
@@ -39,6 +47,8 @@ const CAB_EID = effectRoster().find((e) => e.slug === 'cab')!.page; // 62
 const CAB_CHANNEL = 3; // the preset's Cab block sits on channel D (the incident's active channel)
 /** The device-true fn=0x1F channel-block stride (FM3_RANGE_SECTIONS.CABINET, a measured constant). */
 const DEVICE_STRIDE = 106;
+/** The static profile's declared CABINET record count (ordinary + the 4 special cab-table records). */
+const STATIC_RECORD_COUNT = 110;
 /** What the live self-describe walk recorded for the same family (assign.ts `stride: sec.size`). */
 const CACHE_STRIDE = 63;
 const CAB_ITEM_COUNT = 424; // 4 channels x 106 records, measured (max nonzero index 423)
@@ -99,13 +109,17 @@ const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
 const compactHex = (f: readonly number[]) => f.map((x) => x.toString(16).padStart(2, '0')).join('');
 const statusFrame = (eid: number, channel: number): number[] => sysex(0x13, [...enc14(eid), (channel << 1)]);
 
-/** A synthetic on-connect cache whose ONLY CABINET stride is the walk's observed record count (63). */
+/** A synthetic on-connect cache whose CABINET stride is the walk's observed record count (63), plus a
+ *  family (`WIDGET`) the static FM3 table has NO entry for — the cache must not inject one either. */
 function cacheWithObservedCabStride(): BuiltCache {
   return {
     model: MODEL,
     firmware: '13.0',
     ranges: {},
-    rangeSections: { CABINET: { sectionTag: 62, stride: CACHE_STRIDE, recordCount: CACHE_STRIDE } },
+    rangeSections: {
+      CABINET: { sectionTag: 62, stride: CACHE_STRIDE, recordCount: CACHE_STRIDE },
+      WIDGET: { sectionTag: 250, stride: CACHE_STRIDE, recordCount: CACHE_STRIDE }
+    },
     enumOverrides: {},
     rosters: {},
     cabIrs: {},
@@ -136,46 +150,65 @@ async function serveCabDiffusion(profile: (typeof PROFILES)[number]) {
   return params.named.find((n) => n.id === 59); // Room Diffusion
 }
 
-export const CABINET_WIRE_STRIDE_CASE_COUNT = 4;
+export const CABINET_WIRE_STRIDE_CASE_COUNT = 5;
 
 export async function runCabinetWireStrideTests(): Promise<void> {
   const staticProfile = PROFILES[MODEL]!;
   const cache = cacheWithObservedCabStride();
   const merged = runtimeProfileFrom(cache, staticProfile);
 
-  // ── 1. THE REGRESSION (merge invariant): a cache row may refine a family but MUST NOT override the
-  //    device-true channel-block stride. Before the fix the walk's observed count (63) won and the
-  //    channel base moved. ──
-  assertEqual(merged.rangeSections['CABINET']!.stride, DEVICE_STRIDE,
-    `case 1: runtimeProfileFrom must keep the device-true CABINET wire stride (${DEVICE_STRIDE}), not the cache's observed record count`);
-  assertEqual(merged.rangeSections['CABINET']!.recordCount, CACHE_STRIDE,
-    'case 1: the cache row still refines non-stride metadata (recordCount)');
+  // ── 1. WIRE GEOMETRY IS NOT OVERLAYABLE. `rangeSections` must come from the STATIC profile verbatim:
+  //    the stride (106) AND the non-stride metadata (recordCount 110, sectionTag 11) are hardware
+  //    facts, not cache facts, and the returned table must be the static one itself (no cache row,
+  //    for ANY family, may touch it). FAILS BEFORE the hardening, which spread the cache's
+  //    sectionTag/recordCount over the static row (recordCount read 63). ──
+  {
+    assert(merged.rangeSections === staticProfile.rangeSections,
+      'case 1: runtimeProfileFrom must return the STATIC rangeSections table (wire geometry is not cache-overlayable)');
+    assertEqual(merged.rangeSections['CABINET']!.stride, DEVICE_STRIDE,
+      `case 1: the device-true CABINET wire stride must be ${DEVICE_STRIDE}, not the cache's observed record count ${CACHE_STRIDE}`);
+    assertEqual(merged.rangeSections['CABINET']!.recordCount, STATIC_RECORD_COUNT,
+      `case 1: the CABINET recordCount must be the static ${STATIC_RECORD_COUNT}, not the cache's ${CACHE_STRIDE} (no non-stride metadata overlay either)`);
+  }
 
-  // ── 2. THE INCIDENT, end to end: with that cache present, the driver must decode the SAME window the
+  // ── 2. A family the static table LACKS must NOT be injected from the cache. Before the hardening the
+  //    cache fallback installed `WIDGET` with the walk's stride 63, which #channelSlice would then use;
+  //    now the family is simply absent, so #channelSlice takes its own `itemCount % 4 === 0` fallback
+  //    (EXACT for a 4-channel body — a short observed count is not). ──
+  {
+    assert(merged.rangeSections['WIDGET'] === undefined,
+      'case 2: a cache row for a family the static table lacks must not add a wire stride');
+    assert(Object.prototype.hasOwnProperty.call(staticProfile.rangeSections, 'WIDGET') === false,
+      'case 2 (control): WIDGET is genuinely absent from the static FM3 table, so this case is not vacuous');
+  }
+
+  // ── 3. THE INCIDENT, end to end: with that cache present, the driver must decode the SAME window the
   //    unit holds. Before the fix this returned 52.287 (the wrong window); the unit reads 0. ──
-  const diff = await serveCabDiffusion(merged);
-  assert(diff != null, 'case 2: Room Diffusion is served');
-  assert(Math.abs((diff!.value as number) - GOOD_DIFFUSION) < 0.15,
-    `case 2: Room Diffusion must equal the unit's 0, not the wrong-window value; got ${diff!.value}`);
+  {
+    const diff = await serveCabDiffusion(merged);
+    assert(diff != null, 'case 3: Room Diffusion is served');
+    assert(Math.abs((diff!.value as number) - GOOD_DIFFUSION) < 0.15,
+      `case 3: Room Diffusion must equal the unit's 0, not the wrong-window value; got ${diff!.value}`);
+  }
 
-  // ── 3. Independent decode of the captured body at BOTH bases proves the causation (a data-level
+  // ── 4. Independent decode of the captured body at BOTH bases proves the causation (a data-level
   //    positive control that does not depend on the driver): the good base yields raw 0, the bad base
   //    yields the wrong-window raw whose /65534 is exactly the served 0.52287. ──
   {
     const body = cabBody();
     const goodRaw = body[GOOD_BASE + 59]!;
     const badRaw = body[BAD_BASE + 59]!;
-    assertEqual(goodRaw, 0, 'case 3: the device-true window holds Room Diffusion raw 0');
+    assertEqual(goodRaw, 0, 'case 4: the device-true window holds Room Diffusion raw 0');
     assert(Math.abs(badRaw / 65534 - BAD_DIFFUSION / 100) < 1e-5,
-      `case 3: the wrong window holds the served Diffusion norm (got ${badRaw / 65534}); base ${BAD_BASE} is what a cache stride ${CACHE_STRIDE} selects`);
+      `case 4: the wrong window holds the served Diffusion norm (got ${badRaw / 65534}); base ${BAD_BASE} is what a cache stride ${CACHE_STRIDE} selects`);
   }
 
-  // ── 4. The device-true window also matches the rest of the saved 21:47 fixture, so the fix is not
+  // ── 5. The device-true window also matches the rest of the saved 21:47 fixture, so the fix is not
   //    specific to one param (Room Level 36.5, Mic Spacing 17, Frequency 5000.07). ──
   {
     const body = cabBody();
-    assert(Math.abs((body[GOOD_BASE + 35]! / 65534) * 100 - 36.5) < 0.05, 'case 4: Room Level decodes to the fixture value 36.5');
-    assert(Math.abs((body[GOOD_BASE + 37]! / 65534) * 100 - 17) < 0.05, 'case 4: Mic Spacing decodes to the fixture value 17');
-    assert(Math.abs(body[GOOD_BASE + 55]! / 65534 - 0.3979461043122654) < 1e-6, 'case 4: Frequency decodes to the fixture norm 0.3979461');
+    assert(Math.abs((body[GOOD_BASE + 35]! / 65534) * 100 - 36.5) < 0.05, 'case 5: Room Level decodes to the fixture value 36.5');
+    assert(Math.abs((body[GOOD_BASE + 37]! / 65534) * 100 - 17) < 0.05, 'case 5: Mic Spacing decodes to the fixture value 17');
+    assert(Math.abs(body[GOOD_BASE + 55]! / 65534 - 0.3979461043122654) < 1e-6, 'case 5: Frequency decodes to the fixture norm 0.3979461');
   }
 }

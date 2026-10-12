@@ -10,6 +10,7 @@ import * as store from '../../src/store.js';
 import type { BuiltCache, CacheRecord, LiveWalkOptions } from 'forgefx-midi/cache';
 import { buildDefQuery, VIEW_DEFINITION } from 'forgefx-midi/cache';
 import { FM3_PARAMS_BY_FAMILY } from 'forgefx-midi/gen3/fm3';
+import { PROFILES } from '../../src/devices.js';
 import type { DeviceEvent, DeviceDriver, DriverCapabilities } from '../../src/drivers/types.js';
 import { MockTransport, handshakeReply, isIdentifyBroadcast, assert, assertEqual, sleep } from '../helpers/mock.js';
 
@@ -74,13 +75,22 @@ function seedRecords(): CacheRecord[] {
   return recs;
 }
 
-/** A build doc with a distinctive DISTORT (amp) roster — proves the runtime profile serves it. */
+/** A build doc with a distinctive DISTORT (amp) roster — proves the runtime profile serves it.
+ *  The roster must be at least as LONG as the static one: a cache roster SHORTER than the static list
+ *  now loses (a truncated device-truth list would otherwise shift every model ordinal — see
+ *  test/drivers/device-profile-merge-guard.test.ts), so this fixture pads the static roster with the
+ *  two distinctive entries up front. */
 function fakeCacheDoc(): BuiltCache {
+  const staticAmp = PROFILES[FM3]!.rosterFor('amp');
+  const fakeRoster = staticAmp.map((t, i): (typeof staticAmp)[number] =>
+    i === 0 ? { value: 0, name: 'FAKE CACHE AMP', manufacturer: 'ACME', basedOn: 'Fake Stack' }
+      : i === 1 ? { value: 1, name: 'Other Amp', manufacturer: null, basedOn: null }
+        : t);
   return {
     enumOverrides: { DISTORT: { '0': ['FAKE CACHE AMP', 'Other Amp'] } },
     ranges: {},
     rangeSections: {},
-    rosters: { DISTORT: [{ value: 0, name: 'FAKE CACHE AMP', manufacturer: 'ACME', basedOn: 'Fake Stack' }, { value: 1, name: 'Other Amp', manufacturer: null, basedOn: null }] },
+    rosters: { DISTORT: fakeRoster },
     cabIrs: {},
     unmappedSections: [],
     unmappedFamilies: [],

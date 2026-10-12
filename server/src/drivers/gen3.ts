@@ -1466,7 +1466,22 @@ class Gen3Driver implements DeviceDriver {
     }
     // discrete params store the ordinal; if it looks 16-bit-scaled, unscale against the known max
     // (base = this channel's slice of the bulk read — cab mode/bank/IR/dyna are per-channel, like everything else on the block)
-    const ord = (id: number, max: number) => { const raw = values[base + id] ?? 0; return max > 0 && raw > max ? Math.round((raw / 65534) * max) : raw; };
+    //
+    // A missing record is NOT a zero. `ord` indexes THIS channel's slice of the bulk body; a wrong
+    // `base` (a bad stride) or a short body pushes `base + id` past the end, and the old `?? 0` then
+    // served a fabricated "Legacy, bank 0, IR #0" the picker rendered as real state — the same
+    // silent-failure class the torn-read guard above and the `?? 0` note in blockParams (see the
+    // comment on this file's readRaw/unresolvedReason) exist to close. Report an unresolved read
+    // instead: throw, and the route surfaces a non-200 (cabStateH has no catch of its own), so Axis's
+    // `.catch` clears the picker rather than showing a false cab.
+    const ord = (id: number, max: number, what: string) => {
+      const idx = base + id;
+      if (idx < 0 || idx >= values.length) {
+        throw new Error(`cabState unresolved: ${what} (pid ${id}) has no record — index ${idx} is outside the ${values.length}-value cab body (channel base ${base})`);
+      }
+      const raw = values[idx]!;
+      return max > 0 && raw > max ? Math.round((raw / 65534) * max) : raw;
+    };
     const pid = (name: string) => this.#paramId(family, name);
     const bankPids = [1, 2, 3, 4].map((n) => pid(`CABINET_BANK${n}`)).filter((x): x is number => x != null);
     const irPids = [1, 2, 3, 4].map((n) => pid(`CABINET_TYPE${n}`)).filter((x): x is number => x != null);
@@ -1482,14 +1497,14 @@ class Gen3Driver implements DeviceDriver {
     const slots = bankPids.slice(0, 2).map((bankParam, s) => {
       const irParam = irPids[s] ?? 4 + s;
       const dynaParam = dynaPids[s] ?? 85 + s;
-      const bankV = ord(bankParam, bankOptions.length - 1);
+      const bankV = ord(bankParam, bankOptions.length - 1, `slot ${s + 1} bank`);
       const bankLabel = bankOptions[bankV] ?? String(bankV);
       const list = irBanks[bankLabel] ?? [];
-      const irIndex = ord(irParam, Math.max(0, list.length - 1));
-      const dynaV = ord(dynaParam, Math.max(0, dynaOptions.length - 1));
+      const irIndex = ord(irParam, Math.max(0, list.length - 1), `slot ${s + 1} IR index`);
+      const dynaV = ord(dynaParam, Math.max(0, dynaOptions.length - 1), `slot ${s + 1} dyna type`);
       return { slot: s + 1, bankParam, irParam, dynaParam, bank: { value: bankV, label: bankLabel }, irIndex, irName: list[irIndex] ?? `#${irIndex}`, dyna: { value: dynaV, label: dynaOptions[dynaV]?.label ?? String(dynaV) } };
     });
-    const modeV = ord(modeParam, 1);
+    const modeV = ord(modeParam, 1, 'mode');
     return { modeParam, mode: { value: modeV, label: modeOptions[modeV]?.label ?? '' }, modeOptions, bankOptions, dynaOptions, slots };
   }
 

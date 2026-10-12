@@ -16,6 +16,10 @@
 //   • cabState() must not swallow a failed/torn read and serve a ZEROED cab state (mode 0 / bank 0 /
 //     IR 0) with HTTP 200 — a fabricated state (P1.3's class, closed for the torn block read);
 //   • meters() must not `?? 0` a client-requested id past the body — a meter pinned to its minimum.
+//   • cabState()'s per-param `ord` lookup must not `?? 0` a record past the body end either: a wrong
+//     channel base (a bad stride) or a short body used to serve "Legacy, bank 0, IR #0" as REAL state.
+//     It now reports an unresolved read (throws → non-200), never a fabricated 0 — the same class as
+//     the torn-read guard above.
 //
 // Mocked transport + the REAL static FM3 profile: no hardware.
 import { createGen3Driver } from '../../src/drivers/gen3.js';
@@ -38,7 +42,7 @@ const CAB_STRIDE = PROFILES[MODEL]!.rangeSections['CABINET']!.stride; // 106
 const GLOBAL_SUBSTRIDE_PID = 1; // GLOBAL_REVERBMIX — a real range row BELOW the stride (ordinal, not address)
 const AMP_MOVED_PID = 16; // DISTORT Bright Cap — a dense pid (pid == ordinal)
 
-export const EDIT_BURST_UNRESOLVED_CASE_COUNT = 8;
+export const EDIT_BURST_UNRESOLVED_CASE_COUNT = 9;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -240,5 +244,17 @@ export async function runEditBurstUnresolvedTests(): Promise<void> {
     const fullBlock = full.find((b) => b.effectId === AMP_EID)!;
     assertEqual(fullBlock.vals[beyond], undefined, 'case 8: a client-requested id past the body is UNKNOWN, never a zeroed meter');
     assert(Object.keys(fullBlock.vals).some((k) => Number(k) !== beyond), 'case 8: the real knobs in the body are still served (no over-rejection)');
+  }
+
+  // ── 9. cabState must not fabricate a record the body does not carry. A wrong channel base (a bad
+  //    stride) or a short body pushes `base + id` past the end; the old `?? 0` then served mode 0 /
+  //    bank 0 / IR #0 as REAL state. This is a COMPLETE read (values.length === itemCount), so the
+  //    torn-read guard does NOT fire — the failure is per-param, and it must report unresolved. ──
+  {
+    // base is 0 (channel A, no status frame), the dyna-type record is pid 85 — past a 40-record body.
+    const shortBody = burst(CAB_EID, new Array(40).fill(0));
+    const { driver } = makeDriver(() => shortBody);
+    await rejectsWith(() => driver.cabState(CAB_EID), /unresolved/,
+      'case 9: a cab param record past the body end rejects as unresolved, not a fabricated 0');
   }
 }

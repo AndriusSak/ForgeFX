@@ -727,42 +727,65 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
     mergedRanges[fam] = merged;
   }
 
-  // rangeSections: the fn=0x1F CHANNEL-BLOCK WIRE STRIDE is a device-true, statically-measured constant
-  // (e.g. FM3 CABINET = 106; FM3_RANGE_SECTIONS, hardware-derived). The live self-describe walk CANNOT
-  // recover it: the cache builder writes `stride: sec.size` — the number of ordinary records the walk
-  // happened to observe for that block (FM3 CABINET: 63) — which is NOT the record stride. A cache row
-  // therefore refines a family's metadata (sectionTag / recordCount / instanceTags) but MUST NEVER
-  // override a stride the static profile already knows: `#channelSlice` multiplies that stride by the
-  // active channel to index the bulk body, so a wrong stride silently reads a DIFFERENT window of the
-  // SAME bytes. MEASURED 2026-10-12: a cache rebuild turned Cab Room Diffusion 0 → 52.287 (and Room
-  // Level 36.5 → 50, Mic Spacing 17 → 50) over a byte-identical edit buffer (one unrelated Tap Tempo
-  // byte) — a served value that is not a function of the device state alone. Only a family the static
-  // table lacks takes the cache's stride as a best-effort fallback (better than the itemCount/4 guess).
-  const mergedSections: RangeSections = { ...staticProfile.rangeSections };
-  for (const [fam, meta] of Object.entries(built.rangeSections ?? {})) {
-    const stat = mergedSections[fam];
-    mergedSections[fam] = stat && stat.stride > 0
-      ? { ...(meta as RangeSections[string]), stride: stat.stride }
-      : (meta as RangeSections[string]);
-  }
-
+  // rangeSections: the fn=0x1F CHANNEL-BLOCK WIRE STRIDE is a device-true, statically-measured
+  // constant (e.g. FM3 CABINET = 106; FM3_RANGE_SECTIONS, hardware-derived). It comes from the STATIC
+  // profile ONLY — there is deliberately NO cache overlay here.
+  //
+  // Why no overlay, even guarded: the live self-describe walk CANNOT recover this stride — the cache
+  // builder writes `stride: sec.size` (forgefx-midi/src/cache/assign.ts), the number of ordinary
+  // records the walk happened to observe (FM3 CABINET: 63), which is NOT the record stride, and the
+  // walk's own label loop ends at the first empty/timeout reply (forgefx-midi/src/cache/liveWalk.ts),
+  // so its counts are truncated by construction. The consumed value is `#channelSlice`'s
+  // `stride`/`base` (drivers/gen3.ts): `base = activeChannel * stride` indexes the bulk body, so a
+  // wrong stride reads a DIFFERENT window of the SAME bytes. MEASURED 2026-10-12: a "live" cache
+  // rebuild turned Cab Room Diffusion 0 → 52.287 (and Room Level 36.5 → 50, Mic Spacing 17 → 50) over
+  // a body that differed from the captured one by ONE unrelated Tap-Tempo byte — a served value that
+  // is not a function of the device state alone.
+  //
+  // Crucially, fixing only the merge is not enough: bad strides are ALREADY persisted in the
+  // `deviceCaches` store (services/deviceCache.ts putDoc — it stores whatever the walk built), and a
+  // cached doc can also arrive from an import or a cloud pull. Any read-side path that reads a stride
+  // out of a cache row is therefore a latent repeat, including the previous "keep the static stride,
+  // take the cache's sectionTag/recordCount" merge — the poisoned row still round-trips. So the cache
+  // contributes NOTHING to wire geometry.
+  //
+  // For a family the static table lacks, `#channelSlice` has its own, better fallback —
+  // `itemCount % 4 === 0 ? itemCount / 4 : max(1, values.length)` — which is EXACT for a 4-channel
+  // body, whereas a short observed count is not. `staticProfile.rangeSections` is used verbatim.
   return {
     ...staticProfile,
     ranges: mergedRanges,
     staticRanges: staticProfile.ranges, // catalogue rows, for the servability fallback in the driver
-    rangeSections: mergedSections,
+    rangeSections: staticProfile.rangeSections,
     rosterFor(slug: string): TypeModel[] {
       const fam = SLUG_FAMILY[slug.toLowerCase()];
       const cacheRoster = fam ? builtRosters[fam] : undefined;
-      if (!cacheRoster?.length) return staticProfile.rosterFor(slug); // walk didn't map this family → static
-      const byValue = new Map(staticProfile.rosterFor(slug).map((t) => [t.value, t]));
+      const staticRoster = staticProfile.rosterFor(slug); // walk didn't map this family → static
+      // A cache roster may only REPLACE the static one when it is at least as LONG. The device-true
+      // list arrives truncated by construction: the live label walk ends at the first empty/timeout
+      // reply (forgefx-midi/src/cache/liveWalk.ts) and a read-only walk stops at param 127. A shorter
+      // list would shift every model ordinal — the type decode is
+      // `tv = raw > max ? round(raw/65534*max) : raw` with `max` derived from this list's length
+      // (drivers/gen3.ts), so one walk timeout can silently decode an amp type as model 0. So a
+      // truncated list LOSES to the static one; only a list as long as the static one replaces it.
+      if (!cacheRoster?.length || cacheRoster.length < staticRoster.length) return staticRoster;
+      const byValue = new Map(staticRoster.map((t) => [t.value, t]));
       return cacheRoster.map((t) => {
         const s = byValue.get(t.value);
         return { value: t.value, name: t.name, manufacturer: t.manufacturer ?? s?.manufacturer ?? null, basedOn: t.basedOn ?? s?.basedOn ?? null };
       });
     },
     enumLabelsFor(family: string, paramId: number): string[] | undefined {
-      return builtEnums[family]?.[String(paramId)] ?? staticProfile.enumLabelsFor(family, paramId);
+      const staticLabels = staticProfile.enumLabelsFor(family, paramId);
+      const cacheLabels = builtEnums[family]?.[String(paramId)];
+      // A cache label list may only REPLACE the static one when it is at least as LONG — same reason as
+      // rosterFor above: the live walk ends at the first empty/timeout reply (liveWalk.ts), so a
+      // TRUNCATED list can arrive, and the enum decode derives its `max` from the list length
+      // (drivers/gen3.ts), so a short list silently re-scales the raw value (an amp type decodes as
+      // model 0). `??` falls through only on `undefined`, so a truncated list would win by being
+      // present, not by being complete. A shorter list therefore LOSES to the static one.
+      if (!cacheLabels || (staticLabels && cacheLabels.length < staticLabels.length)) return staticLabels;
+      return cacheLabels;
     },
     cabIrs(): Record<string, string[]> {
       return Object.keys(builtCabIrs).length > 0 ? builtCabIrs : staticProfile.cabIrs();
