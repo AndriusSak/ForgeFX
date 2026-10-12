@@ -125,6 +125,9 @@ exactly** (23 distinct values for the delay, 37 for the amp) — table and prove
 `<at0> <at1> <at2> <at3> <at4> <b5> <b6> <b7> 00 00 00 00 00 00` — **data 0-4 echo the whole five-byte address
 region**, the content is the three bytes at data 5-7 (21 bits), data 8-13 are zero. (ROUND 12 described the tail
 as "zero"; the head is an echo, which is what makes the selector test possible at all.)
+*(CORRECTED IN ROUND 14: "content is three bytes and data 8-13 are zero" holds **only for the zeroed address
+tail**. Every selector reply carries content out to data 9 — `1b 14 4c 7a 0a` sits at data 5-9. The tool used
+here printed `data[0..7]` in its selector mode, so bytes 8-13 were never in front of a reader.)*
 
 **With the address tail zeroed, the content is per-eid — and structured:**
 
@@ -151,8 +154,10 @@ as "zero"; the head is an echo, which is what makes the selector test possible a
 
 **The big new fact: address bytes 9, 10 and 11 are SELECTORS, and byte 10 walks a table.** On eid `0x46`:
 
-- **byte 9 (at[2]) ≠ 0 → the fixed value `01 00 00`**, for every value `1..15` tested. A mode selector, like
-  `0x2e`'s byte 7.
+- **byte 9 (at[2]) ≠ 0 → the fixed value `01 00 00`** *(CORRECTED IN ROUND 14 — the value it returns is the
+  DEFAULT/hole record, and that record is not fixed: it read `01 00 00 00 00 02` at 13:57 and
+  `1b 14 4c 7a 0a 02` at 14:26 with a byte-identical request sequence. See the ROUND 14 section.)*, for every
+  value `1..15` tested. A mode selector, like `0x2e`'s byte 7.
 - **byte 11 (at[4]) ≠ 0 → the fixed value `1b 14 4c`**, likewise for `1..15`.
 - **byte 10 (at[3]) walks a value table.** `0x46` → **23 distinct values** over `0x00..0x3f`, including two
   (`4b 19 03` at `0x01`, `7c 0f 00` at `0x08`) that **never appear in the 96-eid sweep** — so the content space
@@ -175,10 +180,107 @@ not depend on three address bytes this way. What the 21 bits MEAN is still open.
 | `1b-at3-sweep-delay.tap` | `probe-1b-structure.ts --index-sweep 0x46 --pos 3 --to 0x3f` | byte 10 over 0x00..0x3f on the delay (23 distinct) |
 | `1b-at3-sweep-amp.tap` | `probe-1b-structure.ts --index-sweep 0x3a --pos 3 --to 0x3f` | the same on the amp (37 distinct) |
 
+---
+
+# ROUND 14 (2026-10-12) — the two "fixed records" are not fixed, and `0x2e` reads the same table
+
+**Provenance:** `ForgeFX/server/scripts/probe-1b-fixed-records.ts`, READ-ONLY, same unit / fw 13.0 / preset
+`"USA Mk IV"` in the edit buffer (read with `fn=0x0d` before the sweep) / same 13 placed eids as ROUND 12–13.
+Taps: `1b-fixed-records.tap` (this round's run) and `1b-address-selectors-rerun.tap` (the ROUND 13 tool
+`probe-1b-structure.ts --index-sweep 0x46` re-run, which is the evidence for the correction below). Full console
+log: `review-2026-10-12/probe-1b-fixed-records.out`. Predictions (H_MODE / H_ADDR / H_MIXED) were committed in
+the tool header before the first frame was sent.
+
+## 1. The reply's content is NINE bytes, not three
+
+`1b` answers 14 data bytes. With the address tail zeroed the content really is data 5-7 and data 8-13 are zero.
+**With either selector non-zero the content runs to data 9**: both selector replies carry `1b 14 4c 7a 0a` at
+data 5-9. ROUND 13's selector mode printed `data[0..7]` only, so bytes 8-13 were never shown — the same
+"SIZE A TOOL'S PRINT WINDOW FOR THE NEXT STRUCTURE" trap the HOLD array cost in ROUND 10.
+
+| address (at0..at4) | content, data 5..13 |
+|---|---|
+| `00 46 00 00 00` (tail zeroed) | `47 42 00 00 00 00 00 00 00` |
+| `00 46 01 00 00` (byte 9 = 1) | `1b 14 4c 7a 0a 02 00 00 00` |
+| `00 46 00 00 01` (byte 11 = 1) | `1b 14 4c 7a 0a 00 00 00 00` |
+
+## 2. `byte 9 ≠ 0` is NOT `01 00 00` — the value it returns MOVED between two runs of the same tool
+
+This is the round's headline and it is a correction, not an addition. At 13:57 the ROUND 13 tool recorded
+`01 00 00 00 00 02 00 00 00` for byte 9 ≠ 0 on eid `0x46`; at 14:26 the **same tool, with a byte-identical TX
+sequence** (verified programmatically, all 149 TX frames equal) recorded `1b 14 4c 7a 0a 02 00 00 00`, and the
+new tool reproduced that at 14:50. Same preset name, same 13 placed eids.
+
+The mechanism is visible once the whole sweep is compared: the only value that changed anywhere in the 146
+exchanges is the one record — and **64 exchanges carry it**:
+
+- the 49 **unused/unplaced eids** whose zeroed-tail record is `01 00 00 00 00 02` (at 13:57) → the same
+  record, now `1b 14 4c 7a 0a 02` (at 14:26). Every other eid's record is byte-identical across the two runs.
+- the 15 `byte 9 ≠ 0` rows on eid `0x46`, which return **exactly that same record**.
+
+So `byte 9 ≠ 0` does not produce a distinct mode record: it lands on the **DEFAULT / hole record** — the value
+the device gives for an address that holds nothing. ROUND 13 read "byte 9 ≠ 0 → `01 00 00`" as a device
+constant; it is a *time-stamped reading of the hole record*, and the hole record is what moved.
+
+**What is NOT established:** why it moved. It is not a fast clock — it was byte-identical at 14:20, 14:26 and
+14:50. The preset name and the placed-eid set did not change. Nothing was written to the unit by any ROUND 12–14
+probe (all read-only; ROUND 13's bypass arms self-restored and were proven restored through `fn=0x13`).
+**A value that moves between sessions without a write is a defect candidate, not a decode**, and must not be
+used as a stable identity. Whoever picks this up: read `fn=0x0d` (preset) + this record together, and note
+anything that changed on the unit in between.
+
+`byte 11 ≠ 0` DID reproduce byte-for-byte across both runs: `1b 14 4c 7a 0a 00 00 00 00`.
+
+## 3. Neither selector returns a device-level constant (task 1(a) answered: REFUTED)
+
+With the selector fixed at 1 and `at[1]` (the "eid" byte) swept `0x00..0x3f`:
+
+| selector | distinct contents over the sweep |
+|---|---|
+| byte 9 = 1 | **8** (`1b 14 4c` ×45, `00 00 00` ×8, `7e 7f 03` ×4, `18 33 02` ×2, `06 00 00` ×2, `01 00 00` ×1, `29 55 02` ×1, `2a 61 00` ×1) |
+| byte 11 = 1 | **4** (`1b 14 4c` ×60, `00 00 00` ×2, `01 60 03` ×1, `01 00 00` ×1) |
+
+So H_MODE(a) — "a selector that ignores its own value is a device-level MODE" — is **REFUTED**: the content
+still moves with the byte the reply echoes at data 1. A selector whose *own* value is ignored is a mode; it does
+not follow that the record is independent of the rest of the address.
+
+## 4. `0x2e` DOES expose the same record (task 1(b) answered: SUPPORTED)
+
+`0x2e` with request byte 7 ∈ `0x01..0x0f` answers a 23-byte reply whose data 5-9 are `1b 14 4c 7a 0a` with
+trailer `00` — **byte-identical, on eid `0x46` in the same session, to `0x1b[at4 ≠ 0]`**. All fifteen selector
+values give the same content, so `0x2e`'s byte 7 is a MODE selector in exactly the sense `0x1b`'s at[2]/at[4] are.
+The LONG `0x2e` (byte 7 = 0, 590 B) does **not** contain `1b 14 4c` anywhere.
+
+Two doors, one table — but not the same function of the eid: `0x2e[sel=1]` and `0x1b[at4=1]` agree exactly on
+eid `0x46` and on **16 of 64** eids over `0x00..0x3f`. The agreement that does hold cleanly is a cross-check
+between two independent reads: `0x2e[sel=1]` returns trailer `02` for exactly 16 eids
+(`0x24 0x27 0x28 0x29 0x2c 0x2d 0x30 0x31 0x34 0x35 0x38 0x39 0x3b 0x3c 0x3d 0x3f`), and those are **exactly**
+the 16 eids whose zeroed-tail `0x1b` record is the default/hole record. The eid space's holes are therefore
+visible from two different sub-actions.
+
+## 5. What ROUND 14 does NOT claim
+
+- The five content bytes `1b 14 4c 7a 0a` are **not decoded**. They are not a name, not a param count (the
+  round that killed that is ROUND 13), and not a clock.
+- What the trailer byte (`00` / `02` / `03`) counts is unknown.
+- The old value `01 00 00 00 00 02` and the new `1b 14 4c 7a 0a 02` are **two readings of one field**, not two
+  records. ROUND 13's `01 00 00` must not be quoted as a property of byte 9.
+
+### Files added in ROUND 14
+
+| file | produced by | what it holds |
+|---|---|---|
+| `1b-fixed-records.tap` | `probe-1b-fixed-records.ts` (read-only) | selector sweeps, `at[1]` sweeps under each selector, the `0x2e` selector sweep 0x00..0x0f, and the `0x2e[1]` vs `0x1b[at4=1]` eid comparison |
+| `1b-address-selectors-rerun.tap` | `probe-1b-structure.ts --index-sweep 0x46` (read-only) | the ROUND 13 sweep re-run at 14:26; TX sequence byte-identical to `1b-address-selectors.tap` (13:57), one record different |
+
+---
+
 ## What is explicitly NOT decoded
 
 - The meaning of `0x2e`'s 576-byte region, of its ~20 one-hot ladders, or of the `+22..+24` trio.
 - What `0x03`'s bytes 5-7 count, and why one block's advances on reads while another's waits for a write.
-- What `0x1b`'s 21 bits mean — now known to be an addressed read of a table, with at[2] and at[4] as selectors
-  and at[3] an index into a table that is joint with the eid.
+- `0x1b`'s content bytes. ROUND 13's "addressed read of a table, at[2]/at[4] selectors, at[3] an index joint
+  with the eid" survives; ROUND 14 adds that the selector replies carry nine content bytes, that the byte-9
+  reply is the hole/default record, and that the hole record is time-varying. **The "21 bits" framing is dead —
+  count the bytes from the tool, not from a sentence.**
 - Whether any of these carry the bypass state — that question is **open**, not answered in either direction.
