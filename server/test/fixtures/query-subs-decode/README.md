@@ -790,6 +790,31 @@ Q4/Q5 predictions came to be wrong.
 prefix state, not a page; and note the two open questions this leaves: what makes the prefix flip (no frame of
 this stack's is known to), and why at3 ≠ 0 puts a REAL eid into the tag-02 class (Q9).
 
+### A THIRD prefix form, observed the same evening — and it flipped while the unit was IDLE
+
+At **18:07 CEST on 2026-10-12** the standing read returned the hole record `20 74 00 00 00 02 00 00 00`, and the
+whole arm reproduced the new prefix: Q1/Q4/Q8 (hole) `20 74 00 00 00 02 …`, the at4 page `20 74 00 00 00 03 …`
+(Q5/Q6/Q7), and at3 = 1 on a real eid `20 74 00 00 00 02 …` (Q9) — i.e. the **c0..c4 prefix had changed again
+while every TAG stayed where it was**. The raw reply is a well-formed 23-byte frame with a valid checksum
+(`f0 00 01 74 11 01 1b 00 24 00 00 00 20 74 00 00 00 02 00 00 00 7c f7`), so this is a device reply and not a torn
+read. So the prefix is not two-valued: it has **at least three forms** (`00 00 00 00 00` with c0 = the scene for
+the hole record · the constant `1b 14 4c 7a 0a` · now `20 74 00 00 00`, with c1 non-zero for the first time).
+
+**The flip has a bracketed window and no traffic in it.** The previous reads — arm G's standing read at 17:49:44
+and the grid pre-flight at ~17:52, both local — still read `00 00 00 00 00`; at 18:07 the prefix was `20 74 00 00
+00`. Nothing of this stack's was sent to the unit between those two times (the only activity was writing
+documentation). So the prefix **changed while the unit sat idle**, which keeps the "device-internal state, not
+our traffic" reading alive.
+
+**The watchdog dated it in production.** `fm3_standing_watch.py` (cron `ec42020346a6`, hourly) reported exactly
+one line at 18:07 CEST: `hole record changed REGIME: scene-index -> other (preset "USA Mk IV", scene 0, hole
+20 74 00 00 00 02 00 00 00)` — the first real transition it has caught, and the reason it exists. Note its gate
+is deliberately binary (`c0 == scene` ⇒ scene-index, else other), so a switch between two NON-scene prefixes
+(the `1b 14 4c 7a 0a` form and this one) would NOT raise a message; widening that gate to report the PREFIX
+VALUE ITSELF is the correct next change to it.
+
+**Files added in ROUND 15 §6:** `1b-modes-02.tap`.
+
 **Files added in ROUND 15 §6:** `scripts/probe-1b-modes.ts`, `review-2026-10-12/1b-modes-01.tap`,
 `review-2026-10-12/ANALYSIS-1B-CONTENT.md`, `review-2026-10-12/tools/analyze-1b-content.py`.
 
