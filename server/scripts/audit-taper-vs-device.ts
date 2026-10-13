@@ -1,8 +1,11 @@
 // ────────────────────────────────────────────────────────────────────────────────
 // audit-taper-vs-device — compare OUR decode against the INSTRUMENT's own display, per parameter.
 //
-// WHY: the log/linear decision for a float param is `(typecode >> 4) & 0xf ∈ {4,5}` when the range row
-// carries no explicit taper (drivers/gen3.ts:1719-1723). That heuristic was derived from the frequency-cut
+// WHY: the log/linear decision for a float param used to be `(typecode >> 4) & 0xf ∈ {4,5}` when the range
+// row carries no explicit taper — the rule now lives in `rangeIsLog()` (drivers/gen3.ts) and counts ONLY
+// nibble 4 as log10, narrowed 2026-10-13 because nibble 5 produced FALSE POSITIVES. (Cite the FUNCTION, not
+// a line number: this header's old `gen3.ts:1719-1723` citation rotted the same day the rule changed.)
+// The heuristic was derived from the frequency-cut
 // typecodes (0x240/0x241 → nibble 4, genuinely log) and produces FALSE POSITIVES elsewhere. MEASURED
 // 2026-10-13 by the owner's own reading: CABINET/33 "Drive" (typecode 0x52 → nibble 5) is served
 // log 0.01..10 → raw 32768 decodes to 0.316, while the unit's own strings say 0.00 at raw 0 and 5.00 at
@@ -664,9 +667,13 @@ export async function main(argv: string[]): Promise<number> {
       }
       // USE THE HW-PROVEN ADAPTER, do not re-implement matching. `adaptRequest` (services/deviceCache.ts)
       // is the CaptureRig matcher the live-walk uses: it matches on the fn, the VIEW echo (f[6]), the
-      // BLOCK-HIGH echo (f[9]) and both PARAM bytes (f[10]/f[11]) — the device does NOT echo block-low
-      // (its inner[2] is a constant), and a hand-rolled `f[8] === eid` check is exactly the bug that once
-      // wedged the query stream (FORGEFX-32). It returns ONE matched frame, which is what decodeReply wants.
+      // BLOCK-HIGH byte (f[9]) and both PARAM bytes (f[10]/f[11]). NOTE (measured 2026-10-13): the device
+      // DOES echo the block, SPLIT across f[8] = `block & 0x7f` and f[9] = `block >> 7` — a tap shows
+      // `... 1f 02 01 ...` for effectId 130 (0x02 | (0x01<<7)) and `... 1f 3e 00 ...` for 62. So an
+      // `f[8] === eid` check is wrong for EVERY effectId >= 128 (its low byte is `eid & 0x7f`), which is
+      // the FORGEFX-32 wedge; this file previously claimed block-low "is a constant", which the tap
+      // refutes. adaptRequest keys on f[9] + both param bytes, which is what actually holds. It returns
+      // ONE matched frame, which is what decodeReply wants.
       // Retry a couple of times before believing a silence; a miss is not evidence.
       let frame: Uint8Array | null = null;
       let disp: string | null = null;

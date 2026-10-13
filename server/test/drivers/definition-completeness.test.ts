@@ -6,7 +6,8 @@
 // SYNTHETIC profile whose ranges carry controlled unit/taper values, and asserts:
 //   • explicit taper 'log'  → log:true  even when the typecode nibble says linear
 //   • explicit taper 'linear'→ log:false even when the typecode nibble says log
-//   • absent taper           → the typecode-nibble heuristic is preserved (both directions)
+//   • absent taper           → the typecode-nibble heuristic is preserved: ONLY nibble 4 is log10
+//                              (nibble 5 is NOT — narrowed 2026-10-13, see the case below)
 //   • catalog range.unit passthrough beats the AM4-name-overlay (UNIT_LABEL) fallback
 //   • absent range.unit      → the overlay fallback is preserved
 // Mocked transport, no hardware — same idiom as modelbyte.test.ts.
@@ -22,7 +23,7 @@ const FAMILY = 'DISTORT'; // the amp block's catalog family (SLUG_FAMILY['amp'])
 const STRIDE = 20;
 const RAW = 30000; // an integer wire value in 0..65534 (log10 needs an int; positive ranges below)
 
-export const DEFINITION_COMPLETENESS_CASE_COUNT = 12;
+export const DEFINITION_COMPLETENESS_CASE_COUNT = 13;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -60,6 +61,9 @@ const PARAMS: { paramId: number; name: string; unit: string }[] = [
   { paramId: 11, name: 'TAPER_LINEAR_NIBBLE_LOG', unit: 'hz' },
   { paramId: 12, name: 'NIBBLE_LOG_NO_TAPER', unit: 'hz' },
   { paramId: 13, name: 'NIBBLE_LINEAR_NO_TAPER', unit: 'numeric' },
+  // nibble 5 (typecode 0x52) — the class narrowed out of the log heuristic on 2026-10-13. Bounds shaped
+  // like a log row on purpose: the point is that the NIBBLE no longer decides it.
+  { paramId: 16, name: 'NIBBLE5_NOT_LOG', unit: 'numeric' },
   { paramId: 14, name: 'CATALOG_UNIT_WINS', unit: 'db' }, // overlay would say 'dB'
   { paramId: 15, name: 'ABSENT_UNIT_OVERLAY', unit: 'db' }, // overlay 'dB' is the expected fallback
 ];
@@ -69,6 +73,7 @@ const RANGES: Record<number, Range> = {
   11: { kind: 'float', displayMin: 20, displayMax: 20000, typecode: 0x40, taper: 'linear' },
   12: { kind: 'float', displayMin: 20, displayMax: 20000, typecode: 0x40 },
   13: { kind: 'float', displayMin: 0, displayMax: 10, typecode: 0x00 },
+  16: { kind: 'float', displayMin: 0.01, displayMax: 10, typecode: 0x52 },
   14: { kind: 'float', displayMin: 0, displayMax: 10, typecode: 0x00, unit: 'MyHz' }, // device-true unit token
   15: { kind: 'float', displayMin: 0, displayMax: 10, typecode: 0x00 }, // no device-true unit → overlay
 };
@@ -116,9 +121,13 @@ export async function runDefinitionCompletenessTests(): Promise<void> {
   assertEqual(get(10).log, true, "explicit taper 'log' → log:true even when the nibble says linear");
   assert(!get(11).log, "explicit taper 'linear' → log:false even when the nibble says log");
 
-  // TAPER — no explicit taper → the typecode-nibble heuristic is preserved (both directions).
-  assertEqual(get(12).log, true, 'absent taper, nibble 4/5 → log:true (heuristic preserved)');
-  assert(!get(13).log, 'absent taper, non-4/5 nibble → log falsy (heuristic preserved)');
+  // TAPER — no explicit taper → the typecode-nibble heuristic is preserved. It counts ONLY nibble 4 as
+  // log10: nibble 5 was narrowed out on 2026-10-13 because it produced FALSE POSITIVES (CABINET/33 Drive,
+  // typecode 0x52, is served linearly by the unit; the app showed 0.316 where the unit reads 5.00). The
+  // case below is the regression guard for that narrowing — delete the narrowing and it goes red.
+  assertEqual(get(12).log, true, 'absent taper, nibble 4 → log:true (heuristic preserved)');
+  assert(!get(13).log, 'absent taper, nibble 0 → log falsy');
+  assert(!get(16).log, 'absent taper, nibble 5 → log FALSY (narrowed 2026-10-13; the unit is linear there)');
 
   // UNIT — device-true range.unit wins over the AM4-name-overlay (UNIT_LABEL) fallback.
   assertEqual(get(14).unit, 'MyHz', 'catalog range.unit passthrough beats the AM4 overlay');
