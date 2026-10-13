@@ -126,13 +126,21 @@ export async function runRangeTaperClassTests(): Promise<void> {
   assertEqual(drive.log ?? false, false, 'CABINET/33 Drive is served LINEAR (no log flag) — the nibble-5 rule');
 
   // The power of the fixture, stated separately and explicitly: the LOG map of the SAME row at the SAME
-  // raw is the 0.316 the owner saw on screen — so it is NOT the unit's number. A revert of the nibble
-  // rule makes blockParams() serve this log map and the value assertion above turns RED.
+  // raw was the 0.316 the owner saw on screen — so it is NOT the unit's number. A revert of the nibble
+  // rule made blockParams() serve that log map and the value assertion above turned RED.
+  //
+  // MEASUREMENT UPDATE (2026-10-13): the SHIPPED row is no longer the generated one. The BOUNDS were wrong
+  // too — the unit's own view-0x00 display is linear 0..10 (6.06 at norm 0.6064, below the generated row's
+  // own minimum of 20) — so `forgefx-midi/src/gen3/fm3/rangeOverlay.ts` corrects CABINET/33 to 0..10. On
+  // those bounds a base-10 log map is UNDEFINED (log(0)), which the last block asserts; the generated
+  // bounds are kept here as named constants to preserve the fixture's original point (a log map gives
+  // 0.316, never the unit's 5.00).
+  const cabDriveGenerated = { displayMin: 0.01, displayMax: 10 } as const;
   const driveRow = (FM3_RANGES as Record<string, Record<number, RangeRow>>).CABINET?.[33];
   assert(driveRow !== undefined, 'CABINET/33 (Drive) must exist in the FM3 range table');
   const driveAsLog = wireToDisplay(MID_RAW, {
-    displayMin: driveRow.displayMin,
-    displayMax: driveRow.displayMax,
+    displayMin: cabDriveGenerated.displayMin,
+    displayMax: cabDriveGenerated.displayMax,
     displayScale: 'log10',
   });
   assert(
@@ -142,6 +150,22 @@ export async function runRangeTaperClassTests(): Promise<void> {
   assert(
     Math.abs(driveAsLog - 0.316) <= 0.002,
     `the log map of the same range must still be the wrong 0.316 (sanity on the fixture), got ${driveAsLog.toFixed(4)}`
+  );
+  // ... and the CORRECTED shipped row cannot be read as log at all: its floor is 0.
+  let shippedLogThrew = false;
+  try {
+    wireToDisplay(MID_RAW, {
+      displayMin: driveRow.displayMin,
+      displayMax: driveRow.displayMax,
+      displayScale: 'log10',
+    });
+  } catch {
+    shippedLogThrew = true;
+  }
+  assert(
+    driveRow.displayMin === 0 && driveRow.displayMax === 10 && shippedLogThrew,
+    `the CORRECTED CABINET/33 row must be 0..10 with NO log10 map (log(0) undefined); got ` +
+      `${driveRow.displayMin}..${driveRow.displayMax}, threw=${shippedLogThrew}`
   );
 
   // The nibble-4 controls: the unit MATCHES the log map, so they are value-asserted through the same path.
