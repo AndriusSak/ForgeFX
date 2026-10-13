@@ -1716,13 +1716,9 @@ class Gen3Driver implements DeviceDriver {
         // When NO explicit taper is present, fall back to the unchanged typecode-nibble heuristic.
         // `range.taper` reads device-true from a static-catalog row today, and reads the same field once
         // walk-built RangeDefs carry it (parallel WP) — no rework needed here either way.
-        let log: boolean;
-        if (range.taper) {
-          log = range.taper === 'log' && range.displayMin > 0;
-        } else {
-          const taperNib = (range.typecode >> 4) & 0xf;
-          log = (taperNib === 4 || taperNib === 5) && range.displayMin > 0;
-        }
+        // The log/linear decision lives in rangeIsLog() so it can be pinned by a test — see the
+        // measurement note there before changing it.
+        const log = rangeIsLog(range);
         const v = wireToDisplay(raw, { displayMin: range.displayMin, displayMax: range.displayMax, displayScale: log ? 'log10' : 'linear' });
         // Prefer the DEVICE-TRUE unit captured by the live-walk (RangeDef.unit, view 0x00)
         // over the AM4-name-overlay catalog code; fall back to the overlay when absent
@@ -2238,6 +2234,33 @@ class Gen3Driver implements DeviceDriver {
 
 function clamp01(v: number) { return Math.max(0, Math.min(1, v)); }
 function round3(v: number) { return Math.round(v * 1000) / 1000; }
+
+/**
+ * Does this range row decode with a log10 taper, or linearly? An explicit `taper` on the row always wins;
+ * otherwise the typecode's bit-4..7 nibble decides — **and only the value 4 counts as log.**
+ *
+ * MEASURED 2026-10-13 against the INSTRUMENT's own display strings (self-describe view 0x00, the one
+ * witness that does not decode values with our tables — read it with scripts/audit-taper-vs-device.ts).
+ * The "nibble 4 OR 5" form this replaces was wrong for the whole nibble-5 class: every typecode-0x52 param
+ * the audit could read disagreed with the unit. CABINET/33 "Drive" served **0.316** at raw 32768 (exactly
+ * mid-scale) where the unit prints **5.00**, and the identical signature appeared on CHORUS/20 Drive,
+ * FLANGER/20 Drive, FLANGER/26 Bass Focus, DELAY/22 Drive, DELAY/58 Resonance and REVERB/32 Drive. Those
+ * readings fit a LINEAR 0→10 map (0.00 at raw 0, 5.00 at mid), which no log map of that range does.
+ * Meanwhile the readable nibble-4 params MATCHED the unit exactly: CABINET/55 Frequency 5000.07 vs 5000.1,
+ * CABINET/39 High Cut 1 9999.895 vs 10000. So the rule is right for the typecodes it was derived from —
+ * the frequency cuts, 0x240/0x241 — and wrong where a typecode lands on nibble 5 by coincidence.
+ *
+ * Blast radius of the correction: 17 params carry nibble 5 across 12 families (DISTORT 2, FILTER 2, WAH 2,
+ * DELAY 2, FLANGER 2, CABINET 1, CHORUS 1, FORMANT 1, FUZZ 1, MULTITAP 1, REVERB 1, ROTARY 1); 274 carry
+ * nibble 4 and keep log. Verified by test/drivers/range-taper-class.test.ts — the Cab Drive reading is the
+ * fixture, because the hardware case that exposed this (owner set Drive to 5.00; the app showed 0.32) must
+ * never come back silently.
+ */
+export function rangeIsLog(range: { taper?: string; typecode?: number; displayMin: number }): boolean {
+  if (range.taper) return range.taper === 'log' && range.displayMin > 0;
+  const taperNib = ((range.typecode ?? 0) >> 4) & 0xf;
+  return taperNib === 4 && range.displayMin > 0;
+}
 
 /** Create a gen-3 driver bound to one device profile (Axe-Fx III / FM3 / FM9). */
 export function createGen3Driver(profile: DeviceProfile, ctx: DriverCtx): Gen3Driver {
