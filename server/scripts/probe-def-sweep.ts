@@ -27,7 +27,7 @@
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
 import { buildDefQuery, decodeReply } from 'forgefx-midi/cache';
-import { FM3_RANGES, FM3_RANGE_SECTIONS } from 'forgefx-midi/gen3/fm3';
+import { FM3_RANGES, FM3_RANGE_SECTIONS, fm3EffectId } from 'forgefx-midi/gen3/fm3';
 
 const MODEL = 0x11;
 
@@ -54,7 +54,11 @@ export async function main(argv: string[]): Promise<number> {
     console.log(`unknown family ${family} — known: ${Object.keys(FM3_RANGE_SECTIONS).join(', ')}`);
     return 2;
   }
-  const block = argOf('--block') ? Number(argOf('--block')) : meta.sectionTag;
+  // The fn-0x01 block byte is the EFFECT ID, never the cache section tag (assign.ts; measured 2026-10-13:
+  // section tags 11/13/20 are UNASSIGNED effect ids and every one of them answers from a shared fallback
+  // table, which made three different families look byte-identical). `meta.sectionTag` is the cache-side
+  // tag and must not be sent.
+  const block = argOf('--block') ? Number(argOf('--block')) : (fm3EffectId(family, 1) ?? meta.sectionTag);
   const lo = argOf('--lo') ? Number(argOf('--lo')) : 0;
   const hi = argOf('--hi') ? Number(argOf('--hi')) : 28;
 

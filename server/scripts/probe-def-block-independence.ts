@@ -1,5 +1,16 @@
+// ⚠ RESULTS FROM THIS TOOL ARE INVALID UNLESS --blocks CARRIES EFFECT IDs (see below).
+//
 // ────────────────────────────────────────────────────────────────────────────────
 // probe-def-block-independence — READ-ONLY: does the VIEW-0x1c definition reply depend on the BLOCK byte?
+//
+// !! THE BLOCK BYTE IS THE fn-0x01 EFFECT ID, NOT A CACHE SECTION TAG — measured 2026-10-13 by review.
+// !! `cache/assign.ts`: in the live self-describe walk "the 'section' is the fn-0x01 block id, which bears
+// !! no relation to the cache section tag". An earlier run of this tool passed 11 (CABINET), 13 (DELAY) and
+// !! 20 (WAH) — CACHE SECTION TAGS, which are unassigned EFFECT IDs — and the device answered all three from
+// !! ONE shared fallback table. Identical records were then read as "the block byte does not select the
+// !! family", which was WRONG: it was the query. Correct values: Cab 62, Delay 70, Rotary 86, Wah 94
+// !! (`fm3EffectId(family, 1)`); addressed that way the records differ per block and every row's typecode
+// !! and bounds agree with our table (28/28, `probe-def-ranges.ts`).
 //
 // WHY: the handover's plan for the nibble-5 range rows was "confirm once against the unit's own definition
 // record (view 0x1c), which states min/max directly". Before spending a hardware round on that, the query
