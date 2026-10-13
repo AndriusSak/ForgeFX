@@ -30,6 +30,8 @@ import {
   FM3_MOD_FIELDS,
   FM3_MONITOR_PARAMS,
   FM3_RANGE_SECTIONS,
+  applyFm3RangeOverlay,
+  type Fm3RangeTable,
 } from 'forgefx-midi/gen3/fm3';
 import {
   FM9_RANGES, FM9_PARAMS_BY_FAMILY, FM9_ENUM_OVERRIDES, FM9_FAMILY_BY_EFFECT_ID, FM9_LAYOUTS,
@@ -727,6 +729,36 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
     mergedRanges[fam] = merged;
   }
 
+  // ── The MEASURED range overlay is the FINAL authority for its rows — applied HERE, LAST ───────────
+  //
+  // A cache row can silently override ANY static correction. The FM3 static table already carries the
+  // typecode-0x52 display-bounds correction (forgefx-midi applies FM3_RANGE_OVERLAY at its FM3 index
+  // export, so `FM3_RANGES` — and therefore the static profile — is corrected). But that correction
+  // lives in the SAME base rows the cache was built from, so a device cache captured from that same
+  // wrong record re-supplies the OLD bounds and, being merged OVER the static table above, WINS — and
+  // the correction is invisible in the product. MEASURED 2026-10-13: the `11_13p0` cache carries
+  // WAH/3 `20..200` (forgefx-midi source: `0..10`) and FLANGER/26 `200..20000` (source: `0..10`), so
+  // a full rebuild + restart still served WAH/3 Resonance Q 129.15 where the unit shows 6.06, and
+  // FLANGER/26 Bass Focus 20000 where the unit reads 10.00 at the knob's maximum.
+  //
+  // The rule, stated generally: a MEASURED correction beats BOTH the static table AND a device cache
+  // built from the same wrong record, because it is the only one of the three that was checked against
+  // the instrument's own display. The overlay's (family, paramId) rows are therefore re-applied as the
+  // LAST step, after the cache merge, so nothing below this point can shadow them. (The overlay only
+  // overrides displayMin/displayMax and skips rows absent from the table, so it is a value-level no-op
+  // wherever upstream is already correct — see forgefx-midi's rangeOverlay.ts.)
+  //
+  // NO CACHE REBUILD IS THE FIX, and none is available: a full-mode cache capture SWEEPS PARAMETERS and
+  // WRITES to the unit — on 2026-10-12 one corrupted the owner's per-preset switch block (see the
+  // skill's cache-incident record). The overlay-wins rule removes the need to invalidate anything.
+  //
+  // The overlay is device-specific data (its entries were measured on an FM3), so it is applied ONLY
+  // when this profile's static table IS the FM3 table — identity, not a hardcoded model byte.
+  const finalRanges: Ranges =
+    staticProfile.ranges === (FM3_RANGES as unknown as Ranges)
+      ? (applyFm3RangeOverlay(mergedRanges as unknown as Fm3RangeTable) as unknown as Ranges)
+      : mergedRanges;
+
   // rangeSections: the fn=0x1F CHANNEL-BLOCK WIRE STRIDE is a device-true, statically-measured
   // constant (e.g. FM3 CABINET = 106; FM3_RANGE_SECTIONS, hardware-derived). It comes from the STATIC
   // profile ONLY — there is deliberately NO cache overlay here.
@@ -754,7 +786,7 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   // body, whereas a short observed count is not. `staticProfile.rangeSections` is used verbatim.
   return {
     ...staticProfile,
-    ranges: mergedRanges,
+    ranges: finalRanges,
     staticRanges: staticProfile.ranges, // catalogue rows, for the servability fallback in the driver
     rangeSections: staticProfile.rangeSections,
     rosterFor(slug: string): TypeModel[] {

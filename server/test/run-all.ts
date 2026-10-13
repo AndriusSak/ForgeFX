@@ -61,6 +61,7 @@ import { runGateContractTests, GATE_CONTRACT_CASE_COUNT } from './api/gate-contr
 import { runCabinetWireStrideTests, CABINET_WIRE_STRIDE_CASE_COUNT } from './drivers/cabinet-wire-stride.test.js';
 import { runRangeTaperClassTests, RANGE_TAPER_CLASS_CASE_COUNT } from './drivers/range-taper-class.test.js';
 import { runDeviceProfileMergeGuardTests, DEVICE_PROFILE_MERGE_GUARD_CASE_COUNT } from './drivers/device-profile-merge-guard.test.js';
+import { runMeasuredOverlayWinsTests, MEASURED_OVERLAY_WINS_CASE_COUNT } from './drivers/measured-overlay-wins.test.js';
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/detection (${DETECTION_CASE_COUNT} cases, mocked Conn/Transport)`, run: runDetectionTests },
@@ -120,7 +121,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `api/gate-contract (${GATE_CONTRACT_CASE_COUNT} cases, ?dryRun=true contract for EVERY device-write route on BOTH tables: zero frames, gate verdict matches NOT_DRY_RUNNABLE, percent-encoded spelling parity)`, run: runGateContractTests },
   { name: `drivers/cabinet-wire-stride (${CABINET_WIRE_STRIDE_CASE_COUNT} cases, a cache rebuild must not change the device-true fn=0x1F channel-block stride; the captured Cab body decodes to the unit's values)`, run: runCabinetWireStrideTests },
   { name: `drivers/range-taper-class (${RANGE_TAPER_CLASS_CASE_COUNT} assertions, a typecode-nibble 5 row must NOT decode as log10: the unit reads Cab Drive 5.00 at mid-scale where a log map gives 0.316; nibble 4 stays log)`, run: runRangeTaperClassTests },
-  { name: `drivers/device-profile-merge-guard (${DEVICE_PROFILE_MERGE_GUARD_CASE_COUNT} cases, a truncated cache enum/roster list loses to the static one; a complete cache list still wins)`, run: runDeviceProfileMergeGuardTests }
+  { name: `drivers/device-profile-merge-guard (${DEVICE_PROFILE_MERGE_GUARD_CASE_COUNT} cases, a truncated cache enum/roster list loses to the static one; a complete cache list still wins)`, run: runDeviceProfileMergeGuardTests },
+  { name: `drivers/measured-overlay-wins (${MEASURED_OVERLAY_WINS_CASE_COUNT} cases, the MEASURED range overlay beats a device-cache row built from the same wrong record; the cache still wins for a non-overlay row; the served value is the unit's own 10×norm reading)`, run: runMeasuredOverlayWinsTests }
 ];
 
 let failures = 0;
