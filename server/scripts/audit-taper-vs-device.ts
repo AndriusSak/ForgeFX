@@ -1,4 +1,4 @@
-// ────────────────────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────────
 // audit-taper-vs-device — compare OUR decode against the INSTRUMENT's own display, per parameter.
 //
 // WHY: the log/linear decision for a float param is `(typecode >> 4) & 0xf ∈ {4,5}` when the range row
@@ -14,11 +14,35 @@
 // The snapshot of what the server serves must be taken BEFORE this runs (the server holds the port):
 //   GET /preset/blocks/<eid>/params  ->  ~/.hermes/cache/scratch/taper-audit/params-snapshot.json
 //
+// ── TWO HARDENINGS (both taught by a run that lied, 2026-10-13) ─────────────────────────────────
+//
+// 1. STATE GUARD — a comparison across two different presets is not a measurement. The first run of this
+//    audit compared the server's OLD preset body against a unit the owner had moved on from, produced a
+//    phantom "the unit reads Cab Drive 0.00", and sent the investigation off into "are view-0x00 replies
+//    channel-dependent". The guard reads the DEVICE's own current preset name (fn=0x0D, read-only) and
+//    requires it to match the snapshot's; a mismatch — or a name the device will not give — makes the run
+//    VOID (exit 4) and NO per-param verdict is reported. Fail closed: a void run must not look like a
+//    clean one, and it must not look like a device finding either. Case/padding are normalised because the
+//    unit upper-cases its own display, but both raw strings are printed so a human can see what happened.
+//
+// 2. TOLERANCE FROM THE DISPLAY'S OWN PRECISION — the tolerance was an absolute magnitude ladder, which is
+//    a guess about how many digits the unit prints. It is now half of the last printed digit of the
+//    device's OWN string: "5.00" → 0.005 (so 5.005 vs 5.00 is a match, which is the true case that
+//    motivated this), "5000.1" → 0.05, "10000" → 0.5. A match that only passes because the display is
+//    COARSE (|diff| beyond a quarter of the half-ulp) is counted and printed separately, so a coarse
+//    display cannot silently hide a real defect.
+//
+// KNOWN UNRESOLVED (reported, not hidden): a few replies decode to null in the codec (a whole class of
+// valid 60-byte view-0x00 frames — see review-2026-10-13), and some device strings are parenthesised
+// ("(500 ms)") or non-numeric ("LFO1 SYNC"), which `parseDisplayValue` cannot read. Those print as
+// UNREADABLE / UNPARSED with the matched frame length.
+//
 // USAGE  npx tsx scripts/audit-taper-vs-device.ts [--all] [--block 62]
-// ────────────────────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
+import { patchNameQuery } from './standing-read.js';
 import { adaptRequest } from '../src/services/deviceCache.js';
 import type { Transport } from '../src/transport/types.js';
 import { buildValueQuery, decodeReply, parseDisplayValue } from 'forgefx-midi/cache';
@@ -58,12 +82,43 @@ interface SnapBlock {
   channel?: string;
   params: SnapParam[];
 }
+interface Snapshot {
+  preset?: string;
+  /** Optional: a hash of the body the server served, when the snapshotter recorded one. */
+  bodyHash?: string;
+  at?: string;
+  blocks: SnapBlock[];
+}
 
-/** Tolerance: the unit prints a limited number of digits, and our step adds quantisation. */
-function tolerance(p: SnapParam): number {
-  const mag = Math.max(Math.abs(p.value ?? 0), Math.abs(p.max ?? 0), 1e-9);
-  const digits = mag >= 10000 ? 1 : mag >= 1000 ? 0.5 : mag >= 100 ? 0.05 : mag >= 10 ? 0.05 : 0.005;
-  return Math.max(digits, 1e-9);
+/** Normalise a preset name for comparison: case- and whitespace-insensitive, nothing else. */
+function normName(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+/**
+ * Tolerance: HALF THE LAST PRINTED DIGIT of the unit's own string — the quantisation the unit itself
+ * builds in. Falls back to a relative epsilon when the string carries no digits.
+ */
+function toleranceFromDisplay(disp: string, ours: number): { tol: number; ulp: number } {
+  const m = /-?\d+(?:\.(\d+))?/.exec(disp);
+  const decimals = m && m[1] ? m[1].length : 0;
+  const ulp = Math.pow(10, -decimals);
+  const tol = Math.max(ulp / 2, Math.abs(ours) * 1e-6);
+  return { tol, ulp };
+}
+
+/** Read the unit's OWN current preset name (fn=0x0D, read-only). Empty string when it will not answer. */
+async function devicePresetName(transport: Transport): Promise<string> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const frames = await transport.request(patchNameQuery(), { timeoutMs: 900, quietMs: 60 });
+    const f = frames.find((x) => x[5] === 0x0d);
+    if (f) {
+      const body = f.slice(6, -2).filter((b) => b >= 0x20 && b < 0x7f);
+      const name = String.fromCharCode(...body).trim();
+      if (name) return name;
+    }
+  }
+  return '';
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -73,7 +128,7 @@ export async function main(argv: string[]): Promise<number> {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   const onlyBlock = argOf('--block') ? Number(argOf('--block')) : undefined;
-  const snap = JSON.parse(readFileSync(SNAPSHOT, 'utf8')) as { preset?: string; blocks: SnapBlock[] };
+  const snap = JSON.parse(readFileSync(SNAPSHOT, 'utf8')) as Snapshot;
 
   // Every param our tables call LOG (the heuristic's output), plus a few LINEAR ones with non-zero values
   // as CONTROLS: a control that matches shows the pipeline works and isolates the failure to the taper.
@@ -98,14 +153,35 @@ export async function main(argv: string[]): Promise<number> {
   }
   const s = opened.session;
   let match = 0;
+  let coarse = 0;
   let mismatch = 0;
   let unreadable = 0;
   const bad: string[] = [];
   try {
-    console.log(`taper audit vs the INSTRUMENT — preset “${snap.preset ?? '?'}”, ${targets.length} params`);
+    // ── STATE GUARD ────────────────────────────────────────────────────────────────────────────────
+    // An oracle must prove both sides describe the SAME object. Nothing below is a measurement until it does.
+    const snapName = (snap.preset ?? '').trim();
+    const devName = await devicePresetName(s.transport);
+    console.log(`identity — snapshot: ${JSON.stringify(snapName)}${snap.at ? ` @ ${snap.at}` : ''}${
+      snap.bodyHash ? ` bodyHash ${snap.bodyHash.slice(0, 12)}` : ''
+    }`);
+    console.log(`identity — device  : ${JSON.stringify(devName)}`);
+    if (!devName) {
+      console.log('\nVOID RUN — the unit did not report its preset name, so the snapshot and the unit');
+      console.log('cannot be shown to be the same object. No per-param verdict is reported. (exit 4)');
+      return 4;
+    }
+    if (normName(devName) !== normName(snapName)) {
+      console.log('\nVOID RUN — the unit is on a DIFFERENT preset than the snapshot describes.');
+      console.log('Re-anchor: take a fresh server snapshot while the unit sits still, then re-run.');
+      console.log('Nothing below would have been a device finding. (exit 4)');
+      return 4;
+    }
+
+    console.log(`\ntaper audit vs the INSTRUMENT — preset “${snap.preset ?? '?'}”, ${targets.length} params`);
     console.log('READ-ONLY (view 0x00). “ours” = what the server serves; “device” = the unit’s own string.\n');
-    console.log('blk ch  pid  name                 ours           device          verdict');
-    console.log('--- --  ---  -------------------  -------------  --------------  -------');
+    console.log('blk ch  pid  name                 ours           device          tol        verdict');
+    console.log('--- --  ---  -------------------  -------------  --------------  ---------  -------');
     for (const { b, p, why } of targets) {
       // USE THE HW-PROVEN ADAPTER, do not re-implement matching. `adaptRequest` (services/deviceCache.ts)
       // is the CaptureRig matcher the live-walk uses: it matches on the fn, the VIEW echo (f[6]), the
@@ -125,6 +201,7 @@ export async function main(argv: string[]): Promise<number> {
       const dev = disp != null ? parseDisplayValue(disp) : null;
       const ours = p.value as number;
       let verdict: string;
+      let tolStr = '—';
       if (dev == null) {
         verdict = disp == null ? 'UNREADABLE' : `UNPARSED (“${disp}”)`;
         unreadable += 1;
@@ -133,21 +210,31 @@ export async function main(argv: string[]): Promise<number> {
         bad.push(
           `${b.name ?? b.eid}/${p.id} ${p.name ?? ''}: ${verdict} — matched frame length ${last ? last.join('/') : 'none (no frame echoed this param)'}`
         );
-      } else if (Math.abs(ours - dev) <= tolerance(p)) {
-        verdict = 'match';
-        match += 1;
       } else {
-        verdict = `MISMATCH ${why}`;
-        mismatch += 1;
-        bad.push(`${b.name ?? b.eid}/${p.id} ${p.name ?? ''}: ours ${ours} vs device ${dev} (${why})`);
+        const { tol, ulp } = toleranceFromDisplay(disp as string, ours);
+        tolStr = String(Number(tol.toPrecision(3)));
+        const diff = Math.abs(ours - dev);
+        if (diff <= tol) {
+          match += 1;
+          // Passed, but only because the displayed number is coarse — say so rather than banking it.
+          const isCoarse = diff > ulp / 4;
+          if (isCoarse) coarse += 1;
+          verdict = isCoarse ? 'match (coarse display)' : 'match';
+        } else {
+          verdict = `MISMATCH ${why}`;
+          mismatch += 1;
+          bad.push(
+            `${b.name ?? b.eid}/${p.id} ${p.name ?? ''}: ours ${ours} vs device ${dev} (±${tolStr}) (${why})`
+          );
+        }
       }
       console.log(
         `${String(b.eid).padStart(3)} ${String(b.channel ?? '?').padStart(2)}  ${String(p.id).padStart(3)}  ${(
           p.name ?? ''
-        ).slice(0, 19).padEnd(19)}  ${String(ours).padEnd(13)}  ${String(disp ?? '—').padEnd(14)}  ${verdict}`
+        ).slice(0, 19).padEnd(19)}  ${String(ours).padEnd(13)}  ${String(disp ?? '—').padEnd(14)}  ${tolStr.padEnd(9)}  ${verdict}`
       );
     }
-    console.log(`\nsummary: ${match} match, ${mismatch} MISMATCH, ${unreadable} unreadable`);
+    console.log(`\nsummary: ${match} match (${coarse} only within a coarse display), ${mismatch} MISMATCH, ${unreadable} unreadable`);
     if (bad.length) {
       console.log('\n--- everything that did not match ---');
       for (const line of bad) console.log('  ' + line);
