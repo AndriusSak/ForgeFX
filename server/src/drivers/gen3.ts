@@ -414,6 +414,17 @@ class Gen3Driver implements DeviceDriver {
     return { number: r.presetNumber, name: r.name };
   }
 
+  /** The preset identity string (`<number>:<name>`) the placement evidence is KEYED to (finding #15),
+   *  or `null` when the device will not answer. Read only at evidence-seed and at an ambiguous omission
+   *  (a successful dump that omits a block we have evidence for), never on the hot status cadence — so
+   *  a front-panel / MIDI preset change is caught by a genuine extra query rather than guessed. */
+  async #presetIdentity(): Promise<string | null> {
+    try {
+      const r = await this.presetRef();
+      return r.number >= 0 ? `${r.number}:${r.name}` : null;
+    } catch { return null; } // an unreadable identity falls back to the failure-proof miss counting
+  }
+
   /** Routing grid via the hardware-validated dump decoder. Deduped + short-TTL cached. */
   async grid(): Promise<PresetGridDTO> {
     if (this.#gridInflight) return this.#gridInflight; // coalesce concurrent callers
@@ -786,9 +797,14 @@ class Gen3Driver implements DeviceDriver {
    * This method is the SINGLE WRITER of `#placedCache` (finding #1): `ok` is the only gate, so a
    * FAILED read can neither erase the evidence that a block is placed nor refresh its stamp. A
    * successful read updates the evidence and counts an OMISSION of a known-placed block as one miss;
-   * only PLACED_MISS_LIMIT *consecutive successful* omissions retire it (a real front-panel removal is
-   * visible only through successful dumps, so that is the only signal that may retire it — a failure
-   * streak never reaches the update and so can never retire anything).
+   * only PLACED_MISS_LIMIT successful omissions *separated in time* (PLACED_MISS_MIN_INTERVAL_MS) retire
+   * it (a real front-panel removal is visible only through successful dumps, so that is the only signal
+   * that may retire it — a failure streak never reaches the update and so can never retire anything).
+   * The separation is finding #3: the channel watch calls this every 8th meter tick, so without it a
+   * single persistently partial dump counts as several omissions and retires a placed block faster than
+   * the TTL this contract removed. The evidence is also keyed to the preset identity (finding #15): when
+   * a successful dump omits something AND the identity has moved, the old evidence describes another
+   * preset and is dropped rather than allowed to refuse the new preset's blocks.
    */
   async #statusByEffectId(): Promise<StatusRead> {
     const dev = await this.#conn();
@@ -833,21 +849,49 @@ class Gen3Driver implements DeviceDriver {
       const now = Date.now();
       const prev = this.#placedCache;
       if (prev) {
+        const omitted = prev.eids.filter((e) => !map.has(e));
+        // FINDING #15: the evidence describes the preset it was SEEDED in. A front-panel preset change
+        // or a MIDI program change moves the preset identity but not our own write path, so the old
+        // evidence would otherwise linger as "the union of the old and the new preset" and refuse
+        // old-preset blocks as torn reads. When a successful dump omits something AND the identity has
+        // moved, the old evidence is about a DIFFERENT preset — drop it and re-seed from this dump
+        // (no miss carried). The identity read happens ONLY here (an ambiguous omission) and at seed,
+        // so the hot channel-watch cadence pays nothing for it.
+        if (omitted.length > 0 && prev.preset != null) {
+          const nowPreset = await this.#presetIdentity();
+          if (nowPreset != null && nowPreset !== prev.preset) {
+            this.#placedCache = { eids: [...map.keys()], misses: new Map(), lastMissAt: new Map(), at: now, preset: nowPreset };
+            return { byEffectId: map, ok, missingPlaced: [] };
+          }
+        }
         const misses = new Map(prev.misses);
+        const lastMissAt = new Map(prev.lastMissAt);
         for (const e of prev.eids) {
-          if (map.has(e)) misses.delete(e); // enumerated again → the omission streak is broken
-          else misses.set(e, (misses.get(e) ?? 0) + 1);
+          if (map.has(e)) { misses.delete(e); lastMissAt.delete(e); continue; } // enumerated again → the omission streak is broken
+          // FINDING #3: count at most ONE miss per PLACED_MISS_MIN_INTERVAL_MS. The channel watch calls
+          // this every 8th meter tick (0.48–3.2 s); without the interval a single PERSISTENTLY PARTIAL
+          // dump would be counted as several independent omissions and retire a placed block in ~1.5 s,
+          // i.e. FASTER than the 10 s wall-clock TTL this change removed — reopening the very
+          // channel-A substitution it closed. Time separation is the honest discriminator here: the
+          // fn-0x13 reply has no length or identity, so a torn frame is indistinguishable from a
+          // complete one within a single read.
+          const since = lastMissAt.get(e);
+          if (since === undefined || now - since >= Gen3Driver.PLACED_MISS_MIN_INTERVAL_MS) {
+            misses.set(e, (misses.get(e) ?? 0) + 1);
+            lastMissAt.set(e, now);
+          }
         }
         const retired = new Set<number>();
         for (const [e, n] of misses) if (n >= Gen3Driver.PLACED_MISS_LIMIT) retired.add(e);
-        for (const e of retired) misses.delete(e); // retired blocks are dropped, not kept at the limit
+        for (const e of retired) { misses.delete(e); lastMissAt.delete(e); } // retired blocks are dropped, not kept at the limit
         const eids = [...new Set([...map.keys(), ...prev.eids])].filter((e) => !retired.has(e));
         // Only blocks STILL trusted (not retired as genuinely removed) are reported as missing.
         missingPlaced = prev.eids.filter((e) => !map.has(e) && !retired.has(e));
-        this.#placedCache = { eids, misses, at: now };
+        this.#placedCache = { eids, misses, lastMissAt, at: now, preset: prev.preset };
       } else {
-        // First good read of this edit buffer → the dump's own keys ARE the initial evidence.
-        this.#placedCache = { eids: [...map.keys()], misses: new Map(), at: now };
+        // First good read of this edit buffer → the dump's own keys ARE the initial evidence. Record
+        // the preset identity (finding #15) so a later front-panel preset change is detectable.
+        this.#placedCache = { eids: [...map.keys()], misses: new Map(), lastMissAt: new Map(), at: now, preset: await this.#presetIdentity() };
       }
     }
     return { byEffectId: map, ok, missingPlaced };
@@ -1934,14 +1978,27 @@ class Gen3Driver implements DeviceDriver {
   // "this block is not placed". SINGLE WRITER: `#statusByEffectId`, and only on a successful read (a
   // failed read leaves this untouched). `at` is the wall-clock of the last successful read and paces
   // ONLY the sweep's cheap reuse (`#sweepTargets`) — it is NOT an expiry for the refusal. `misses`
-  // counts CONSECUTIVE successful dumps that omitted each still-trusted eid; a block is retired only
-  // after PLACED_MISS_LIMIT such omissions.
-  #placedCache: { eids: number[]; misses: Map<number, number>; at: number } | null = null;
+  // counts CONSECUTIVE successful dumps that omitted each still-trusted eid, but only when the
+  // omissions are SEPARATED IN TIME (`lastMissAt`, PLACED_MISS_MIN_INTERVAL_MS — finding #3: a burst of
+  // reads on the channel-watch cadence is ONE observation, not several). `preset` is the preset
+  // identity (`<number>:<name>`, null when unreadable) recorded when the evidence was seeded — finding
+  // #15: a front-panel / MIDI preset change moves it, and a mismatch DROPS the stale evidence instead
+  // of letting the old preset's blocks be refused as torn reads.
+  #placedCache: { eids: number[]; misses: Map<number, number>; lastMissAt: Map<number, number>; at: number; preset: string | null } | null = null;
   static PLACED_TTL_MS = 10_000; // how long the placed-block list may be reused before the sweep asks for a fresh status read (perf only — never a refusal expiry)
   // Consecutive SUCCESSFUL dumps that may omit a known-placed block before the block is retired as
   // genuinely removed. Measured in successful reads, not seconds, so a failure streak (which advances
   // no miss — see `#statusByEffectId`) can never retire a block we know is placed.
   static PLACED_MISS_LIMIT = 3;
+  // Finding #3: counted misses for one eid must be separated by at least this much wall-clock time, so
+  // a PERSISTENTLY PARTIAL dump cannot be read as several independent omissions. The fn-0x13 reply
+  // declares no length and carries no preset identity, so a torn frame and a complete frame have the
+  // same shape — persistence across time is the only independent discriminator available, and it is
+  // what the removed 10 s TTL actually encoded. With LIMIT=3 the earliest retirement is
+  // (PLACED_MISS_LIMIT-1) × PLACED_MISS_MIN_INTERVAL_MS = 10 s of UNBROKEN successful omission — never
+  // faster than the TTL this change removed, and still impossible on a failure streak (only a
+  // successful read advances a miss).
+  static PLACED_MISS_MIN_INTERVAL_MS = 5_000;
 
   /** FM3 device-edit POLL (capability deviceEditWatch — FM3 doesn't push, unlike FM9/III). The registry
    *  supervisor calls this on a timer; we re-read the open block (if any) via the fn-0x1F bulk read and
@@ -2081,18 +2138,37 @@ class Gen3Driver implements DeviceDriver {
     // An identity row (raw IS the value) cannot take a normalised position: the continuous knob norm is
     // mapped back through the row's [min,max] to the VALUE and sent as float32(value) — the same typed-SET
     // frame (fn 0x01, sub 0x09) the tempo write uses (`buildSetTempoViaParam`: eid 2 / pid 0x20 =
-    // CONTROLLERS/32). Only TEMPO's write form has been validated on the unit; Stages / Bank Size / TONETYPE
-    // share the frame but their writes have never been sent to hardware (forgefx-midi rangeOverlay.ts —
-    // `writeValidated` is present on Tempo alone).
+    // CONTROLLERS/32).
     //
-    // The write goes through #write, NOT #send. This is a discrete typed-SET (the same fn 0x01 frame the
-    // enum write below sends), so a device REFUSAL must be VISIBLE: #send is fire-and-forget and always
-    // reported {ok:true}, so a refused identity write looked accepted. #write watches the SAME 250 ms window
-    // for a 0x64 rejection echoing fn 0x01 and returns {ok:false} — and it sends the IDENTICAL bytes (no
-    // retry, no extra match requirement beyond the function byte every fn-0x01 op already shares).
+    // TWO decisions, both consumed from the codec's machine-readable `writeValidated` marker (finding #5)
+    // and the `continuous` flag (finding #4):
+    //
+    //  * VALIDATION (finding #5). The identity write form (`buildSetTempoViaParam`) has been sent to
+    //    hardware for TEMPO alone; Stages / Bank Size (GLOBAL/67, a global setting) / TONETYPE share the
+    //    frame shape but their writes have NEVER reached the unit (forgefx-midi rangeOverlay.ts carries
+    //    `writeValidated` on Tempo and nothing else). A write to an identity row whose row is not
+    //    `writeValidated` is REFUSED as {ok:false} — visibly unvalidated, in the write path's EXISTING
+    //    contract (no new client field). Refusing an unproven frame is the same fail-closed rule the read
+    //    path already follows ("a control that cannot be served is reported, never faked").
+    //
+    //  * OBSERVATION COST (finding #4). A continuous identity write is a KNOB DRAG: it streams at high
+    //    frequency, so it is fire-and-forget via #send (instant, matching every other continuous write and
+    //    this method's own header). Routing it through #write made every drag tick hold the serial port for
+    //    the full 250 ms window (an ACCEPTED write leaves the device silent, so the window never closes
+    //    early), and because requests share ONE chain, meters/polls queued behind each tick. A ONE-SHOT
+    //    (discrete) set still goes through #write so a device REFUSAL reaches the caller — the property the
+    //    identity-write observation was added for.
     const idRange = continuous ? this.#identityRange(eid, paramId) : undefined;
-    const idRaw = idRange ? displayToWire(idRange.displayMin + clamp01(value) * (idRange.displayMax - idRange.displayMin), { displayMin: idRange.displayMin, displayMax: idRange.displayMax, displayScale: 'identity' }) : undefined;
-    const r = idRaw !== undefined ? await this.#write(this.#codec.buildSetParameter(eid, paramId, idRaw)) : continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
+    let r: { ok: boolean };
+    if (idRange) {
+      if (idRange.writeValidated !== true) return { ok: false }; // finding #5: an unvalidated frame is REFUSED, not sent blind
+      const idRaw = displayToWire(idRange.displayMin + clamp01(value) * (idRange.displayMax - idRange.displayMin), { displayMin: idRange.displayMin, displayMax: idRange.displayMax, displayScale: 'identity' });
+      // Only a CONTINUOUS identity write reaches here (idRange is computed for `continuous` only), so it
+      // is fire-and-forget; the discrete form takes the `#write` branch below.
+      r = await this.#send(this.#codec.buildSetParameter(eid, paramId, idRaw));
+    } else {
+      r = continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
+    }
     // W1.2: the `param` event's `norm` is the 0..1 NORMALIZED value (drivers/types.ts). A discrete
     // write's `value` is the enum/model ORDINAL, so broadcasting it as a norm handed every other
     // window a value far outside 0..1 (Axis applies `p.norm = e.norm` verbatim). The event has no
@@ -2101,11 +2177,15 @@ class Gen3Driver implements DeviceDriver {
     if (continuous) this.#emit({ type: 'param', effectId: eid, paramId, norm: clamp01(value) });
     return r;
   }
-  /** The row's range when (eid, paramId) is a measured raw-is-value ('identity') row, else undefined. */
-  #identityRange(eid: number, paramId: number): { displayMin: number; displayMax: number } | undefined {
+  /** The row's range when (eid, paramId) is a measured raw-is-value ('identity') row, else undefined.
+   *  Carries `writeValidated` through (finding #5) so the WRITE path can refuse an identity row whose
+   *  frame form has never been sent to hardware. `RangeDef` does not declare that field, so it is read
+   *  off the row via the same object-typed access `rangeIsIdentity` already uses. */
+  #identityRange(eid: number, paramId: number): { displayMin: number; displayMax: number; writeValidated?: boolean } | undefined {
     const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
     const range = family ? this.#prof.ranges[family]?.[paramId] : undefined;
-    return range && rangeIsIdentity(range) && range.displayMax > range.displayMin ? range : undefined;
+    if (!range || !rangeIsIdentity(range) || range.displayMax <= range.displayMin) return undefined;
+    return { displayMin: range.displayMin, displayMax: range.displayMax, writeValidated: (range as { writeValidated?: boolean }).writeValidated };
   }
   /** Change a block's model/type (the family TYPE selector ordinal). */
   async setType(eid: number, value: number) {

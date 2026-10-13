@@ -45,7 +45,7 @@ const TYPE_ON_A = 213;
 const TYPE_ON_B = 250;
 const TYPE_ON_C = 316;
 
-export const STATUS_CHANNEL_UNKNOWN_CASE_COUNT = 11;
+export const STATUS_CHANNEL_UNKNOWN_CASE_COUNT = 14;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -71,7 +71,17 @@ interface Harness {
   driver: ReturnType<typeof createGen3Driver>;
   /** Script the fn-0x13 answer: a frame, or `null` for NO 0x13 frame at all (a timed-out read). */
   setStatus: (frame: number[] | null) => void;
+  /** Script what the unit answers the fn-0x0D patch-name query with — the preset IDENTITY the placement
+   *  evidence is keyed to (finding #15). Default: no answer (identity unknown). */
+  setPreset: (number: number, name: string) => void;
   ampBody: number[];
+}
+
+/** A fn-0x0D QUERY PATCH NAME reply: `[nn nn preset#][dd*32 name]`. */
+function patchNameReply(number: number, name: string): number[] {
+  const bytes = [...enc14(number)];
+  for (let i = 0; i < 32; i++) bytes.push(name.charCodeAt(i) & 0x7f || 0x00);
+  return sysex(0x0d, bytes);
 }
 
 /** Amp body with a different model ordinal on channels A/B/C, plus a complete Cab and Delay body. */
@@ -84,10 +94,12 @@ function makeHarness(): Harness {
   const cabBody = new Array(CAB_STRIDE * 4).fill(0);
   const delayBody = new Array(DELAY_STRIDE * 4).fill(0);
   let status: number[] | null = null;
+  let preset: { number: number; name: string } = { number: -1, name: '' }; // default: the unit does not answer the identity query
   const mock = new MockTransport('serial', 'mock-status-channel');
   mock.isOpen = true;
   mock.reply = (req) => {
     if (req[5] === 0x13) return status ? [status] : []; // no frame = the dump timed out
+    if (req[5] === 0x0d) return preset.number >= 0 ? [patchNameReply(preset.number, preset.name)] : [];
     if (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(AMP_EID))) return bulkFrames(AMP_EID, ampBody);
     if (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(CAB_EID))) return bulkFrames(CAB_EID, cabBody);
     if (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(DELAY_EID))) return bulkFrames(DELAY_EID, delayBody);
@@ -98,7 +110,7 @@ function makeHarness(): Harness {
     emit: () => {},
     getCadence: () => cadenceFor(MODEL, 'balanced')
   });
-  return { driver, setStatus: (frame) => { status = frame; }, ampBody };
+  return { driver, setStatus: (frame) => { status = frame; }, setPreset: (number, name) => { preset = { number, name }; }, ampBody };
 }
 
 /** Assert `fn()` REJECTS and carries `re` — a bare catch would also accept a typo in the harness. */
@@ -268,24 +280,95 @@ export async function runStatusChannelUnknownTests(): Promise<void> {
     } finally { Date.now = realNow; }
   }
 
-  // ── 11. FINDING #9 (removal semantics + reason text): a block omitted from SUCCESSIVE successful
+  // ── 11. FINDING #9 + #3 (removal semantics + reason text): a block omitted from SUCCESSIVE successful
   //    dumps (the only way a real front-panel removal ever shows) is retired after PLACED_MISS_LIMIT
-  //    such omissions and then served as NOT PLACED — never refused forever. During the grace window it
-  //    still refuses, with a reason that names the removal possibility instead of flatly "PARTIAL". ──
+  //    such omissions and then served as NOT PLACED — never refused forever. Finding #3 requires those
+  //    omissions to be SEPARATED IN TIME, so the clock is advanced by PLACED_MISS_MIN_INTERVAL_MS between
+  //    them; that is what makes them independent observations rather than one partial dump read thrice. ──
   {
     const h = makeHarness();
     h.setStatus(statusDump([[AMP_EID, 0], [DELAY_EID, 0]]));
     await h.driver.getActiveChannels(); // evidence: the Amp is placed
     h.setStatus(statusDump([[DELAY_EID, 0]])); // every subsequent successful dump omits the Amp
-    const m1 = await rejects(
-      () => h.driver.blockParams(AMP_EID),
-      /omitted eid \d+, which an earlier dump .* enumerated as placed/,
-      'the first consecutive omission still refuses'
-    );
-    assert(/no longer placed/.test(m1), 'the refusal names the removal possibility, not a flat "PARTIAL"');
-    await rejects(() => h.driver.blockParams(AMP_EID), /omitted eid \d+/, 'the second consecutive omission still refuses');
-    // PLACED_MISS_LIMIT-th consecutive omission: retired → the block reads as not placed (channel A).
+    const realNow = Date.now;
+    let clock = realNow();
+    Date.now = () => clock;
+    try {
+      const m1 = await rejects(
+        () => h.driver.blockParams(AMP_EID),
+        /omitted eid \d+, which an earlier dump .* enumerated as placed/,
+        'the first counted omission still refuses'
+      );
+      assert(/no longer placed/.test(m1), 'the refusal names the removal possibility, not a flat "PARTIAL"');
+      clock += 5_000; // PLACED_MISS_MIN_INTERVAL_MS — the next omission is a DISTINCT observation
+      await rejects(() => h.driver.blockParams(AMP_EID), /omitted eid \d+/, 'the second counted omission still refuses');
+      clock += 5_000; // PLACED_MISS_LIMIT-th counted omission: retired → the block reads as not placed.
+      assertEqual((await h.driver.blockParams(AMP_EID)).type?.value, TYPE_ON_A,
+        'after PLACED_MISS_LIMIT TIME-SEPARATED successful omissions the block is treated as genuinely removed');
+    } finally { Date.now = realNow; }
+  }
+
+  // ── 12. FINDING #3 (the defect this reopens): a PERSISTENTLY PARTIAL dump hammered at the registry's
+  //    real channel-watch cadence must NOT retire the placed block. The watch calls getActiveChannels()
+  //    every 8th meter tick (0.48–3.2 s) — facetiously fast compared to any single read — so if every
+  //    read counted a miss, three of them would retire the block in ~1.5 s, FASTER than the 10 s TTL the
+  //    fix removed, and the channel-A substitution would return. The reads below happen back-to-back
+  //    (well inside PLACED_MISS_MIN_INTERVAL_MS), which is exactly that cadence. ──
+  {
+    const h = makeHarness();
+    const realNow = Date.now;
+    let clock = realNow();
+    Date.now = () => clock;
+    try {
+      h.setStatus(statusDump([[AMP_EID, 0], [DELAY_EID, 0]]));
+      await h.driver.getActiveChannels(); // evidence: the Amp is placed
+      h.setStatus(statusDump([[DELAY_EID, 0]])); // a PARTIAL dump that omits the Amp, forever
+      // 10 watch ticks at the FASTEST real cadence (performance mode: 60 ms meter tick × 8 = 480 ms).
+      // Pre-fix this was 10 counted misses → retired well under 1 s. Post-fix it is ONE observation.
+      for (let i = 0; i < 10; i++) { await h.driver.getActiveChannels(); clock += 480; }
+      await rejects(
+        () => h.driver.blockParams(AMP_EID),
+        /omitted eid \d+, which an earlier dump .* enumerated as placed/,
+        'a partial dump read at the channel-watch cadence must NOT retire the placed block (faster-than-TTL channel-A substitution)'
+      );
+    } finally { Date.now = realNow; }
+  }
+
+  // ── 13. FINDING #3, the LEGITIMATE half: a block omitted from dumps that ARE separated in time (a real
+  //    front-panel removal) IS retired eventually. The control for case 12: the interval only slows the
+  //    clock, it does not stop a genuine removal from ever retiring the block. ──
+  {
+    const h = makeHarness();
+    h.setStatus(statusDump([[AMP_EID, 0], [DELAY_EID, 0]]));
+    await h.driver.getActiveChannels(); // evidence
+    h.setStatus(statusDump([[DELAY_EID, 0]]));
+    const realNow = Date.now;
+    let clock = realNow();
+    Date.now = () => clock;
+    try {
+      for (let i = 0; i < 2; i++) {
+        await rejects(() => h.driver.blockParams(AMP_EID), /omitted eid \d+/, `time-separated omission ${i + 1} still refuses`);
+        clock += 5_000;
+      }
+      assertEqual((await h.driver.blockParams(AMP_EID)).type?.value, TYPE_ON_A,
+        'a genuinely removed block IS retired once its omissions are separated in time');
+    } finally { Date.now = realNow; }
+  }
+
+  // ── 14. FINDING #15: a front-panel / MIDI preset change moves the preset IDENTITY, which the evidence
+  //    is keyed to. A successful dump of the NEW preset that omits a block from the OLD one must DROP the
+  //    stale evidence and serve the documented channel-A default — not refuse the old-preset block as a
+  //    torn read. ──
+  {
+    const h = makeHarness();
+    h.setPreset(7, 'OLD'); // the identity the evidence is seeded under
+    h.setStatus(statusDump([[AMP_EID, 0], [DELAY_EID, 0]]));
+    await h.driver.getActiveChannels(); // evidence seeded with preset 7:OLD
+    h.setPreset(8, 'NEW'); // the owner switched presets on the unit's front panel (or via MIDI)
+    h.setStatus(statusDump([[DELAY_EID, 1]])); // the new preset does not place the Amp
     assertEqual((await h.driver.blockParams(AMP_EID)).type?.value, TYPE_ON_A,
-      'after PLACED_MISS_LIMIT consecutive successful omissions the block is treated as genuinely removed');
+      'a preset change must drop the stale evidence and serve the channel-A default, not refuse the old-preset block');
+    // control: the block the NEW preset DOES place is served (no over-refusal on the healthy half).
+    assert((await h.driver.blockParams(DELAY_EID)).slug === 'delay', 'control: the new preset’s placed block is still served');
   }
 }

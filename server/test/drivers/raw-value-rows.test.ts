@@ -70,7 +70,7 @@ const REVERB_EID = effectRoster().find((e) => e.slug === 'reverb')!.page;
 /** The exact 23-byte typed-SET frame the identity Tempo write must put on the wire (pinned literal). */
 const TEMPO_120_FRAME = 'f000017411010900020020000000401704000000006df7';
 
-export const RAW_VALUE_ROWS_CASE_COUNT = 8;
+export const RAW_VALUE_ROWS_CASE_COUNT = 10;
 
 export async function runRawValueRowsTests(): Promise<void> {
   // ── 1. READ: Tempo + Stages (CONTROLLERS, eid 2) through blockParams() ───────────────────────────────
@@ -155,18 +155,20 @@ export async function runRawValueRowsTests(): Promise<void> {
   }
 
   // ── 6. REFUSAL SURFACED: a device rejection (0x64 echoing fn 0x01) must reach the CALLER, not be dropped.
-  //      PRE-FIX the identity path used #send (fire-and-forget) and returned {ok:true} regardless — the
-  //      `refused.ok === false` assertion below FAILED against that code path. ─────────────────────────────
+  //      Finding #4 splits the two paths: a ONE-SHOT (discrete, continuous:false) identity set still
+  //      observes the reply via #write, so its refusal reaches the caller; a continuous knob drag is
+  //      fire-and-forget and cannot surface it (case 9 pins that trade-off deliberately). A discrete
+  //      Tempo set of 120 sends the SAME typed-SET frame the validated continuous write does. ──────────
   {
     const rejecting = () => [sysex(0x64, [0x01, 0x0b])]; // MULTIPURPOSE_RESPONSE [echoedFn 0x01, resultCode]
     const { mock, driver } = makeReplyDriver(CONTROLLERS_EID, rejecting);
-    const refused = await driver.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
-    assert(refused.ok === false, `a REFUSED identity write must surface ok:false to the caller, got ${JSON.stringify(refused)}`);
+    const refused = await driver.setParam(CONTROLLERS_EID, 32, 120, false); // one-shot discrete set
+    assert(refused.ok === false, `a REFUSED one-shot identity write must surface ok:false to the caller, got ${JSON.stringify(refused)}`);
     // And the frame really went out (it was not dropped before the wire).
     assert(mock.sent.some((f) => compactHex(f) === TEMPO_120_FRAME), `the refused identity write must still have been sent (${TEMPO_120_FRAME}); sent: ${mock.sent.map(compactHex).join(' | ')}`);
     // Control: a 0x64 echoing a DIFFERENT function is NOT our rejection — the write stays accepted.
     const { driver: foreign } = makeReplyDriver(CONTROLLERS_EID, () => [sysex(0x64, [0x1f, 0x0b])]);
-    const notOurs = await foreign.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
+    const notOurs = await foreign.setParam(CONTROLLERS_EID, 32, 120, false);
     assert(notOurs.ok === true, 'a 0x64 echoing another function (0x1f) must NOT be attributed to the identity write');
   }
 
@@ -192,5 +194,52 @@ export async function runRawValueRowsTests(): Promise<void> {
     }
   }
 
-  console.log('  raw-value-rows: Tempo 120 / Stages 8 / Bank Size 3 / TONETYPE 1 SERVED through blockParams(); identity write pinned to the exact frame, its refusal surfaced; only Tempo marked writeValidated');
+  // ── 9. FINDING #4 (the observation cost): a CONTINUOUS identity write is a knob drag and must NOT pay
+  //      the #write observation (the 250 ms window) per tick — it is fire-and-forget via #send. Pinned by
+  //      counting the transport's OBSERVATION calls (dev.request, i.e. #write) vs the fire-and-forget
+  //      ones: PRE-FIX every drag tick was an observation, so `requests === 0` FAILED. ──────────────────
+  {
+    const { mock, driver } = makeReplyDriver(CONTROLLERS_EID, () => []); // silent device = accept
+    let requests = 0;
+    const origRequest = mock.request.bind(mock);
+    mock.request = (b, o) => { requests += 1; return origRequest(b, o); };
+    const sentBefore = mock.sent.length;
+    for (let i = 0; i < 8; i++) await driver.setParam(CONTROLLERS_EID, 32, 0.5, true); // a knob drag
+    assert(requests === 0, `a continuous identity (knob-drag) write must NOT pay the #write observation (250 ms) per tick — made ${requests} observation request(s)`);
+    assert(mock.sent.length - sentBefore === 8, `each drag tick must still reach the wire (fire-and-forget); sent ${mock.sent.length - sentBefore} of 8`);
+    // Control: a ONE-SHOT identity set DOES observe its reply — that is the path the refusal (case 6)
+    // rides on, so case 9 cannot be satisfied by deleting the observation entirely.
+    const { mock: m2, driver: d2 } = makeReplyDriver(CONTROLLERS_EID, () => []);
+    let req2 = 0;
+    const orig2 = m2.request.bind(m2);
+    m2.request = (b, o) => { req2 += 1; return orig2(b, o); };
+    await d2.setParam(CONTROLLERS_EID, 32, 120, false);
+    assert(req2 === 1, `a one-shot identity set must still observe its reply (the refusal path); made ${req2}`);
+  }
+
+  // ── 10. FINDING #5 (consume `writeValidated`): a write to an identity row whose frame form has NEVER
+  //      been sent to hardware is REFUSED as {ok:false} — visibly unvalidated, in the write path's existing
+  //      contract. PRE-FIX only a comment recorded the risk and the frame went out on all three rows, so
+  //      the `ok === false` / `sent === 0` assertions below FAILED. ────────────────────────────────────────
+  {
+    const UNVALIDATED: Array<[number, number, string]> = [
+      [CONTROLLERS_EID, 36, 'Stages'],
+      [GLOBAL_EID, 67, 'Bank Size'],
+      [REVERB_EID, 67, 'TONETYPE']
+    ];
+    for (const [eid, pid, name] of UNVALIDATED) {
+      const { mock, driver } = makeReplyDriver(eid, () => []);
+      const r = await driver.setParam(eid, pid, 0.5, true); // a knob drag on an unvalidated identity row
+      assert(r.ok === false, `${name} (eid ${eid}/${pid}) is NOT write-validated — the write must be visibly REFUSED, got ${JSON.stringify(r)}`);
+      assert(mock.sent.length === 0, `${name}'s refused write must NOT put an unproven frame on the wire; sent ${mock.sent.map(compactHex).join(' | ')}`);
+    }
+    // Positive control: the ONE validated identity row (Tempo) still goes out — the refusal is specific
+    // to unvalidated rows, not a blanket ban on identity writes.
+    const { mock, driver } = makeReplyDriver(CONTROLLERS_EID, () => []);
+    const ok = await driver.setParam(CONTROLLERS_EID, 32, 120, false);
+    assert(ok.ok === true, 'the validated Tempo identity write must still proceed');
+    assert(mock.sent.some((f) => compactHex(f) === TEMPO_120_FRAME), 'the validated Tempo write must reach the wire');
+  }
+
+  console.log('  raw-value-rows: Tempo 120 / Stages 8 / Bank Size 3 / TONETYPE 1 SERVED through blockParams(); identity write pinned to the exact frame, its one-shot refusal surfaced, its continuous cost fire-and-forget; only Tempo marked writeValidated and only Tempo writable');
 }
