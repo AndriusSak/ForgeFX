@@ -19,7 +19,24 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
+import { adaptRequest } from '../src/services/deviceCache.js';
+import type { Transport } from '../src/transport/types.js';
 import { buildValueQuery, decodeReply, parseDisplayValue } from 'forgefx-midi/cache';
+
+/**
+ * Read ONE param's formatted display string from the instrument, through the HW-proven reply matcher.
+ * Returns the frame (for reporting its length) and the decoded string when the reply is a value view.
+ */
+async function readFormattedValue(
+  transport: Transport,
+  eid: number,
+  pid: number
+): Promise<{ frame: Uint8Array | null; disp: string | null }> {
+  const frame = await adaptRequest(transport, buildValueQuery(MODEL, eid, pid));
+  if (!frame) return { frame: null, disp: null };
+  const dec = decodeReply(frame);
+  return { frame, disp: dec && dec.view === 'value' ? dec.value : null };
+}
 
 const MODEL = 0x11;
 const SNAPSHOT = `${process.env.HOME}/.hermes/cache/scratch/taper-audit/params-snapshot.json`;
@@ -83,7 +100,6 @@ export async function main(argv: string[]): Promise<number> {
   let match = 0;
   let mismatch = 0;
   let unreadable = 0;
-  let rejectedFrames = 0; // frames that did not echo the param they claimed to answer
   const bad: string[] = [];
   try {
     console.log(`taper audit vs the INSTRUMENT — preset “${snap.preset ?? '?'}”, ${targets.length} params`);
@@ -91,40 +107,19 @@ export async function main(argv: string[]): Promise<number> {
     console.log('blk ch  pid  name                 ours           device          verdict');
     console.log('--- --  ---  -------------------  -------------  --------------  -------');
     for (const { b, p, why } of targets) {
-      // Frame SELECTION, not frame luck. A long reply arrives as one or more frames and the transport
-      // hands back every one it saw; taking the last gave a 30-byte FRAGMENT whose payload length check
-      // fails inside decodeReply (cnt 32 needs 52 inner bytes), which is why the first run read as
-      // "UNREADABLE" for most params while the tap showed a reply to every query. So: scan every captured
-      // frame for one that decodes, and retry a few times before believing a silence.
+      // USE THE HW-PROVEN ADAPTER, do not re-implement matching. `adaptRequest` (services/deviceCache.ts)
+      // is the CaptureRig matcher the live-walk uses: it matches on the fn, the VIEW echo (f[6]), the
+      // BLOCK-HIGH echo (f[9]) and both PARAM bytes (f[10]/f[11]) — the device does NOT echo block-low
+      // (its inner[2] is a constant), and a hand-rolled `f[8] === eid` check is exactly the bug that once
+      // wedged the query stream (FORGEFX-32). It returns ONE matched frame, which is what decodeReply wants.
+      // Retry a couple of times before believing a silence; a miss is not evidence.
       let disp: string | null = null;
-      let sawFrames = 0;
       let lens: number[] = [];
-      for (let attempt = 0; attempt < 3 && disp == null; attempt += 1) {
-        const frames = await s.transport.request(buildValueQuery(MODEL, b.eid, p.id), {
-          timeoutMs: 2500,
-          quietMs: 60,
-        });
-        sawFrames += frames ? frames.length : 0;
-        if (frames) lens = frames.map((f) => f.length);
-        for (const f of frames ?? []) {
-          // ATTRIBUTION — a reply must ECHO the block and param it answers. Scanning a batch and taking
-          // the first frame that decodes can silently attribute a NEIGHBOURING param's reply to this pid
-          // (leftover frames from the previous query share the batch), which makes the comparison compare
-          // two different parameters. Frame layout: f0 00 01 74 | model | fn | eid(2) | pid(2) | payload.
-          if (f.length < 12) {
-            rejectedFrames += 1;
-            continue;
-          }
-          if (f[8] !== (b.eid & 0xff) || f[10] !== (p.id & 0xff)) {
-            rejectedFrames += 1;
-            continue;
-          }
-          const d = decodeReply(Uint8Array.from(f));
-          if (d && d.view === 'value') {
-            disp = d.value;
-            break;
-          }
-        }
+      for (let attempt = 0; attempt < 3 && disp == null && !lens.length; attempt += 1) {
+        const decoded = await readFormattedValue(s.transport, b.eid, p.id);
+        if (decoded.frame != null) lens = [decoded.frame.length];
+        if (decoded.disp != null) disp = decoded.disp;
+        else if (decoded.frame == null) lens = [];
       }
       const last = lens.length ? lens : null;
       const dev = disp != null ? parseDisplayValue(disp) : null;
@@ -136,7 +131,7 @@ export async function main(argv: string[]): Promise<number> {
         // Report the frame LENGTHS (and how many arrived) rather than a hex blob: a truncated fragment is
         // the failure this probe has actually hit, and its length is what shows it.
         bad.push(
-          `${b.name ?? b.eid}/${p.id} ${p.name ?? ''}: ${verdict} — ${sawFrames} frame(s), lengths ${last ? last.join('/') : 'none'}`
+          `${b.name ?? b.eid}/${p.id} ${p.name ?? ''}: ${verdict} — matched frame length ${last ? last.join('/') : 'none (no frame echoed this param)'}`
         );
       } else if (Math.abs(ours - dev) <= tolerance(p)) {
         verdict = 'match';
@@ -152,11 +147,7 @@ export async function main(argv: string[]): Promise<number> {
         ).slice(0, 19).padEnd(19)}  ${String(ours).padEnd(13)}  ${String(disp ?? '—').padEnd(14)}  ${verdict}`
       );
     }
-    console.log(
-      `\nsummary: ${match} match, ${mismatch} MISMATCH, ${unreadable} unreadable` +
-        (rejectedFrames ? `, ${rejectedFrames} frame(s) rejected for echoing a different param` : '') +
-        ' — a reading is only trustworthy if it answered the param it claimed to'
-    );
+    console.log(`\nsummary: ${match} match, ${mismatch} MISMATCH, ${unreadable} unreadable`);
     if (bad.length) {
       console.log('\n--- everything that did not match ---');
       for (const line of bad) console.log('  ' + line);
