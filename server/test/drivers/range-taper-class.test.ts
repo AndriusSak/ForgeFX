@@ -1,4 +1,4 @@
-// The log/linear taper decision for a range row, pinned against the INSTRUMENT's own readings.
+// The log/linear taper decision for a range row, pinned through the driver's REAL display path.
 //
 // INCIDENT (owner, 2026-10-13): with Cab Drive set to 5.00 on the unit, the app showed 0.32. The unit's own
 // display string (self-describe view 0x00, read with scripts/audit-taper-vs-device.ts) says "5.00" at raw
@@ -10,35 +10,43 @@
 // Typecode 0x52 — the "Drive"/gain-style class — lands on nibble 5 by coincidence and is NOT log: the
 // instrument is linear there (0.00 at raw 0 on the unit's screen, 5.00 at mid-scale for Cab Drive).
 //
-// WHAT THIS SUITE ASSERTS (review R18 finding #8 hardened this): the SERVED VALUE, not local arithmetic.
-// Every value below is computed through the codec's own `wireToDisplay` (the exact helper gen3.ts #display
-// calls) with the taper that the driver's own `rangeIsLog` selects — so a regression that flips the
-// decision moves the served side and this file goes red. It no longer re-implements the map inline, and the
-// raw↔norm divisor is the driver's real 65534 (not 65535).
+// WHAT THIS SUITE ASSERTS (review R18 finding #8; re-review R19 finding #1 hardened this): the value the
+// SERVER actually serves, obtained by calling `driver.blockParams()` over a MockTransport against the REAL
+// static FM3 profile — NOT a local re-derivation of gen3.ts `#display`. The three CAB rows below are read
+// through that real path, so the assertion covers the `kind === 'float'` gate, `rangeIsLog`'s taper
+// decision, the codec's `wireToDisplay`, the driver's own `round3` and its 65534 divisor, and the served
+// record's `log` flag. The driver's served `value` is compared against the instrument's own printed number.
+//
+//   NOT covered by this suite (named, not implied): `#display`'s catch-to-0..10 fallback and its
+//   `kind !== 'float'` branch — every fixture row here is a float row with a real range; and the six
+//   further nibble-5 rows in §2 are asserted for the taper DECISION only, not for a served value (see §2).
 //
 // Every typecode-0x52 param the audit could read disagreed with the unit: CABINET/33 Drive (0.316 vs 5.00),
 // CHORUS/20 Drive, FLANGER/20 Drive, FLANGER/26 Bass Focus, DELAY/22 Drive, DELAY/58 Resonance, REVERB/32
 // Drive. Those are the fixtures below. Real table data, real device numbers, no hardware needed.
 
-import { rangeIsLog } from '../../src/drivers/gen3.js';
+import { createGen3Driver, rangeIsLog } from '../../src/drivers/gen3.js';
+import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
+import { PROFILES } from '../../src/devices.js';
+import { effectRoster } from 'forgefx-midi/devices/gen3';
+import { createModernFractalCodec, packValue16 } from 'forgefx-midi/gen3/axe-fx-iii';
 import { wireToDisplay } from 'forgefx-midi/shared';
 import { FM3_RANGES } from 'forgefx-midi/gen3/fm3';
-import { assert, assertEqual } from '../helpers/mock.js';
+import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
+
+const MODEL = 0x11; // FM3
+const CAB_EID = effectRoster().find((e) => e.slug === 'cab')!.page;
 
 /** raw 32768 is exactly mid-scale (the unit's own reading was taken at this byte). */
 const MID_RAW = 32768;
-/** The driver normalises with /65534, NOT /65535: gen3.ts `#display` (`clamp01(raw / 65534)`) and
- *  `decodeEditBurst` (`clamp01((cur[id] ?? 0) / 65534)`) both divide by 65534. Keep this in lockstep with
- *  those, or the fixture's `norm` describes a wire value the server never computes. */
+/** The driver normalises with /65534, NOT /65535: gen3.ts `#display` computes `clamp01(raw / 65534)`.
+ *  The served `norm` is asserted equal to MID_RAW/RAW_MAX below — that is what pins the divisor. */
 const RAW_MAX = 65534;
-/** Normalised wire value, matching what the server serves as `norm`: 32768/65534 = 0.500015… (the earlier
- *  34266/65535 comment described a different fixture's raw and the wrong divisor). */
+/** Normalised wire value the server should serve for `MID_RAW`: 32768/65534 = 0.500015259… (65535 would
+ *  give 0.500007629…, so this distinguishes the two divisors). */
 const MID_NORM = MID_RAW / RAW_MAX;
 
-/** The driver's own rounding for a served display value (gen3.ts `round3`). */
-const round3 = (v: number): number => Math.round(v * 1000) / 1000;
-
-/** Minimal shape of an FM3 range row the value map needs. */
+/** Minimal shape of an FM3 range row the taper decision needs. */
 interface RangeRow {
   displayMin: number;
   displayMax: number;
@@ -46,26 +54,40 @@ interface RangeRow {
   taper?: string;
 }
 
-/**
- * The SERVED value, computed through the codec's own `wireToDisplay` — the exact helper gen3.ts `#display`
- * calls — with the taper the driver's own `rangeIsLog` picks, rounded the way the driver rounds it.
- * This is deliberately NOT local arithmetic: if the decision or the divisor regresses, the served side moves.
- */
-function served(raw: number, row: RangeRow): number {
-  const scale = rangeIsLog(row) ? 'log10' : 'linear';
-  return round3(wireToDisplay(raw, { displayMin: row.displayMin, displayMax: row.displayMax, displayScale: scale }));
+// ── the REAL driver over a mocked transport (same harness the other driver suites use) ──────────────
+const compactHex = (f: readonly number[]): string => f.map((b) => b.toString(16).padStart(2, '0')).join('');
+const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
+function sysex(fn: number, payload: readonly number[]): number[] {
+  const body = [0xf0, 0x00, 0x01, 0x74, MODEL, fn, ...payload];
+  let cs = 0;
+  for (const b of body) cs ^= b;
+  return [...body, cs & 0x7f, 0xf7];
+}
+/** fn=0x74/0x75/0x76 block-bulk-read reply carrying `values` (same shape as cab-btn-pseudo-param). */
+function blockBulkFrames(eid: number, values: readonly number[]): number[][] {
+  const body: number[] = [0x00, 0x02];
+  for (const v of values) body.push(...packValue16(v));
+  return [sysex(0x74, [...enc14(eid), ...enc14(values.length), 0x07]), sysex(0x75, body), sysex(0x76, [])];
 }
 
-/** A row pinned to a device reading the unit itself printed, at the raw it held. */
-interface ValueFixture {
-  family: string;
-  pid: number;
-  name: string;
-  raw: number;
-  /** the unit's own display string, as a number */
-  unit: number;
-  /** half the last digit the unit printed (scripts/audit-taper-vs-device.ts tolerance rule) */
-  tol: number;
+/** Read the CABINET block through the real gen-3 driver (mocked transport, real static FM3 profile).
+ *  `overrides` sets the raw wire value for specific paramIds so the SERVED value can be checked. */
+async function servCabParams(overrides: Record<number, number>) {
+  const profile = PROFILES[MODEL]!;
+  const stride = profile.rangeSections['CABINET']?.stride ?? 1;
+  const values = new Array(Math.max(stride, 1) * 4).fill(0);
+  for (const [pid, raw] of Object.entries(overrides)) values[Number(pid)] = raw;
+  const bulk = blockBulkFrames(CAB_EID, values);
+  const codec = createModernFractalCodec(profile.model);
+  const mock = new MockTransport('serial', 'mock-range-taper');
+  mock.isOpen = true;
+  mock.reply = (req) => (compactHex(req) === compactHex(codec.buildBlockBulkReadPoll(CAB_EID)) ? bulk : []);
+  const driver = createGen3Driver(profile, {
+    transport: async () => mock,
+    emit: () => {},
+    getCadence: () => cadenceFor(profile.model, 'balanced'),
+  });
+  return driver.blockParams(CAB_EID);
 }
 
 /** The typecode-nibble class size the correction was measured against. */
@@ -73,59 +95,86 @@ const NIBBLE_5_PARAMS = 17;
 const NIBBLE_4_PARAMS = 274;
 
 /** Assertions this suite makes when every row it names is present (the registration prints this). */
-export const RANGE_TAPER_CLASS_CASE_COUNT = 52;
+export const RANGE_TAPER_CLASS_CASE_COUNT = 44;
 
-export function runRangeTaperClassTests(): void {
-  // ── 1. Device readings, asserted through the SERVED value (finding #8: no local arithmetic) ────────
+export async function runRangeTaperClassTests(): Promise<void> {
+  // ── 1. The CAB rows, read through the driver's REAL display path (finding #8: the SERVED value) ────
   //      Cab Drive is the incident fixture (unit prints 5.00 at mid-scale; the shipped log map gave 0.316).
   //      The two nibble-4 rows are the controls: the unit agrees with the log map there.
   //      Tolerances follow the unit's own printed precision ("5.00"→0.005, "5000.1"→0.05, "10000"→0.5);
   //      Cab Drive's is widened to 0.01 because the 0.01 row-floor puts the correct linear decode at
   //      5.005 (a separate, out-of-scope bounds defect — review R18 finding 2) — the taper is what is tested.
-  const valueFixtures: ValueFixture[] = [
-    { family: 'CABINET', pid: 33, name: 'Drive', raw: MID_RAW, unit: 5.0, tol: 0.01 },
-    { family: 'CABINET', pid: 55, name: 'Frequency', raw: 26079, unit: 5000.1, tol: 0.05 },
-    { family: 'CABINET', pid: 39, name: 'High Cut 1', raw: 55670, unit: 10000, tol: 0.5 },
-  ];
-  for (const fx of valueFixtures) {
-    const row = (FM3_RANGES as Record<string, Record<number, RangeRow>>)[fx.family]?.[fx.pid];
-    assert(row !== undefined, `${fx.family}/${fx.pid} (${fx.name}) must exist in the FM3 range table`);
-    const got = served(fx.raw, row);
-    assert(
-      Math.abs(got - fx.unit) <= fx.tol,
-      `${fx.family}/${fx.pid} ${fx.name} at raw ${fx.raw}: SERVED ${got} must match the unit's own ` +
-        `${fx.unit} (±${fx.tol}) — computed via wireToDisplay, not local arithmetic`
-    );
-  }
+  const cab = await servCabParams({ 33: MID_RAW, 55: 26079, 39: 55670 });
 
-  // The Cab Drive fixture's power: the log map of the SAME row is the 0.316 the owner saw on screen. If
-  // this ever stops differing from 5.00, the fixture has lost its power.
-  const drive = (FM3_RANGES as Record<string, Record<number, RangeRow>>).CABINET?.[33];
-  assert(drive !== undefined, 'CABINET/33 (Drive) must exist in the FM3 range table');
-  assertEqual(rangeIsLog(drive), false, 'CABINET/33 Drive must NOT be log — the unit is linear there');
-  assertEqual((drive.typecode ?? 0) >> 4 & 0xf, 5, 'the fixture is only meaningful while Drive keeps nibble 5');
-  const driveAsLog = round3(
-    wireToDisplay(MID_RAW, { displayMin: drive.displayMin, displayMax: drive.displayMax, displayScale: 'log10' })
+  const drive = cab.named.find((n) => n.id === 33);
+  assert(drive !== undefined, 'CABINET/33 (Drive) must be SERVED for the cab block');
+  const driveVal = drive.value;
+  assert(driveVal !== null, 'CABINET/33 Drive must carry a served value');
+  assert(
+    Math.abs(driveVal - 5.0) <= 0.01,
+    `CABINET/33 Drive at raw ${MID_RAW}: the driver SERVED ${driveVal}, which must match the unit's own ` +
+      `5.00 (±0.01) — read through blockParams(), not local arithmetic`
+  );
+  // The divisor fact, asserted where it is actually used: the driver divides raw by 65534.
+  const driveNorm = drive.norm;
+  assert(
+    driveNorm !== null && Math.abs(driveNorm - MID_NORM) < 1e-12,
+    `CABINET/33 served norm must be raw/65534 = ${MID_NORM}, got ${driveNorm} ` +
+      `(÷65535 would give ${MID_RAW / 65535})`
+  );
+  // The taper decision reaches the served record: a linear row carries no `log` flag.
+  assertEqual(drive.log ?? false, false, 'CABINET/33 Drive is served LINEAR (no log flag) — the nibble-5 rule');
+
+  // The power of the fixture, stated separately and explicitly: the LOG map of the SAME row at the SAME
+  // raw is the 0.316 the owner saw on screen — so it is NOT the unit's number. A revert of the nibble
+  // rule makes blockParams() serve this log map and the value assertion above turns RED.
+  const driveRow = (FM3_RANGES as Record<string, Record<number, RangeRow>>).CABINET?.[33];
+  assert(driveRow !== undefined, 'CABINET/33 (Drive) must exist in the FM3 range table');
+  const driveAsLog = wireToDisplay(MID_RAW, {
+    displayMin: driveRow.displayMin,
+    displayMax: driveRow.displayMax,
+    displayScale: 'log10',
+  });
+  assert(
+    Math.abs(driveAsLog - 5.0) > 0.01,
+    `the LOG map of CABINET/33 at raw ${MID_RAW} must NOT be the unit's 5.00 (it is ${driveAsLog.toFixed(4)})`
   );
   assert(
     Math.abs(driveAsLog - 0.316) <= 0.002,
     `the log map of the same range must still be the wrong 0.316 (sanity on the fixture), got ${driveAsLog.toFixed(4)}`
   );
 
-  // ── 2. Every other param the audit caught: the DECISION *and* the SERVED VALUE it yields ────────────
-  //      Each row also carries the unit's reading from the hardened audit (2026-10-13). Only Cab Drive's
-  //      served value reproduces its device number today; the other six still MISMATCH on VALUE for a
-  //      bounds defect outside this test's scope (finding #2 — e.g. Chorus/Delay Drive carry a log-shaped
-  //      0.5..500 bound). So for the whole class we pin the TAPE's job: at mid-scale the served value must
-  //      be the LINEAR map (through the real helper), never the log map the {4,5} heuristic produced.
-  //        CHORUS/20  Drive       unit 0.00   (ours 0.5    — floor)
-  //        FLANGER/20 Drive       unit 4.00   (ours 20.049 at audit time)
-  //        FLANGER/26 Bass Focus  unit 0.00   (ours 200    — floor)
-  //        DELAY/22   Drive       unit 3.71   (ours 185.974 at audit time)
-  //        DELAY/58   Resonance   unit 1.99   (ours 41.395 at audit time)
-  //        REVERB/32  Drive       unit 0.00   (ours 0.1    — floor)
+  // The nibble-4 controls: the unit MATCHES the log map, so they are value-asserted through the same path.
+  const freq = cab.named.find((n) => n.id === 55);
+  assert(freq !== undefined, 'CABINET/55 (Frequency) must be SERVED for the cab block');
+  assert(
+    freq.value !== null && Math.abs(freq.value - 5000.1) <= 0.05,
+    `CABINET/55 Frequency must serve the unit's 5000.1 (±0.05), got ${freq.value}`
+  );
+  assertEqual(freq.log ?? false, true, 'CABINET/55 Frequency is served LOG (nibble-4 rule)');
+  const highCut = cab.named.find((n) => n.id === 39);
+  assert(highCut !== undefined, 'CABINET/39 (High Cut 1) must be SERVED for the cab block');
+  assert(
+    highCut.value !== null && Math.abs(highCut.value - 10000) <= 0.5,
+    `CABINET/39 High Cut 1 must serve the unit's 10000 (±0.5), got ${highCut.value}`
+  );
+  assertEqual(highCut.log ?? false, true, 'CABINET/39 High Cut 1 is served LOG (nibble-4 rule)');
+
+  // ── 2. The rest of the typecode-nibble-5 class: the DECISION, and an honest boundary ─────────────
+  //      These six rows are the others the hardened audit caught (2026-10-13). The audit recorded the
+  //      unit's own NUMBER for each, but NOT the raw it read them at — and this file records no raw for
+  //      them either, so a SERVED value cannot be compared against them here without inventing one. They
+  //      are therefore deliberately OUT of the value assertion (§1 covers the one row — Cab Drive — whose
+  //      (raw, unit) pair this file does record). What IS asserted for the whole class is the taper
+  //      DECISION, which is the correction's actual subject; a revert of the nibble rule turns these rows
+  //      red via `rangeIsLog` below.
+  //        CHORUS/20  Drive       unit 0.00
+  //        FLANGER/20 Drive       unit 4.00
+  //        FLANGER/26 Bass Focus  unit 0.00
+  //        DELAY/22   Drive       unit 3.71
+  //        DELAY/58   Resonance   unit 1.99
+  //        REVERB/32  Drive       unit 0.00
   const caught: [string, number, string][] = [
-    ['CABINET', 33, 'Drive'],
     ['CHORUS', 20, 'Drive'],
     ['FLANGER', 20, 'Drive'],
     ['FLANGER', 26, 'Bass Focus'],
@@ -138,17 +187,6 @@ export function runRangeTaperClassTests(): void {
     assert(row !== undefined, `${family}/${pid} (${name}) must exist in the FM3 range table`);
     assertEqual((row.typecode ?? 0) >> 4 & 0xf, 5, `${family}/${pid} ${name} should be in the nibble-5 class`);
     assertEqual(rangeIsLog(row), false, `${family}/${pid} ${name} must not be log (device-confirmed)`);
-    // The served value through the codec's own helper, with the driver's own decision, must be the LINEAR
-    // map at raw 0..65534. A revert to {4,5} moves this to the log map and turns the row red.
-    const got = served(MID_RAW, row);
-    const expectLinear = round3(
-      wireToDisplay(MID_RAW, { displayMin: row.displayMin, displayMax: row.displayMax, displayScale: 'linear' })
-    );
-    assertEqual(
-      got,
-      expectLinear,
-      `${family}/${pid} ${name}: the SERVED value at raw ${MID_RAW} must be the linear map (${expectLinear}), got ${got}`
-    );
   }
 
   // ── 3. The controls: nibble 4 IS log, and these matched the unit exactly ──────────────────────────
@@ -161,14 +199,6 @@ export function runRangeTaperClassTests(): void {
     assertEqual((row.typecode ?? 0) >> 4 & 0xf, 4, `${family}/${pid} ${name} should be in the nibble-4 class`);
     assertEqual(rangeIsLog(row), true, `${family}/${pid} ${name} must stay log — the unit agrees on it`);
   }
-  // Their served values (section 1) are the unit readings; a sanity check that the log map stays in bounds.
-  const freq = (FM3_RANGES as Record<string, Record<number, RangeRow>>).CABINET?.[55];
-  assert(freq !== undefined, 'CABINET/55 (Frequency) must exist in the FM3 range table');
-  const freqMid = served(MID_RAW, freq);
-  assert(
-    freqMid > freq.displayMin && freqMid < freq.displayMax,
-    'the log map must stay inside the row bounds (sanity)'
-  );
 
   // ── 4. Explicit taper always wins over the heuristic — that is where a per-param fix belongs ──────
   assertEqual(
@@ -205,7 +235,8 @@ export function runRangeTaperClassTests(): void {
   assertEqual(nib5, NIBBLE_5_PARAMS, 'the nibble-5 class size changed — re-audit before trusting the fix');
   assertEqual(nib4, NIBBLE_4_PARAMS, 'the nibble-4 class size changed — re-audit before trusting the fix');
   console.log(
-    `  range-taper-class: ${caught.length} device-confirmed nibble-5 params, 2 nibble-4 controls, ` +
+    `  range-taper-class: Cab Drive served ${driveVal} at raw ${MID_RAW} (unit 5.00); 3 CAB rows read ` +
+      `through blockParams(); ${caught.length} nibble-5 rows asserted DECISION-only (no recorded raw); ` +
       `class sizes ${nib4}/${nib5}`
   );
 }
