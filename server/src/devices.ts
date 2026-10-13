@@ -31,6 +31,8 @@ import {
   FM3_MONITOR_PARAMS,
   FM3_RANGE_SECTIONS,
   applyFm3RangeOverlay,
+  FM3_RANGE_OVERLAY,
+  type Fm3RangeOverlayEntry,
   type Fm3RangeTable,
 } from 'forgefx-midi/gen3/fm3';
 import {
@@ -452,6 +454,25 @@ type ParamsByFamily = Record<string, ParamDef[]>;
 type Ranges = Record<string, Record<number, RangeDef>>;
 type RangeSections = Record<string, { stride: number; recordCount: number }>;
 
+/** One row where the MEASURED FM3 range overlay (forgefx-midi `rangeOverlay.ts`) OVERRODE a value that
+ *  DIFFERED from the static catalogue row — i.e. the device cache disagreed with our corrected table on
+ *  an overlay row, and the overlay silently replaced the cache's value. Served (never logged-only) so a
+ *  maintainer SEES the masking instead of it being invisible: a future firmware that legitimately
+ *  changes one of these rows would otherwise be masked with no signal at all (review finding #5). */
+export interface OverlayOverride {
+  /** Family key as used in the range table (e.g. 'WAH'). */
+  family: string;
+  /** paramId within the family. */
+  paramId: number;
+  /** What the pre-overlay merged row carried (the device cache's value, or the static table's when the
+   *  cache had no row for this param) — the value the overlay replaced. */
+  masked: { min: number; max: number };
+  /** The static catalogue row's bounds (already overlay-corrected: FM3_RANGES applies the same overlay). */
+  catalogue: { min: number; max: number };
+  /** The overlay's own measured bounds — what is actually served for this row. */
+  overlay: { min: number; max: number };
+}
+
 export interface DeviceProfile {
   model: number; // SysEx model byte (f[4])
   key: string; // 'fm3' | 'fm9'
@@ -474,6 +495,12 @@ export interface DeviceProfile {
   staticRanges?: Ranges;
   /** Device-true fn=0x1F channel-block wire stride by family. Do not derive this from max(paramId); tables include special high ids. */
   rangeSections: RangeSections;
+  /** Rows where the MEASURED FM3 range overlay masked a device-cache value that DIFFERED from the static
+   *  catalogue — i.e. the cache disagreed with our corrected table on an overlay row and the overlay
+   *  replaced it. Set only on runtime profiles (see `runtimeProfileFrom`); served via /diag and
+   *  /diag/ranges so the override is VISIBLE rather than silent. Empty when the cache agreed (the
+   *  normal same-firmware case). */
+  overlayOverrides?: OverlayOverride[];
   /** Per-family paramIds the device's OWN editor layouts draw as a continuous 'knob' (any variant), so
    *  the serve filters honour a knob the catalog tags with a non-display unit. See layoutWidgetByFamily. */
   layoutKnobIds?: ReadonlyMap<string, ReadonlySet<number>>;
@@ -692,6 +719,34 @@ export const profileForModel = (model: number): DeviceProfile => PROFILES[model]
 export const profileForKey = (key: string): DeviceProfile | undefined => Object.values(PROFILES).find((p) => p.key === key);
 
 /**
+ * Rows the MEASURED FM3 range overlay is about to override, where the value it REPLACES differs from the
+ * static catalogue row. `preOverlay` is the range map immediately BEFORE `applyFm3RangeOverlay` runs (the
+ * cache rows already merged over the static ones), `catalogue` is the static table (`FM3_RANGES`, itself
+ * already overlay-corrected). A row is reported ONLY when the pre-overlay value (the device cache's row,
+ * or the static row when the cache had none) DIFFERS from the catalogue — i.e. the cache disagrees with
+ * our corrected table and the overlay is masking that disagreement. Both value sets are carried so the
+ * diagnostic is actionable, and only `displayMin`/`displayMax` are compared because those are the fields
+ * the overlay touches (a cache row never carries `valueMap`, so comparing it would flag every row).
+ */
+export function collectOverlayOverrides(preOverlay: Ranges, catalogue: Ranges): OverlayOverride[] {
+  const out: OverlayOverride[] = [];
+  for (const entry of FM3_RANGE_OVERLAY as readonly Fm3RangeOverlayEntry[]) {
+    const masked = preOverlay[entry.family]?.[entry.paramId];
+    const stat = catalogue[entry.family]?.[entry.paramId];
+    if (!masked || !stat) continue;
+    if (masked.displayMin === stat.displayMin && masked.displayMax === stat.displayMax) continue;
+    out.push({
+      family: entry.family,
+      paramId: entry.paramId,
+      masked: { min: masked.displayMin, max: masked.displayMax },
+      catalogue: { min: stat.displayMin, max: stat.displayMax },
+      overlay: { min: entry.displayMin, max: entry.displayMax }
+    });
+  }
+  return out;
+}
+
+/**
  * Overlay a device-cache-derived `BuiltCache` (from the on-connect self-describe walk) onto a static
  * gen-3 profile: DEVICE data wins where the cache has it, the static profile supplies everything else.
  *   • rosterFor — the family's device-true model list from `built.rosters` (keyed by catalog family,
@@ -754,10 +809,31 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   //
   // The overlay is device-specific data (its entries were measured on an FM3), so it is applied ONLY
   // when this profile's static table IS the FM3 table — identity, not a hardcoded model byte.
-  const finalRanges: Ranges =
-    staticProfile.ranges === (FM3_RANGES as unknown as Ranges)
-      ? (applyFm3RangeOverlay(mergedRanges as unknown as Fm3RangeTable) as unknown as Ranges)
-      : mergedRanges;
+  //
+  // REVIEW FINDING #5 — the overlay is UNCONDITIONAL over the firmware, and that is the choice made
+  // here (option (b): keep it unconditional but make every override VISIBLE), for three reasons:
+  //   • The option (a) firmware gate would be a behavioural REGRESSION, not a safety net. The overlay's
+  //     correction is a front-panel DISPLAY-mapping fact (the unit shows 0..10 where the record's raw
+  //     bounds say otherwise) and the codec already treats it as a value-level no-op where upstream is
+  //     right. Gating it on "firmware 13.x" would DROP the correction for every cache whose firmware
+  //     field is absent or spelled differently — editor-cache imports, cloud pulls, and older stored
+  //     docs (`BuiltCache.firmware` is optional and best-effort), and for a firmware that STILL carries
+  //     the wrong record. We have no measurement that any later firmware fixed any of these rows, so
+  //     dropping a measured correction on spec is worse than the masking it would prevent.
+  //   • The finding's actual harm is the word "silently". Making each masked row visible — with its
+  //     family/pid and BOTH value sets (the cache row the overlay replaced AND the catalogue row it
+  //     now equals) — lets a maintainer decide per row the moment a firmware diff appears, without a
+  //     firmware-version parse or a hardcode we would have to keep in sync.
+  //   • It keeps a single, testable code path (no version parsing, no new failure mode).
+  // The overrides are a SERVED diagnostic field (on the runtime profile, read by /diag and
+  // /diag/ranges), never a log line alone. See OverlayOverride.
+  const isFm3StaticTable = staticProfile.ranges === (FM3_RANGES as unknown as Ranges);
+  const overlayOverrides = isFm3StaticTable
+    ? collectOverlayOverrides(mergedRanges, staticProfile.ranges)
+    : [];
+  const finalRanges: Ranges = isFm3StaticTable
+    ? (applyFm3RangeOverlay(mergedRanges as unknown as Fm3RangeTable) as unknown as Ranges)
+    : mergedRanges;
 
   // rangeSections: the fn=0x1F CHANNEL-BLOCK WIRE STRIDE is a device-true, statically-measured
   // constant (e.g. FM3 CABINET = 106; FM3_RANGE_SECTIONS, hardware-derived). It comes from the STATIC
@@ -789,6 +865,7 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
     ranges: finalRanges,
     staticRanges: staticProfile.ranges, // catalogue rows, for the servability fallback in the driver
     rangeSections: staticProfile.rangeSections,
+    overlayOverrides, // review finding #5 — the overlay's masked rows, served (not silent)
     rosterFor(slug: string): TypeModel[] {
       const fam = SLUG_FAMILY[slug.toLowerCase()];
       const cacheRoster = fam ? builtRosters[fam] : undefined;

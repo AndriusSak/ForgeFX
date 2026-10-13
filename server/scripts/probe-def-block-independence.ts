@@ -246,7 +246,7 @@ export function selfTest(): number {
     const e = evaluateDependence([real(62), absent(70)]);
     check(
       '(c) real in 62 + absent in 70 ⇒ NO-COMPARABLE-REAL-CELLS (not dependent, not independent)',
-      e.verdict === 'NO-COMPARABLE-REAL-CELLS' && e.verdict !== 'BLOCK-DEPENDENT' && e.verdict !== 'INDEPENDENT' &&
+      e.verdict === 'NO-COMPARABLE-REAL-CELLS' && String(e.verdict) !== 'BLOCK-DEPENDENT' && String(e.verdict) !== 'INDEPENDENT' &&
         e.dependent === false && e.realBlocks.join(',') === '62',
       `verdict=${e.verdict} dependent=${e.dependent} realBlocks=${e.realBlocks.join(',')}`
     );
@@ -257,7 +257,7 @@ export function selfTest(): number {
     const e = evaluateDependence([fallback(62), fallback(70), fallback(86)]);
     check(
       '(d) all-fallback ⇒ FALLBACK-ONLY (address-space question, never a pass)',
-      e.verdict === 'FALLBACK-ONLY' && e.verdict !== 'INDEPENDENT' && e.dependent === false,
+      e.verdict === 'FALLBACK-ONLY' && String(e.verdict) !== 'INDEPENDENT' && e.dependent === false,
       `verdict=${e.verdict} dependent=${e.dependent}`
     );
   }
@@ -267,7 +267,7 @@ export function selfTest(): number {
     const e = evaluateDependence([absent(62), absent(70)]);
     check(
       '(e) all-absent ⇒ NO-DEFINITION-RECORD (never a pass)',
-      e.verdict === 'NO-DEFINITION-RECORD' && e.verdict !== 'INDEPENDENT' && e.dependent === false,
+      e.verdict === 'NO-DEFINITION-RECORD' && String(e.verdict) !== 'INDEPENDENT' && e.dependent === false,
       `verdict=${e.verdict} dependent=${e.dependent}`
     );
   }

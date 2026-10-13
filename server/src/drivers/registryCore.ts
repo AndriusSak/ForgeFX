@@ -407,6 +407,11 @@ export class DeviceRegistry {
       arch: proc?.arch ?? '',
       versions: { node: proc?.versions.node ?? '', napi: proc?.versions.napi ?? '' },
       profile: { key: this.#prof.key, name: this.#prof.name, model: `0x${this.#prof.model.toString(16)}` },
+      // Review finding #5: rows where the MEASURED FM3 range overlay masked a device-cache value that
+      // DIFFERED from the static catalogue (empty when they agreed). Served, never log-only, so a
+      // firmware that legitimately changes an overlay row is SEEN rather than silently overridden.
+      overlayOverrideCount: this.#prof.overlayOverrides?.length ?? 0,
+      overlayOverrides: this.#prof.overlayOverrides ?? [],
       detected: this.#detected,
       midiAvailable: this.#deps.midiAvailable(),
       ports: {

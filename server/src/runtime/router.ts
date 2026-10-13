@@ -156,6 +156,9 @@ export function createRouter(deps: RuntimeDeps): {
       model: `0x${profile.model.toString(16)}`,
       family,
       count: ids.length,
+      // Review finding #5: overlay rows in THIS family the overlay masked (pre-overlay value differed
+      // from the catalogue) — mirrors app.ts so both route tables serve the same diagnostic.
+      overlayOverrides: (profile.overlayOverrides ?? []).filter((o) => o.family === family),
       rows: ids.map((id) => ({
         pid: id,
         name: defs.get(id)?.name ?? null,

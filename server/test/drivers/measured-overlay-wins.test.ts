@@ -68,6 +68,28 @@ function cacheWithOldBounds(): BuiltCache {
   } as unknown as BuiltCache;
 }
 
+/**
+ * A cache whose OVERLAY rows already AGREE with the corrected catalogue (`WAH/3` and `FLANGER/26` = 0..10,
+ * the measured values) — the normal post-fix case, where the overlay changes nothing and must be SILENT.
+ */
+function cacheAgreeingOnOverlayRows(): BuiltCache {
+  return {
+    model: MODEL,
+    firmware: '13.0',
+    ranges: {
+      WAH: { 3: { kind: 'float', displayMin: 0, displayMax: 10, scale: 10, step: 0, typecode: 82 } },
+      FLANGER: { 26: { kind: 'float', displayMin: 0, displayMax: 10, scale: 10, step: 0.001, typecode: 82 } },
+    },
+    rangeSections: {},
+    enumOverrides: {},
+    rosters: {},
+    cabIrs: {},
+    unmappedSections: [],
+    unmappedFamilies: [],
+    meta: { recordCount: 2, source: 'live', builtAt: '2026-10-13T00:00:00.000Z' },
+  } as unknown as BuiltCache;
+}
+
 /** Build the runtime profile the server would serve: static FM3 profile + the incident cache. */
 function runtimeFm3Profile() {
   return runtimeProfileFrom(cacheWithOldBounds(), PROFILES[MODEL]!);
@@ -110,7 +132,7 @@ async function servBlock(profile: ReturnType<typeof runtimeFm3Profile>, eid: num
 }
 
 /** Assertions this suite makes when every row it names is present (the registration prints this). */
-export const MEASURED_OVERLAY_WINS_CASE_COUNT = 3;
+export const MEASURED_OVERLAY_WINS_CASE_COUNT = 4;
 
 export async function runMeasuredOverlayWinsTests(): Promise<void> {
   // ── 1. The MERGE: an overlay row corrected by the codec, but re-supplied with the OLD bounds by
@@ -176,5 +198,39 @@ export async function runMeasuredOverlayWinsTests(): Promise<void> {
       `case 3: FLANGER/26 Bass Focus at raw ${RAW_MAX} must SERVE ≈10.00 (the unit's reading at the ` +
         `knob's maximum) — the OLD cache row 200..20000 served 20000; the driver served ${focus.value}`);
     assertEqual(focus.max, 10, `case 3: FLANGER/26 served max must be the corrected 10, got ${focus.max}`);
+  }
+
+  // ── 4. REVIEW FINDING #5 — the overlay's overrides are VISIBLE, not silent. Every overlay row whose
+  //        pre-overlay value DIFFERED from the static catalogue is reported with its family/pid and BOTH
+  //        value sets, so a future firmware that legitimately changes a row is SEEN rather than masked.
+  //        FAILS BEFORE: the profile carried no `overlayOverrides` field at all (masking invisible).
+  {
+    const runtime = runtimeFm3Profile();
+    const overrides = runtime.overlayOverrides ?? [];
+    assertEqual(overrides.length, 2,
+      `case 4: exactly the two overlay rows whose cache value differed (WAH/3, FLANGER/26) must be reported — got ${JSON.stringify(overrides)}`);
+
+    const wah3 = overrides.find((o) => o.family === 'WAH' && o.paramId === 3);
+    assert(wah3 !== undefined, 'case 4: WAH/3 masked a differing cache value and must be REPORTED');
+    assertEqual(wah3!.masked.min, 20, `case 4: WAH/3 masked set = the cache row (min 20) — got ${wah3!.masked.min}`);
+    assertEqual(wah3!.masked.max, 200, `case 4: WAH/3 masked set = the cache row (max 200) — got ${wah3!.masked.max}`);
+    assertEqual(wah3!.catalogue.min, 0, `case 4: WAH/3 catalogue set (min 0) — got ${wah3!.catalogue.min}`);
+    assertEqual(wah3!.catalogue.max, 10, `case 4: WAH/3 catalogue set (max 10) — got ${wah3!.catalogue.max}`);
+    assertEqual(wah3!.overlay.min, 0, `case 4: WAH/3 overlay value (min 0) — got ${wah3!.overlay.min}`);
+    assertEqual(wah3!.overlay.max, 10, `case 4: WAH/3 overlay value (max 10) — got ${wah3!.overlay.max}`);
+
+    const flanger26 = overrides.find((o) => o.family === 'FLANGER' && o.paramId === 26);
+    assert(flanger26 !== undefined, 'case 4: FLANGER/26 masked 200..20000 and must be REPORTED');
+    assertEqual(flanger26!.masked.max, 20000, `case 4: FLANGER/26 masked max = the cache row (20000) — got ${flanger26!.masked.max}`);
+    assertEqual(flanger26!.catalogue.max, 10, `case 4: FLANGER/26 catalogue max (10) — got ${flanger26!.catalogue.max}`);
+
+    // A NON-overlay row is never an override, even though the cache still wins for it.
+    assert(overrides.every((o) => !(o.family === 'WAH' && o.paramId === 1)),
+      'case 4 (control): WAH/1 is not an overlay row and must NOT be reported');
+
+    // And a cache that AGREES with the catalogue on the overlay rows reports NOTHING — the normal case.
+    const agreeing = runtimeProfileFrom(cacheAgreeingOnOverlayRows(), PROFILES[MODEL]!);
+    assertEqual((agreeing.overlayOverrides ?? []).length, 0,
+      `case 4 (control): an agreeing cache must report no overrides — got ${JSON.stringify(agreeing.overlayOverrides)}`);
   }
 }

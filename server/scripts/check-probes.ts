@@ -12,20 +12,31 @@
 // parenthesised form.
 //
 // WHAT IT CHECKS (all offline, no device, no serial port — safe to run while the server holds the unit):
-//   1. PARSE. Every *.ts in the scanned dir parses (syntactic diagnostics = 0). A file that does not
-//      parse is invisible to the run-only check. Under the committed `tsconfig.probe-check.json` (which
-//      EXTENDS the server config and adds `scripts/**/*.ts` to its include) the whole program's
-//      SYNTACTIC diagnostics are also asserted zero; its SEMANTIC diagnostic count is printed as an
-//      ADVISORY only, because ~30 scripts/ files carry pre-existing strict-mode type debt that is out
-//      of scope for this gate (a hard gate on it would be red on a clean checkout).
-//   2. PRECEDENCE. No comparison is chained onto an un-parenthesised bitwise expression
-//      (`a & b !== c`). Comments and strings are stripped first, so the probe that documents this
-//      hazard in prose is not flagged.
+//   1. PARSE. Every *.ts in the scanned dir (RECURSIVELY — subdirectories are walked) parses (syntactic
+//      diagnostics = 0). A file that does not parse is invisible to the run-only check. Under the
+//      committed `tsconfig.probe-check.json` (which EXTENDS the server config and adds `scripts/**/*.ts`
+//      to its include) the whole program's SYNTACTIC diagnostics are also asserted zero; its SEMANTIC
+//      diagnostic count is printed as an ADVISORY only, because ~30 scripts/ files carry pre-existing
+//      strict-mode type debt that is out of scope for this gate (a hard gate on it would be red on a
+//      clean checkout).
+//   2. PRECEDENCE. No comparison is chained onto an un-parenthesised bitwise expression (`a & b !== c`).
+//      AST-based (a `&`/`|`/`^` BinaryExpression whose RIGHT operand is a comparison), so it catches
+//      every sibling of the shape — bare `<`/`>`, any whitespace, indexed and call operands — and, unlike
+//      a regex, never mistakes a TYPE union for a value comparison. Check 6 is still the deeper catch:
+//      the AST sees the SHAPE, the type-checker sees the OPERAND TYPES.
 //   3. DEVICE-FAILURE BRANCH. A probe that opens a session (`openProbeSession`) must PRINT a
 //      device-failure branch and return exit 3 rather than throwing.
 //   4. IMPORT GUARD. A file exporting `main` must not invoke it at import time — it must guard with
 //      `import.meta.url === pathToFileURL(process.argv[1])` (the existing probes' convention).
 //   5. MODE HEADER. A `probe-*.ts` header must state its read/write mode (read-only / dry-run / writes …).
+//   6. SEMANTIC TYPE GATE (the strong one). The TypeScript program built below is asked for its SEMANTIC
+//      diagnostics and the codes that a precedence slip produces are a HARD failure:
+//        TS2362 / TS2363 — an arithmetic operand is not a number (e.g. `number & boolean`, exactly what
+//                          `(tc >> 4) & 0xf !== 5` becomes once the comparison is absorbed);
+//        TS2367         — a comparison of two types with no overlap (a literal compared to a value it can
+//                          never equal, e.g. a bitwise result vs an unrelated string literal).
+//      EVERY OTHER semantic code stays ADVISORY (the pre-existing strict-mode debt), printed as a count
+//      as before. This beats any regex: it is a type-level statement about the operands, not a shape.
 //
 // USAGE (run from ForgeFX/server):
 //   npx tsx scripts/check-probes.ts             # scan scripts/
@@ -63,64 +74,6 @@ function parseArgs(argv: string[]): { dir: string; selftest: boolean; explicitDi
 
 // ── source text utilities ───────────────────────────────────────────────────────────────────────
 
-/**
- * Replace the contents of line comments, block comments, and string/template literals with spaces,
- * preserving offsets and line breaks. Length-preserving so reported line numbers stay correct.
- * Not a full lexer, but exact for the classes this checker scans (a regex literal containing `//` or a
- * quote inside a regex could confuse it — no probe in scripts/ has one, and a parse error would surface
- * in check 1 anyway).
- */
-function stripCommentsAndStrings(src: string): string {
-  const out = src.split('');
-  const n = src.length;
-  const blank = (i: number): void => {
-    if (out[i] !== '\n') out[i] = ' ';
-  };
-  let i = 0;
-  while (i < n) {
-    const c = src[i]!;
-    const d = src[i + 1];
-    if (c === '/' && d === '/') {
-      while (i < n && src[i] !== '\n') {
-        blank(i);
-        i++;
-      }
-    } else if (c === '/' && d === '*') {
-      blank(i);
-      blank(i + 1);
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) {
-        blank(i);
-        i++;
-      }
-      if (i < n) {
-        blank(i);
-        blank(i + 1);
-        i += 2;
-      }
-    } else if (c === "'" || c === '"' || c === '`') {
-      const quote = c;
-      blank(i);
-      i++;
-      while (i < n && src[i] !== quote) {
-        if (src[i] === '\\') {
-          blank(i);
-          i++;
-        }
-        blank(i);
-        i++;
-      }
-      if (i < n) {
-        blank(i);
-        i++;
-      }
-    } else {
-      i++;
-    }
-  }
-  return out.join('');
-}
-
 /** Leading run of blank/comment lines — a file's header block. */
 function headerBlock(src: string): string {
   const out: string[] = [];
@@ -135,27 +88,56 @@ function headerBlock(src: string): string {
 // ── detectors (each returns a list of human-readable findings) ────────────────────────────────────
 
 // A comparison chained onto an un-parenthesised bitwise expression: `X & Y !== Z` parses as
-// `X & (Y !== Z)`. Requiring a bare operand token (word / dotted / indexed) between the bitwise
-// operator and the comparison, and excluding `&&`/`||`/`&=`/`|=`, keeps the parenthesised form
-// `(X & Y) !== Z` — where a `)` stands between the operand and the comparison — out of scope.
-const PRECEDENCE_RE =
-  /(?<![&|^])[&|^](?![&|=])[ \t]+[A-Za-z0-9_$\]]+(?:\.[A-Za-z0-9_$\]]+)*[ \t]*(===|!==|==|!=|<=|>=)/g;
+// `X & (Y !== Z)`, because every comparison/relational operator binds TIGHTER than `&`/`|`/`^`. The
+// detector is therefore AST-based, not lexical: it walks the parse tree for a BinaryExpression whose
+// operator is `&`/`|`/`^` AND whose RIGHT operand is itself a comparison BinaryExpression — the exact,
+// unambiguous structure of the bug. That single rule closes every sibling of the shape at once:
+//   • bare `<` / `>` as well as `<=`/`>=`/`==`/`!=`/`===`/`!==` (`a & b < c` → `a & (b < c)`);
+//   • whitespace is irrelevant (`x&0xf!==5` is the same tree as `x & 0xf !== 5`);
+//   • indexed (`a & b[i] !== c`) and call (`a & f(x) !== c`) operands fall out for free;
+//   • `<<`/`>>` and `&&`/`||` are NOT comparisons/bitwise, so they never match.
+// A LEXICAL pattern cannot do this job: `Promise<ObservedBody | null>` and `A | Record<string, number>`
+// are TYPE unions that every regex spelling reads as `| null >` / `| Record <`, and an expanded regex
+// flagged 18 such type annotations across the real scripts/ tree (measured) — false positives that made
+// the gate red on a clean checkout. A type is not a BinaryExpression, so the AST has no such ambiguity.
+// The parenthesised form `(X & Y) !== Z` is naturally out of scope: there the `&` node is the
+// comparison's LEFT operand, not its right.
+const BITWISE_OP_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.AmpersandToken,
+  ts.SyntaxKind.BarToken,
+  ts.SyntaxKind.CaretToken,
+]);
+const COMPARISON_OP_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.LessThanToken,
+  ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.LessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanEqualsToken,
+]);
 
 function checkPrecedence(displayName: string, src: string): string[] {
-  const stripped = stripCommentsAndStrings(src);
+  const sf = ts.createSourceFile(displayName, src, ts.ScriptTarget.ES2022, true);
+  const lines = sf.text.split('\n');
   const findings: string[] = [];
-  const lines = stripped.split('\n');
-  const rawLines = src.split('\n');
-  lines.forEach((ln, idx) => {
-    PRECEDENCE_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = PRECEDENCE_RE.exec(ln)) !== null) {
-      findings.push(
-        `${displayName}:${idx + 1}: comparison '${m[1]}' chained onto a bitwise expression — parenthesise: ` +
-          `\`(a & b) ${m[1]} c\`, not \`a & b ${m[1]} c\`\n      ${(rawLines[idx] ?? '').trim()}`,
-      );
+  const visit = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node) && BITWISE_OP_KINDS.has(node.operatorToken.kind)) {
+      const rhs = node.right;
+      if (ts.isBinaryExpression(rhs) && COMPARISON_OP_KINDS.has(rhs.operatorToken.kind)) {
+        const bit = node.operatorToken.getText(sf);
+        const cmp = rhs.operatorToken.getText(sf);
+        const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
+        findings.push(
+          `${displayName}:${line + 1}: comparison '${cmp}' chained onto a bitwise expression — parenthesise: ` +
+            `\`(a ${bit} b) ${cmp} c\`, not \`a ${bit} b ${cmp} c\`\n      ${(lines[line] ?? '').trim()}`,
+        );
+      }
     }
-  });
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
   return findings;
 }
 
@@ -214,13 +196,68 @@ function checkParses(displayName: string, src: string): string[] {
   });
 }
 
-const DETECTORS: Array<{ name: string; run: (f: string, s: string) => string[] }> = [
+// ── semantic type gate (the strong detector; these three codes are HARD, every other code advisory) ──
+
+/** Codes a bitwise/comparison precedence slip produces. TS2362/TS2363: an arithmetic operand is not a
+ *  number (`number & boolean`, exactly what `(tc >> 4) & 0xf !== 5` becomes). TS2367: a comparison of
+ *  two types with no overlap. */
+const SEMANTIC_HARD_CODES = new Set([2362, 2363, 2367]);
+
+/**
+ * Type-check ONE file in isolation and return its diagnostics whose code is in {@link SEMANTIC_HARD_CODES}.
+ * Used by `--selftest` (a single-string fixture is not a project tree) and to corroborate the source-text
+ * detectors per file. `noLib`/`noResolve` keep it hermetic and cheap; the gated codes are intrinsic-type
+ * facts that need no libraries (`number & boolean`, a disjoint-literal comparison).
+ */
+function checkSemanticTypes(displayName: string, src: string): string[] {
+  const fileName = displayName.endsWith('.ts') ? displayName : `${displayName}.ts`;
+  const options: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    noLib: true,
+    noResolve: true,
+    skipLibCheck: true,
+  };
+  const host: ts.CompilerHost = {
+    getSourceFile: (fn) => (fn === fileName ? ts.createSourceFile(fn, src, ts.ScriptTarget.ES2022, true) : undefined),
+    getDefaultLibFileName: () => 'lib.d.ts',
+    writeFile: () => {},
+    getCurrentDirectory: () => '',
+    getCanonicalFileName: (f) => f,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => '\n',
+    fileExists: (fn) => fn === fileName,
+    readFile: (fn) => (fn === fileName ? src : undefined),
+  };
+  const program = ts.createProgram([fileName], options, host);
+  const sf = program.getSourceFile(fileName);
+  if (!sf) return [];
+  const out: string[] = [];
+  for (const d of program.getSemanticDiagnostics(sf)) {
+    if (!SEMANTIC_HARD_CODES.has(d.code)) continue;
+    const pos = d.start != null ? sf.getLineAndCharacterOfPosition(d.start) : null;
+    const where = pos ? `:${pos.line + 1}:${pos.character + 1}` : '';
+    out.push(`${displayName}${where}: TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`);
+  }
+  return out;
+}
+
+type Detector = { name: string; run: (f: string, s: string) => string[] };
+
+const DETECTORS: Detector[] = [
   { name: 'precedence', run: checkPrecedence },
   { name: 'device-failure', run: checkDeviceFailureBranch },
   { name: 'import-guard', run: checkImportGuard },
   { name: 'mode-header', run: checkModeHeader },
   { name: 'parse', run: checkParses },
 ];
+
+// The semantic detector is NOT in the per-file scan list — the PROGRAM-level gate below type-checks the
+// whole tree against `tsconfig.probe-check.json` (accurate, one program) rather than re-creating a
+// throwaway program per file. It IS exercised by --selftest, so its broken/correct fixtures still run.
+const DETECTOR_BY_NAME = new Map<string, Detector>(
+  [...DETECTORS, { name: 'semantic-type', run: checkSemanticTypes }].map((d) => [d.name, d]),
+);
 
 // ── self-test: each detector must FIRE on a broken fixture and stay silent on a correct one ────────
 
@@ -230,6 +267,47 @@ const SELFTEST_FIXTURES: Array<{ name: string; file: string; bad: string; good: 
     file: 'probe-planted.ts',
     bad: 'const tc = 0x52;\nconst x = (tc >> 4) & 0xf !== 5;\n',
     good: 'const tc = 0x52;\nconst x = ((tc >> 4) & 0xf) !== 5;\n',
+  },
+  // bare `<` / `>` (previously only `<=`/`>=` fired) — same bug; `<<`/`>>` must STAY silent.
+  {
+    name: 'precedence',
+    file: 'probe-planted.ts',
+    bad: 'const a = 1, b = 2, c = 3;\nconst x = a & b < c;\n',
+    good: 'const a = 1, b = 2, c = 3;\nconst x = (a & b) < c;\nconst y = a & b << c;\nconst z = a & b >> c;\n',
+  },
+  // no space after the bitwise operator (`[ \t]+` used to be required).
+  {
+    name: 'precedence',
+    file: 'probe-planted.ts',
+    bad: 'const x = a&b!==c;\n',
+    good: 'const x = (a&b)!==c;\nconst y = a&&b;\n',
+  },
+  // indexed right operand (the operand pattern now allows `[…]` suffixes).
+  {
+    name: 'precedence',
+    file: 'probe-planted.ts',
+    bad: 'const x = a & b[i] !== c;\n',
+    good: 'const x = (a & b[i]) !== c;\n',
+  },
+  // call right operand (the operand pattern now allows `(…)` suffixes).
+  {
+    name: 'precedence',
+    file: 'probe-planted.ts',
+    bad: 'const x = a & f(x) !== c;\n',
+    good: 'const x = (a & f(x)) !== c;\n',
+  },
+  // The SEMANTIC gate: TS2362/TS2363 on the real precedence shape, and TS2367 on a disjoint comparison.
+  {
+    name: 'semantic-type',
+    file: 'probe-planted.ts',
+    bad: 'const tc = 0x52;\nconst x = (tc >> 4) & 0xf !== 5;\n',
+    good: 'const tc = 0x52;\nconst x = ((tc >> 4) & 0xf) !== 5;\n',
+  },
+  {
+    name: 'semantic-type',
+    file: 'probe-planted.ts',
+    bad: "const v: 'A' | 'B' = 'A';\nconst y = v === 'C';\n",
+    good: "const v: 'A' | 'B' = 'A';\nconst y = v === 'A';\n",
   },
   {
     name: 'device-failure',
@@ -262,7 +340,12 @@ const SELFTEST_FIXTURES: Array<{ name: string; file: string; bad: string; good: 
 function runSelftest(): number {
   let failed = 0;
   for (const fd of SELFTEST_FIXTURES) {
-    const det = DETECTORS.find((d) => d.name === fd.name)!;
+    const det = DETECTOR_BY_NAME.get(fd.name);
+    if (!det) {
+      console.log(`FAIL detector '${fd.name}': no such detector`);
+      failed++;
+      continue;
+    }
     const badHits = det.run(fd.file, fd.bad);
     const goodHits = det.run(fd.file, fd.good);
     const ok = badHits.length > 0 && goodHits.length === 0;
@@ -284,6 +367,8 @@ function runSelftest(): number {
 
 // ── main scan ─────────────────────────────────────────────────────────────────────────────────────
 
+/** Every *.ts under `dir`, RECURSIVELY (subdirectories included), sorted. A non-directory or an
+ *  unreadable path yields nothing rather than throwing. */
 function listTs(dir: string): string[] {
   let entries: string[];
   try {
@@ -294,7 +379,14 @@ function listTs(dir: string): string[] {
   const out: string[] = [];
   for (const name of entries) {
     const p = join(dir, name);
-    if (statSync(p).isFile() && name.endsWith('.ts')) out.push(p);
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(p);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) out.push(...listTs(p));
+    else if (st.isFile() && name.endsWith('.ts')) out.push(p);
   }
   return out.sort();
 }
@@ -309,7 +401,7 @@ function main(argv: string[]): number {
   const perFile: string[][] = [];
   for (const f of files) {
     const src = readFileSync(f, 'utf8');
-    const disp = explicitDir ? relative(process.cwd(), f) : join('scripts', basename(f));
+    const disp = explicitDir ? relative(process.cwd(), f) : join('scripts', relative(dir, f));
     for (const d of DETECTORS) {
       const hits = d.run(disp, src);
       findings[d.name]!.push(...hits);
@@ -318,9 +410,11 @@ function main(argv: string[]): number {
   }
 
   // Program-level syntactic check under the committed tsconfig (default dir only — a scratch copy is
-  // not a project tree). Semantic diagnostics are advisory: pre-existing type debt in scripts/.
+  // not a project tree). Syntactic = hard. SEMANTIC = the precedence codes (2362/2363/2367) HARD, the
+  // rest advisory (pre-existing strict-mode type debt in scripts/).
   let programSyntactic = 0;
   let programSemantic = 0;
+  let programSemanticHard: string[] = [];
   let programNote = '';
   if (!explicitDir) {
     const cfg = resolve(HERE, '..', 'tsconfig.probe-check.json');
@@ -329,7 +423,17 @@ function main(argv: string[]): number {
       const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, resolve(HERE, '..'));
       const program = ts.createProgram(parsed.fileNames, { ...parsed.options, noEmit: true });
       programSyntactic = program.getSyntacticDiagnostics().length;
-      programSemantic = program.getSemanticDiagnostics().length;
+      const sem = program.getSemanticDiagnostics();
+      programSemantic = sem.length;
+      // HARD: the precedence-slip codes. Everything else stays advisory (pre-existing strict-mode debt).
+      programSemanticHard = sem
+        .filter((d) => SEMANTIC_HARD_CODES.has(d.code))
+        .map((d) => {
+          const file = d.file?.fileName ?? '<unknown>';
+          const pos = d.file && d.start != null ? d.file.getLineAndCharacterOfPosition(d.start) : null;
+          const where = pos ? `:${pos.line + 1}:${pos.character + 1}` : '';
+          return `${relative(process.cwd(), file)}${where}: TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`;
+        });
       programNote = `tsconfig.probe-check.json (${parsed.fileNames.length} files)`;
     } catch (e) {
       programNote = `tsconfig.probe-check.json UNREADABLE: ${e instanceof Error ? e.message : String(e)}`;
@@ -338,24 +442,31 @@ function main(argv: string[]): number {
   }
 
   const totalFindings = Object.values(findings).reduce((n, v) => n + v.length, 0);
-  const failing = totalFindings > 0 || programSyntactic !== 0;
+  const failing = totalFindings > 0 || programSyntactic !== 0 || programSemanticHard.length > 0;
 
   console.log(`check-probes: dir=${dir} files=${files.length}${programNote ? ` · ${programNote}` : ''}`);
   for (const d of DETECTORS) {
     const hits = findings[d.name]!;
     console.log(`  ${hits.length === 0 ? 'ok  ' : 'FAIL'} ${d.name.padEnd(15)} ${hits.length} finding(s)`);
   }
+  const hardCodeList = [...SEMANTIC_HARD_CODES].map((c) => `TS${c}`).join('/');
   if (programNote && !explicitDir) {
+    console.log(`  ${programSyntactic === 0 ? 'ok  ' : 'FAIL'} program-parse    syntactic=${programSyntactic}`);
     console.log(
-      `  ${programSyntactic === 0 ? 'ok  ' : 'FAIL'} program-parse    syntactic=${programSyntactic} (advisory: semantic=${programSemantic} pre-existing strict-mode type debt in scripts/, not gated)`,
+      `  ${programSemanticHard.length === 0 ? 'ok  ' : 'FAIL'} program-semantic HARD(${hardCodeList})=${programSemanticHard.length}` +
+        ` · advisory=${programSemantic - programSemanticHard.length} (other pre-existing strict-mode type debt in src/scripts, not gated)`,
     );
   }
   if (totalFindings) {
     console.log('\nfindings:');
     for (const hs of perFile) for (const h of hs) console.log(`  ${h}`);
   }
+  if (programSemanticHard.length) {
+    console.log(`\nsemantic HARD findings (${hardCodeList} — precedence-slip shape):`);
+    for (const hpt of programSemanticHard) console.log(`  ${hpt}`);
+  }
   console.log(
-    `\nsummary: ${totalFindings} finding(s); ${failing ? 'FAIL' : 'PASS'}`,
+    `\nsummary: ${totalFindings} finding(s), ${programSemanticHard.length} semantic-hard; ${failing ? 'FAIL' : 'PASS'}`,
   );
   return failing ? 1 : 0;
 }

@@ -168,6 +168,10 @@ export async function buildApp(
       model: `0x${profile.model.toString(16)}`,
       family,
       count: ids.length,
+      // Review finding #5: overlay rows in THIS family whose pre-overlay value differed from the catalogue
+      // (the overlay masked it). Served here beside the serving/catalogue comparison that already lives
+      // on this route, so a maintainer sees WHICH rows were overridden and by how much.
+      overlayOverrides: (profile.overlayOverrides ?? []).filter((o) => o.family === family),
       rows: ids.map((id) => ({
         pid: id,
         name: defs.get(id)?.name ?? null,
