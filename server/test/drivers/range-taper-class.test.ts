@@ -33,6 +33,7 @@ import { createModernFractalCodec, packValue16 } from 'forgefx-midi/gen3/axe-fx-
 import { wireToDisplay } from 'forgefx-midi/shared';
 import { FM3_RANGES } from 'forgefx-midi/gen3/fm3';
 import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
+import { runRawValueRowsTests } from './raw-value-rows.test.js';
 
 const MODEL = 0x11; // FM3
 const CAB_EID = effectRoster().find((e) => e.slug === 'cab')!.page;
@@ -263,4 +264,6 @@ export async function runRangeTaperClassTests(): Promise<void> {
       `through blockParams(); ${caught.length} nibble-5 rows asserted DECISION-only (no recorded raw); ` +
       `class sizes ${nib4}/${nib5}`
   );
+  // ── 7. The raw-is-value rows (valueMap 'identity') — their own suite, run here ───────────────────────
+  await runRawValueRowsTests();
 }

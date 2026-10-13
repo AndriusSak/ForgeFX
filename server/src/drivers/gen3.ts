@@ -19,7 +19,7 @@ import {
   buildLooperControl,
   type ModernFractalCodec
 } from 'forgefx-midi/gen3/axe-fx-iii';
-import { wireToDisplay } from 'forgefx-midi/shared';
+import { displayToWire, wireToDisplay } from 'forgefx-midi/shared';
 import {
   parsePresetDump, decodeRawPatch, decodeGen3Body,
   readBlockParamsForModel, modelsFromBlocks,
@@ -1721,13 +1721,19 @@ class Gen3Driver implements DeviceDriver {
         // walk-built RangeDefs carry it (parallel WP) — no rework needed here either way.
         // The log/linear decision lives in rangeIsLog() so it can be pinned by a test — see the
         // measurement note there before changing it.
-        const log = rangeIsLog(range);
-        const v = wireToDisplay(raw, { displayMin: range.displayMin, displayMax: range.displayMax, displayScale: log ? 'log10' : 'linear' });
+        // A row marked `valueMap: 'identity'` (forgefx-midi rangeOverlay.ts — measured: the field carries the
+        // VALUE itself, Tempo 120 BPM at raw 120) is read as display == raw and takes no taper at all.
+        const identity = rangeIsIdentity(range);
+        const log = !identity && rangeIsLog(range);
+        const v = wireToDisplay(raw, { displayMin: range.displayMin, displayMax: range.displayMax, displayScale: identity ? 'identity' : log ? 'log10' : 'linear' });
+        // `norm` stays the knob POSITION over [min,max] the client draws and writes back: for an identity row
+        // that is NOT raw/65534 (raw 120 would read as 0.0018), it is where the value sits in its range.
+        const rowNorm = identity ? clamp01((v - range.displayMin) / (range.displayMax - range.displayMin)) : norm;
         // Prefer the DEVICE-TRUE unit captured by the live-walk (RangeDef.unit, view 0x00)
         // over the AM4-name-overlay catalog code; fall back to the overlay when absent
         // (byte-source/.cache profiles carry no device-true unit).
         const unitCode = family ? this.#prof.params[family]?.find((x) => x.paramId === paramId)?.unit : undefined;
-        return { value: round3(v), norm, unit: range.unit ?? ((unitCode && UNIT_LABEL[unitCode]) || undefined), min: range.displayMin, max: range.displayMax, log: log || undefined };
+        return { value: round3(v), norm: rowNorm, unit: range.unit ?? ((unitCode && UNIT_LABEL[unitCode]) || undefined), min: range.displayMin, max: range.displayMax, log: log || undefined };
       } catch {
         /* fall through to 0..10 position */
       }
@@ -1887,7 +1893,8 @@ class Gen3Driver implements DeviceDriver {
       if (cur[id] === undefined || cur[id] === prev[id]) continue; // record the body doesn't carry / unchanged → skip
       if (!this.#prof.ranges[family]?.[id]) continue; // only real controls (skip internal/bypass churn)
       if (typeId != null && id === typeId) structural = true; // a model change is not just a knob nudge
-      events.push({ effectId: eid, paramId: id, norm: clamp01((cur[id] ?? 0) / 65534) });
+      // `#display().norm` is the served knob position (raw/65534, or the in-range position for an identity row).
+      events.push({ effectId: eid, paramId: id, norm: this.#display(family, id, cur[id] ?? 0).norm });
     }
     return { events, reload: false, structural };
   }
@@ -1901,7 +1908,12 @@ class Gen3Driver implements DeviceDriver {
     // poll could run mid-wait and echo our own write back. Stamping first also means a write that THROWS
     // still pauses the poll (the frame may have reached the device before the throw).
     this.#lastLocalEditAt = Date.now(); // pause the FM3 device-edit poll briefly so it doesn't echo our own write mid-drag
-    const r = continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
+    // An identity row (raw IS the value) cannot take a normalised position: the continuous knob norm is
+    // mapped back through the row's [min,max] to the VALUE and sent as float32(value) — the same typed-SET
+    // form the FM3-validated tempo write uses (`buildSetTempoViaParam`: eid 2 / pid 0x20 = CONTROLLERS/32).
+    const idRange = continuous ? this.#identityRange(eid, paramId) : undefined;
+    const idRaw = idRange ? displayToWire(idRange.displayMin + clamp01(value) * (idRange.displayMax - idRange.displayMin), { displayMin: idRange.displayMin, displayMax: idRange.displayMax, displayScale: 'identity' }) : undefined;
+    const r = idRaw !== undefined ? await this.#send(this.#codec.buildSetParameter(eid, paramId, idRaw)) : continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
     // W1.2: the `param` event's `norm` is the 0..1 NORMALIZED value (drivers/types.ts). A discrete
     // write's `value` is the enum/model ORDINAL, so broadcasting it as a norm handed every other
     // window a value far outside 0..1 (Axis applies `p.norm = e.norm` verbatim). The event has no
@@ -1909,6 +1921,12 @@ class Gen3Driver implements DeviceDriver {
     // on the next reload. Continuous keeps the (clamped) knob position.
     if (continuous) this.#emit({ type: 'param', effectId: eid, paramId, norm: clamp01(value) });
     return r;
+  }
+  /** The row's range when (eid, paramId) is a measured raw-is-value ('identity') row, else undefined. */
+  #identityRange(eid: number, paramId: number): { displayMin: number; displayMax: number } | undefined {
+    const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(eid);
+    const range = family ? this.#prof.ranges[family]?.[paramId] : undefined;
+    return range && rangeIsIdentity(range) && range.displayMax > range.displayMin ? range : undefined;
   }
   /** Change a block's model/type (the family TYPE selector ordinal). */
   async setType(eid: number, value: number) {
@@ -2263,6 +2281,15 @@ export function rangeIsLog(range: { taper?: string; typecode?: number; displayMi
   if (range.taper) return range.taper === 'log' && range.displayMin > 0;
   const taperNib = ((range.typecode ?? 0) >> 4) & 0xf;
   return taperNib === 4 && range.displayMin > 0;
+}
+
+/**
+ * True for a measured raw-is-value row (`valueMap: 'identity'`, set by forgefx-midi's range overlay): the 14-bit
+ * field carries the VALUE itself, so the read is display == raw and a write sends the value, not a position.
+ * `RangeDef` (devices.ts) does not declare the field, so it is read structurally.
+ */
+export function rangeIsIdentity(range: object): boolean {
+  return (range as { valueMap?: string }).valueMap === 'identity';
 }
 
 /** Create a gen-3 driver bound to one device profile (Axe-Fx III / FM3 / FM9). */
