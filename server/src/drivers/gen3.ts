@@ -342,10 +342,29 @@ class Gen3Driver implements DeviceDriver {
     bulk: { itemCount: number; values: readonly number[] },
     activeChannel: number,
   ): { stride: number; channelCount: number; base: number } {
+    // The static per-family wire stride is trusted ONLY when it actually describes THIS body: a stride
+    // that does not divide `itemCount` evenly cannot be the channel stride, and using it shifts every
+    // channel but A by the remainder.
+    //
+    // MEASURED 2026-10-13 against the unit (the fn=0x1F head's own itemCount, logged per family):
+    //   FUZZ (the DRIVE block) 176 = 4x44  vs table 43   <- wrong by 1
+    //   CHORUS                 128 = 4x32  vs table 29   <- wrong by 3
+    //   DELAY                  356 = 4x89  vs table 88   <- wrong by 1
+    //   DISTORT 576=4x144, REVERB 284=4x71, COMP 148=4x37, PHASER 140=4x35, CABINET 424=4x106,
+    //   INPUT 40=4x10, OUTPUT 104=4x26 — all divide evenly and are correct as-is.
+    // Consequence before the fix: the served params of the drive on channels B/C/D were shifted by one
+    // param (channel A was fine, base 0), while the WRITE path (addressed by eid,paramId) was correct —
+    // so the UI showed a label/value pair for an edit the unit had stored elsewhere.
+    // Every one of those bodies is exactly 4x its true stride, which is why `itemCount / 4` is the
+    // fallback the driver already used for a family with no table row.
     const tableStride = family ? this.#prof.rangeSections[family]?.stride : undefined;
-    const stride = tableStride && tableStride > 0
+    const tableDescribesBody = tableStride !== undefined && tableStride > 0
+      && bulk.itemCount > 0 && bulk.itemCount % tableStride === 0;
+    const stride = tableDescribesBody
       ? tableStride
-      : (bulk.itemCount > 0 && bulk.itemCount % 4 === 0 ? bulk.itemCount / 4 : Math.max(1, bulk.values.length));
+      : (bulk.itemCount > 0 && bulk.itemCount % 4 === 0
+        ? bulk.itemCount / 4
+        : (tableStride && tableStride > 0 ? tableStride : Math.max(1, bulk.values.length)));
     const basis = bulk.itemCount > 0 ? bulk.itemCount : bulk.values.length;
     const channelCount = Math.max(1, Math.floor(basis / stride));
     return { stride, channelCount, base: Math.min(activeChannel, channelCount - 1) * stride };
