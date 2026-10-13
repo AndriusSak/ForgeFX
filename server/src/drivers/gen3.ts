@@ -482,8 +482,24 @@ class Gen3Driver implements DeviceDriver {
     return frames; // still incomplete → let decodePresetDump throw its clear error
   }
 
+  /**
+   * Routing grid of ONE STORED SLOT (`GET /presets/:n/grid`). The live `grid()` reads the EDIT BUFFER;
+   * this reads the dump the device returns for slot `n`. It deliberately does NOT touch #gridCache: that
+   * cache is keyed on the edit buffer, so caching a slot's dump there would serve one preset's grid for
+   * another — the exact confusion this method exists to end (measured 2026-10-13: /presets/415/grid
+   * answered the loaded edit buffer's grid while /presets/415/summary correctly said `<EMPTY>`).
+   */
+  async gridForSlot(n: number): Promise<PresetGridDTO> {
+    return this.#gridFromDump(n);
+  }
+
   async #dumpGrid(): Promise<PresetGridDTO> {
-    const frames = await this.#dumpFrames(EDIT_BUFFER);
+    return this.#gridFromDump(EDIT_BUFFER);
+  }
+
+  /** Decode a preset dump (edit buffer or a stored slot) into the routing-grid DTO. */
+  async #gridFromDump(target: number): Promise<PresetGridDTO> {
+    const frames = await this.#dumpFrames(target);
     // diagnostic: did the dump arrive? (Windows MIDI large-SysEx debugging) — frame count, the function
     // bytes seen, total bytes, and whether the 0x79 terminator came through.
     const fns = [...new Set(frames.map((f) => f[5]))].map((x) => '0x' + (x ?? 0).toString(16));
@@ -1109,6 +1125,10 @@ class Gen3Driver implements DeviceDriver {
     const named: NamedParam[] = [];
     const enums: EnumParam[] = [];
     let type: { value: number; name: string } | null = null;
+    /** The block's LAYOUT-VARIANT selector value (the cab's Legacy/DynaCab page flag, an amp's model).
+     *  This — not `type.value` — is what `layoutFor` resolves the page from: for the mode-gated families
+     *  the published model and the variant selector are DIFFERENT params (see #modelSelectorPid). */
+    let variantValue: number | null = null;
     {
       const dev = await this.#conn();
       try {
@@ -1205,9 +1225,20 @@ class Gen3Driver implements DeviceDriver {
         }
         // current model/type (for EQ band layout etc.)
         if (typeId != null) {
+          // The variant selector is read FIRST because for the mode-gated families it is what says WHICH
+          // param holds the model (CABINET: the DynaCab page's model is a different param from the
+          // Legacy page's). `variantValue` is kept for layoutFor; `type` publishes the MODEL.
+          //
+          // UNSCALED first: a discrete record can arrive 16-bit-scaled (65534 = the ordinal max — the
+          // convention `cabState` already reads the cab's page flag with, `ord(modeParam, 1)`). Comparing
+          // or resolving the page against the RAW record made `variantValue === 1` false for a scaled
+          // mode, which silently picked the OTHER page's model and the other page's layout.
+          const rawVariant = readRaw(typeId);
           const roster = this.#prof.rosterFor(slug);
           const max = Math.max(0, roster.length - 1);
-          const raw = readRaw(typeId);
+          variantValue = rawVariant === null ? null : this.#ordinalOfVariant(family, typeId, rawVariant, max);
+          const modelId = this.#modelSelectorPid(family, variantValue);
+          const raw = modelId != null ? readRaw(modelId) : null;
           if (raw === null) {
             // Record the body does not carry — leave `type` null rather than fabricate a type 0 and
             // resolve the layout to the wrong variant.
@@ -1242,13 +1273,14 @@ class Gen3Driver implements DeviceDriver {
     const selectors: SelectorValues = (selectorParamName) => {
       const pid = this.#paramId(family, selectorParamName);
       if (pid == null) return undefined;
-      if (typeId != null && pid === typeId) return type?.value;
+      if (typeId != null && pid === typeId) return variantValue ?? undefined;
       return valueByPid.get(pid);
     };
-    // Re-resolve the layout to the variant selected by the block's CURRENT type value (EQ band count,
-    // amp firmware-pinned variant, etc.) and filter its pages to the current selector/firmware state;
-    // falls back to the null/first variant when type is unknown.
-    layout = this.#prof.layoutFor(family, type?.value, selectors);
+    // Re-resolve the layout to the variant selected by the block's CURRENT VARIANT selector value (the
+    // cab's Legacy/DynaCab page flag, EQ band count, amp firmware-pinned variant, …) and filter its pages
+    // to the current selector/firmware state; falls back to the null/first variant when it is unknown.
+    // NOT `type.value`: for the mode-gated families that is the model, which would resolve the wrong page.
+    layout = this.#prof.layoutFor(family, variantValue ?? undefined, selectors);
     // disambiguate repeated labels within a block (e.g. the cab's 4× "Low Cut", amp's two "Depth")
     // so identical names get a 1/2/3 suffix the UI can tell apart.
     dedupeLabels(named);
@@ -1766,11 +1798,17 @@ class Gen3Driver implements DeviceDriver {
           const d = this.#display(family, id, raw);
           vals[id] = { norm: d.norm, value: d.value, unit: d.unit, min: d.min, max: d.max, log: d.log };
         }
+        // Same split as blockParams: the variant selector decides WHICH param holds the model, and the
+        // MODEL name is what a block tile may show. Reading the variant as the model made every cab
+        // report `1x8 PRINCETONE` whatever it held (see #modelSelectorPid).
         const typeId = this.#paramId(family, 'type');
         if (typeId != null) {
+          const variantRaw = bulk.values[base + typeId];
           const roster = this.#prof.rosterFor(slug);
           const tmax = Math.max(0, roster.length - 1);
-          const rawT = bulk.values[base + typeId];
+          const variant = typeof variantRaw === 'number' ? this.#ordinalOfVariant(family, typeId, variantRaw, tmax) : null;
+          const modelId = this.#modelSelectorPid(family, variant);
+          const rawT = modelId != null ? bulk.values[base + modelId] : undefined;
           if (typeof rawT === 'number') typeName = roster[rawT > tmax ? Math.round((rawT / 65534) * tmax) : rawT]?.name ?? '';
         }
       } catch {
@@ -1978,6 +2016,55 @@ class Gen3Driver implements DeviceDriver {
         ?? defs.find((p) => p.unit === 'enum' && /TYPE$/i.test(p.name)))?.paramId;
     }
     return defs.find((p) => p.displayLabel === name || p.name === name)?.paramId;
+  }
+
+  /**
+   * The ORDINAL a layout-variant selector's record means, unscaling a 16-bit-scaled one (65534 = the
+   * family's ordinal max). The ordinal space differs by family and that difference is load-bearing:
+   *
+   *   • a MODE-gated family's selector is a flag whose space is its own row (CABINET_MODE is 0..1 —
+   *     `cabState` reads it as `ord(modeParam, 1)`), so a scaled record resolves to 0/1;
+   *   • every other family's selector is the MODEL row, whose space is the model roster — which is what
+   *     the pre-fix code unscaled against (`raw > rosterMax ? round(raw/65534*rosterMax) : raw`).
+   *
+   * Never pass the raw record where an ordinal is expected: `variantValue === 1` is only a statement about
+   * the page when the value has been through here.
+   */
+  #ordinalOfVariant(family: string, pid: number, raw: number, rosterMax: number): number {
+    const name = this.#prof.params[family]?.find((p) => p.paramId === pid)?.name ?? '';
+    const isModeFlag = /_MODE$/.test(name);
+    const max = isModeFlag ? Math.max(1, Math.round(this.#prof.ranges[family]?.[pid]?.displayMax ?? 1)) : rosterMax;
+    return max > 0 && raw > max ? Math.round((raw / 65534) * max) : raw;
+  }
+
+  /**
+   * The param that holds the block's PUBLISHED MODEL, which is NOT always the layout-variant selector
+   * `#paramId(family,'type')` returns.
+   *
+   * CABINET is the measured case: its variant selector is `CABINET_MODE` (pid 31), the Legacy-IRS/DynaCab
+   * PAGE flag — 0 = Legacy page, 1 = DynaCab page. Publishing that value as the model made every cab
+   * report the mode through the 45-entry cab roster, i.e. `{value:1, name:'1x8 PRINCETONE'}` for ANY cab
+   * (measured 2026-10-13: the served name never moved while `CABINET_TYPE1` went 0 -> 27 -> 31 -> 38 -> 42
+   * across four channels, while the unit's own screen showed the model). The model lives on the page the
+   * mode selects: `CABINET_DYNACAB_TYPE1` (pid 85) on the DynaCab page, `CABINET_TYPE1` (pid 4) on the
+   * Legacy page. Both spaces are the same 45-name cab-model roster (the DynaCab enum's option list is
+   * position-identical to it), so one roster renders either.
+   *
+   * `variantValue` is the raw value of the variant selector (null when unread) — needed because WHICH
+   * param holds the model depends on it.
+   *
+   * RESONATOR (variant selector `RESONATOR_MODE`) has the same conflation but no model param at all; its
+   * behaviour is deliberately left as-is here because no measurement exists for it — only CABINET has been
+   * measured, and an unmeasured "fix" of a device-behaviour path is exactly what this project's rules
+   * forbid.
+   */
+  #modelSelectorPid(family: string, variantValue: number | null): number | undefined {
+    const defs = this.#prof.params[family] ?? [];
+    if (family === 'CABINET') {
+      const name = variantValue === 1 ? 'CABINET_DYNACAB_TYPE1' : 'CABINET_TYPE1';
+      return defs.find((p) => p.name === name)?.paramId;
+    }
+    return this.#paramId(family, 'type');
   }
 
   // ── device-edit push (capability deviceEditPush): reflect front-panel / editor edits the device
@@ -2206,11 +2293,62 @@ class Gen3Driver implements DeviceDriver {
     if (!range || !rangeIsIdentity(range) || range.displayMax <= range.displayMin) return undefined;
     return { displayMin: range.displayMin, displayMax: range.displayMax, writeValidated: (range as { writeValidated?: boolean }).writeValidated };
   }
-  /** Change a block's model/type (the family TYPE selector ordinal). */
+  /** The last-read fn=0x1F record for a param of a block the driver has already read (the body slice
+   *  blockParams/wires prime), or null when there is none. NO FRAMES — see setType: a read inside a write
+   *  path would make a `?dryRun` preview empty while a real run sends a write. */
+  #cachedRaw(eid: number, pid: number): number | null {
+    const snap = this.#editSnapshot.get(eid);
+    const v = snap?.[pid];
+    return typeof v === 'number' ? v : null;
+  }
+
+  /**
+   * Raw values of specific params on the block's CURRENT channel — the same fn=0x1F body and the same
+   * channel resolution blockParams uses, without the decode/layout work. Returns null (never a guessed
+   * value) when the active channel is UNKNOWN or the read is torn: a wrong channel answers ANOTHER
+   * channel's value, which is exactly the substitution that makes a write land on the wrong param.
+   */
+  async #readRawOnActiveChannel(eid: number, family: string, pids: readonly number[]): Promise<Map<number, number> | null> {
+    const dev = await this.#conn();
+    const chRes = this.#activeChannelOrUnknown(await this.#statusByEffectId(), eid);
+    if ('unknown' in chRes) return null;
+    const frames = await dev.request(this.#codec.buildBlockBulkReadPoll(eid), { timeoutMs: dev.slow ? 8000 : 2500, quietMs: dev.slow ? 600 : 120, match: (fs) => fs.some((f) => f[5] === 0x76) });
+    const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
+    if (bulk.values.length < bulk.itemCount) return null; // torn page → unknown, never 0
+    const { base } = this.#channelSlice(family, bulk, chRes.channel);
+    const out = new Map<number, number>();
+    for (const pid of pids) {
+      const v = bulk.values[base + pid];
+      if (typeof v === 'number') out.set(pid, v);
+    }
+    return out;
+  }
+
+  /** Change a block's model/type (the family's MODEL selector ordinal — see #modelSelectorPid). */
   async setType(eid: number, value: number) {
     const family = SLUG_FAMILY[(slugForEffectId(eid) ?? '').toLowerCase()];
-    const tid = family ? this.#paramId(family, 'type') : undefined;
+    let tid = family ? this.#paramId(family, 'type') : undefined;
     if (tid == null) return { ok: false };
+    if (family === 'CABINET') {
+      // The cab's model param depends on WHICH PAGE the block is showing (CABINET_MODE). The previous
+      // behaviour wrote the MODE param with a cab-model ordinal: the device ignored it and the call still
+      // answered {ok:true} (silent no-op, measured 2026-10-13).
+      //
+      // LAST-KNOWN BODY FIRST, and that ordering is what keeps `?dryRun` honest: the dry-run scope swaps
+      // the transport for a recording no-op FOR READS TOO, so a read taken inside this write path would
+      // answer nothing and the preview would show an EMPTY frame list while a real run sends a write.
+      // blockParams/meters prime `#editSnapshot` with the block's own body, and the device-edit push keeps
+      // it fresh, so the page is normally known without a frame. Only a cold block needs the read.
+      let mode = this.#cachedRaw(eid, tid);
+      if (mode == null) {
+        const read = await this.#readRawOnActiveChannel(eid, family, [tid]);
+        mode = read?.get(tid) ?? null;
+      }
+      if (mode == null) return { ok: false }; // an unreadable page is not a page to guess
+      const modelId = this.#modelSelectorPid(family, mode);
+      if (modelId == null) return { ok: false };
+      tid = modelId;
+    }
     // W1.4: stamp the local-edit window BEFORE sending (same fix as setParam — see there) so the FM3
     // device-edit poll pauses ~2 s, covering the 250 ms #write window, and does not re-read the type we
     // just wrote and emit it back as a spurious param event; also stamped even if the write throws.

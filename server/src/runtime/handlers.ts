@@ -190,6 +190,28 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       return await d.presetSummary(n, full);
     } catch (e) { reply.code(503); return { error: (e as Error).message }; }
   };
+  /** GET /presets/:n/grid — the routing grid of the ADDRESSED SLOT. Distinct from gridH, which reads the
+   *  live edit buffer: both surfaces used to answer `/presets/:n/grid` from gridH, so `:n` was ignored and
+   *  the preset browser drew the loaded preset's chain for every entry (measured 2026-10-13). A slot-dump
+   *  failure is the documented decode failure (503), and a driver without the method is a 501, not a
+   *  silently substituted live grid. */
+  const presetGridH = async (reply: StatusSink, n: number) => {
+    if (!isPresetNumber(n)) { reply.code(400); return { error: 'preset number must be an integer 0..16383' }; }
+    try {
+      const d = await driver();
+      if (!d.gridForSlot) {
+        // A driver that cannot dump a slot read-only (AM4 / gen-1 / gen-2 / VP4). The LIVE grid IS slot
+        // n's grid when n is the slot the unit currently has loaded — answer that, and 501 for every
+        // other slot. Answering the loaded preset for a DIFFERENT slot is precisely the bug this route
+        // had; answering nothing is better than answering the wrong preset.
+        if (!d.presetRef) return unsupported(reply, 'presetDump');
+        const cur = await d.presetRef();
+        if (cur.number !== n) return unsupported(reply, 'presetDump');
+        return await d.grid();
+      }
+      return await d.gridForSlot(n);
+    } catch (e) { return decodeFail(reply, 'preset grid decode', e); }
+  };
   /** GET /presets/:n/params — full per-block decoded params for one slot. */
   const presetParamsH = async (reply: StatusSink, n: number) => {
     if (!isPresetNumber(n)) { reply.code(400); return { error: 'preset number must be an integer 0..16383' }; }
@@ -646,7 +668,7 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
   return {
     driver, unsupported, decodeFail,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
-    rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetParamsH,
+    rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetGridH, presetParamsH,
     liveMonitorsH, looperTelemetryH, fcStateH,
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,

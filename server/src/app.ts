@@ -74,7 +74,7 @@ export async function buildApp(
   const {
     driver, unsupported,
     gridH, blocksH, sceneStateH, blockParamsH, setParamH, bypassH, sceneSetH,
-    rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetParamsH,
+    rawBlockH, cabStateH, readParamsH, readRangeH, presetSummaryH, presetGridH, presetParamsH,
     liveMonitorsH, looperTelemetryH, fcStateH,
     presetSelectH, presetStoreH, presetNameH, locationsH,
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
@@ -513,7 +513,7 @@ export async function buildApp(
   );
 
   app.get('/preset/grid', async (_req, reply) => gridH(reply));
-  app.get<{ Params: { n: string } }>('/presets/:n/grid', async (_req, reply) => gridH(reply));
+  app.get<{ Params: { n: string } }>('/presets/:n/grid', async (req, reply) => presetGridH(reply, Number(req.params.n)));
   app.get('/preset/blocks', async (_req, reply) => blocksH(reply));
   // Lightweight per-block bypass+channel (no preset dump) — Axis applies it to its cached grid on a scene change.
   app.get('/preset/scene-state', async (_req, reply) => sceneStateH(reply));

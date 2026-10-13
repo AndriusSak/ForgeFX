@@ -320,7 +320,7 @@ export function createRouter(deps: RuntimeDeps): {
   on('GET', '/preset/switches', (c) => h.perPresetSwitchesH(c.reply));
   on('PUT', '/preset/switches/:index', (c) =>
     h.perPresetSwitchH(c.reply, Number(c.params.index), c.body as { actionCode?: number; targetIndex?: number } | undefined));
-  on('GET', '/presets/:n/grid', (c) => h.gridH(c.reply));
+  on('GET', '/presets/:n/grid', (c) => h.presetGridH(c.reply, Number(c.params.n)));
   on('GET', '/preset/grid', (c) => h.gridH(c.reply));
   on('GET', '/preset/blocks', (c) => h.blocksH(c.reply));
   on('GET', '/preset/scene-state', (c) => h.sceneStateH(c.reply));

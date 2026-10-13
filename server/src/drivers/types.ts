@@ -404,6 +404,10 @@ export interface DeviceDriver {
 
   /** Routing grid (the AM4 serves its 4 slots as a 1×4 grid DTO). */
   grid(): Promise<PresetGridDTO>;
+  /** Routing grid of ONE STORED SLOT (`GET /presets/:n/grid`). Absent → the route answers 501, never a
+   *  substituted live grid (the bug this exists to fix: `:n` was ignored and the browser previewed the
+   *  loaded preset for every entry). */
+  gridForSlot?(n: number): Promise<PresetGridDTO>;
 
   // ── preset reads ──
   presetRef?(): Promise<{ number: number; name: string }>;

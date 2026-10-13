@@ -16,6 +16,7 @@ import { runTablesTests, TABLES_CASE_COUNT } from './drivers/tables.test.js';
 import { runLayoutsTests, LAYOUTS_CASE_COUNT } from './drivers/layouts.test.js';
 import { runKnobCoverageTests, KNOB_COVERAGE_CASE_COUNT } from './drivers/knob-coverage.test.js';
 import { runCabLayoutVariantTests, CAB_LAYOUT_VARIANT_CASE_COUNT } from './drivers/cab-layout-variant.test.js';
+import { runCabModelVsPageTests, CAB_MODEL_VS_PAGE_CASE_COUNT } from './drivers/cab-model-vs-page.test.js';
 import { runCabMuteCacheRowTests, CAB_MUTE_CACHE_ROW_CASE_COUNT } from './drivers/cab-mute-cache-row.test.js';
 import { runCabBtnPseudoParamTests, CAB_BTN_PSEUDO_PARAM_CASE_COUNT } from './drivers/cab-btn-pseudo-param.test.js';
 import { runBlockReadFailureTests, BLOCK_READ_FAILURE_CASE_COUNT } from './drivers/block-read-failure.test.js';
@@ -45,6 +46,7 @@ import { runPresetConvertTests, PRESET_CONVERT_CASE_COUNT } from './api/preset-c
 import { runPresetConvertExportTests, PRESET_CONVERT_EXPORT_CASE_COUNT } from './api/preset-convert-export.test.js';
 import { runWriteSafetyTests, WRITE_SAFETY_CASE_COUNT } from './api/write-safety.test.js';
 import { runParamDefaultTests, PARAM_DEFAULT_CASE_COUNT } from './api/param-default.test.js';
+import { runPresetGridByNumberTests, PRESET_GRID_BY_NUMBER_CASE_COUNT } from './api/preset-grid-by-number.test.js';
 import { runLayoutParamCoverageTests, LAYOUT_PARAM_COVERAGE_CASE_COUNT } from './drivers/layout-param-coverage.test.js';
 import { runGlobalBulkReadTests, GLOBAL_BULK_READ_CASE_COUNT } from './drivers/global-bulk-read.test.js';
 import { runRouteParityTests, ROUTE_PARITY_CASE_COUNT } from './api/route-parity.test.js';
@@ -126,7 +128,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/device-profile-merge-guard (${DEVICE_PROFILE_MERGE_GUARD_CASE_COUNT} cases, a truncated cache enum/roster list loses to the static one; a complete cache list still wins)`, run: runDeviceProfileMergeGuardTests },
   { name: `drivers/measured-overlay-wins (${MEASURED_OVERLAY_WINS_CASE_COUNT} cases, the MEASURED range overlay beats a device-cache row built from the same wrong record; the cache still wins for a non-overlay row; the served value is the unit's own 10×norm reading)`, run: runMeasuredOverlayWinsTests },
   { name: `drivers/status-channel-unknown (${STATUS_CHANNEL_UNKNOWN_CASE_COUNT} cases, an unreadable/partial fn-0x13 dump yields an UNKNOWN active channel, never a substituted channel A)`, run: runStatusChannelUnknownTests },
-  { name: `drivers/channel-slice-stride (${CHANNEL_SLICE_STRIDE_CASE_COUNT} cases, the fn=0x1F channel-block stride must describe the BODY: a stale/absent table row is overridden by itemCount/4, a dividing row survives, and the three corrected rows really ship)`, run: runChannelSliceStrideTests }
+  { name: `drivers/channel-slice-stride (${CHANNEL_SLICE_STRIDE_CASE_COUNT} cases, the fn=0x1F channel-block stride must describe the BODY: a stale/absent table row is overridden by itemCount/4, a dividing row survives, and the three corrected rows really ship)`, run: runChannelSliceStrideTests },
+  { name: `drivers/cab-model-vs-page (${CAB_MODEL_VS_PAGE_CASE_COUNT} cases, a cab publishes the model on the page CABINET_MODE selects — DynaCab pid 85 vs Legacy pid 4 — and setType writes THAT param, never the page flag)`, run: runCabModelVsPageTests },
+  { name: `api/preset-grid-by-number (${PRESET_GRID_BY_NUMBER_CASE_COUNT} cases, /presets/:n/grid answers the ADDRESSED SLOT on both surfaces, 400 on a bad slot, 501 without a slot grid — never the live edit buffer)`, run: runPresetGridByNumberTests }
 ];
 
 let failures = 0;
