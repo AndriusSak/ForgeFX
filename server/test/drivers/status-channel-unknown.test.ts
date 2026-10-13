@@ -45,7 +45,7 @@ const TYPE_ON_A = 213;
 const TYPE_ON_B = 250;
 const TYPE_ON_C = 316;
 
-export const STATUS_CHANNEL_UNKNOWN_CASE_COUNT = 8;
+export const STATUS_CHANNEL_UNKNOWN_CASE_COUNT = 11;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -164,7 +164,7 @@ export async function runStatusChannelUnknownTests(): Promise<void> {
     h.setStatus(statusDump([[DELAY_EID, 0]])); // PARTIAL: an OK dump that now omits the Amp
     await rejects(
       () => h.driver.blockParams(AMP_EID),
-      /PARTIAL: it omits eid/,
+      /omitted eid \d+, which an earlier dump .* enumerated as placed/,
       'a partial dump omitting a block we saw placed must NOT be served as channel A'
     );
     // control: the block the partial dump DOES carry is still served — no over-rejection.
@@ -224,5 +224,68 @@ export async function runStatusChannelUnknownTests(): Promise<void> {
     h.setStatus(statusDump([[AMP_EID, 1]])); // still readable, on channel B
     const r = await h.driver.blockParams(AMP_EID);
     assertEqual(r.type?.value, TYPE_ON_B, 'a readable dump is still served, on the channel it reports');
+  }
+
+  // ── 9. FINDING #1 (the review's exact check). The EDIT-POLL path must not wipe the placement
+  //    evidence. A failed dump makes `getActiveChannels()` return an EMPTY map WITHOUT throwing, so the
+  //    old `#sweepTargets` (reached through readDeviceEditState) stored `{eids: [], at: now}` — erasing
+  //    the evidence AND refreshing its stamp. With the cache also aged past PLACED_TTL_MS (Date.now is
+  //    advanced) the old wall-clock expiry resolved channel A on its own. Both must now REFUSE. ──
+  {
+    const h = makeHarness();
+    h.setStatus(statusDump([[AMP_EID, 2]])); // the Amp is placed on channel C
+    await h.driver.getActiveChannels(); // seed the placement evidence
+    const realNow = Date.now;
+    Date.now = () => realNow() + 20_000; // age the evidence past PLACED_TTL_MS
+    try {
+      h.setStatus(null); // the fn-0x13 dump now FAILS
+      await h.driver.readDeviceEditState(); // the edit-poll path — runs #sweepTargets, which used to wipe + refresh the cache
+      await rejects(
+        () => h.driver.blockParams(AMP_EID),
+        /active channel UNKNOWN: .*not readable/,
+        'after the edit-poll path, an aged cache + a failed dump must still REFUSE (not resolve channel A)'
+      );
+    } finally { Date.now = realNow; }
+  }
+
+  // ── 10. HEALTHY-SESSION CONTROL (no regression): a GOOD dump must serve every placed block on its
+  //    real channel even with an aged cache, and a block genuinely not placed keeps the documented A
+  //    default. The evidence change must never make a healthy session refuse anything. ──
+  {
+    const realNow = Date.now;
+    Date.now = () => realNow() + 60_000; // well past any TTL
+    try {
+      const h = makeHarness();
+      h.setStatus(statusDump([[AMP_EID, 1], [DELAY_EID, 0]])); // a complete, healthy dump
+      const amp = await h.driver.blockParams(AMP_EID);
+      assertEqual(amp.type?.value, TYPE_ON_B, 'healthy dump + aged evidence: the placed Amp is served on its real channel B');
+      assert((await h.driver.blockParams(DELAY_EID)).slug === 'delay', 'healthy dump + aged evidence: the placed Delay is still served');
+      // A block absent from a healthy dump it has never been seen placed in keeps channel A.
+      const h2 = makeHarness();
+      h2.setStatus(statusDump([[DELAY_EID, 1]]));
+      assertEqual((await h2.driver.blockParams(AMP_EID)).type?.value, TYPE_ON_A,
+        'a block not placed in a healthy dump keeps the documented A default (no over-refusal)');
+    } finally { Date.now = realNow; }
+  }
+
+  // ── 11. FINDING #9 (removal semantics + reason text): a block omitted from SUCCESSIVE successful
+  //    dumps (the only way a real front-panel removal ever shows) is retired after PLACED_MISS_LIMIT
+  //    such omissions and then served as NOT PLACED — never refused forever. During the grace window it
+  //    still refuses, with a reason that names the removal possibility instead of flatly "PARTIAL". ──
+  {
+    const h = makeHarness();
+    h.setStatus(statusDump([[AMP_EID, 0], [DELAY_EID, 0]]));
+    await h.driver.getActiveChannels(); // evidence: the Amp is placed
+    h.setStatus(statusDump([[DELAY_EID, 0]])); // every subsequent successful dump omits the Amp
+    const m1 = await rejects(
+      () => h.driver.blockParams(AMP_EID),
+      /omitted eid \d+, which an earlier dump .* enumerated as placed/,
+      'the first consecutive omission still refuses'
+    );
+    assert(/no longer placed/.test(m1), 'the refusal names the removal possibility, not a flat "PARTIAL"');
+    await rejects(() => h.driver.blockParams(AMP_EID), /omitted eid \d+/, 'the second consecutive omission still refuses');
+    // PLACED_MISS_LIMIT-th consecutive omission: retired → the block reads as not placed (channel A).
+    assertEqual((await h.driver.blockParams(AMP_EID)).type?.value, TYPE_ON_A,
+      'after PLACED_MISS_LIMIT consecutive successful omissions the block is treated as genuinely removed');
   }
 }

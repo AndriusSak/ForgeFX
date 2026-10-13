@@ -653,6 +653,10 @@ class Gen3Driver implements DeviceDriver {
         else dev.send(frame);
       }
       this.#gridCache = null; // the edit buffer changed → the next grid/blocks read reflects it
+      // FINDING #9: an edit-buffer mutation can change placement, so the placement evidence is stale
+      // too — clear it exactly where `#gridCache` is cleared. Clearing can only SUPPRESS a refusal until
+      // the next good dump (it never fabricates placement), so it is safe and keeps the memory honest.
+      this.#placedCache = null;
       await new Promise((r) => setTimeout(r, 1500)); // let the unit settle before the read-back dump
       const after = decodeRawPatch(parsePresetDump(dumpBytesFromFrames(await this.#dumpFrames(EDIT_BUFFER)), 0, this.#prof.model).chunkPayloads);
       return { body: new Uint8Array(after.body) };
@@ -779,8 +783,12 @@ class Gen3Driver implements DeviceDriver {
    * opposite). The try/catch is still here — a status read is optional for the CALLER's sake — but the
    * failure is now REPORTED in `ok` instead of being turned into a plausible-looking empty map.
    *
-   * This method OWNS `#placedCache`: the set is advanced only by a read that succeeded AND was
-   * complete, so a partial/failed read can never overwrite the evidence that a block IS placed.
+   * This method is the SINGLE WRITER of `#placedCache` (finding #1): `ok` is the only gate, so a
+   * FAILED read can neither erase the evidence that a block is placed nor refresh its stamp. A
+   * successful read updates the evidence and counts an OMISSION of a known-placed block as one miss;
+   * only PLACED_MISS_LIMIT *consecutive successful* omissions retire it (a real front-panel removal is
+   * visible only through successful dumps, so that is the only signal that may retire it — a failure
+   * streak never reaches the update and so can never retire anything).
    */
   async #statusByEffectId(): Promise<StatusRead> {
     const dev = await this.#conn();
@@ -806,18 +814,42 @@ class Gen3Driver implements DeviceDriver {
     // A frame that carries ZERO triples is the empty-payload / torn case, not a usable read: a real
     // preset always enumerates at least its Output block(s) (see sceneState's own note).
     const ok = frameArrived && map.size > 0;
-    // COMPLETENESS. The dump enumerates the PLACED blocks, and this driver remembers the set a recent
-    // successful dump enumerated (`#placedCache`, refreshed by the registry's channel watch every Nth
-    // meter tick). A block we have that evidence for and that a successful dump now omits means the
-    // dump is PARTIAL — the block's channel is unknown, not "not placed".
-    const prev = this.#placedCache;
-    const recent = !!prev && Date.now() - prev.at < Gen3Driver.PLACED_TTL_MS;
-    const missingPlaced = ok && recent ? prev!.eids.filter((e) => !map.has(e)) : [];
-    // Only a COMPLETE read advances the memory (and refreshes its stamp); a partial read leaves the
-    // previous set in place (and does NOT refresh `at`, so a persistently partial dump ages out after
-    // PLACED_TTL_MS and the driver stops asserting placement — it cannot tell "forever torn" from
-    // "the block was genuinely removed", and after that window the current view is accepted as truth).
-    if (ok && missingPlaced.length === 0) this.#placedCache = { eids: [...map.keys()], at: Date.now() };
+    // COMPLETENESS / EVIDENCE (finding #1). The dump enumerates the PLACED blocks; this driver
+    // remembers the set a successful read enumerated (`#placedCache`). A block we have that evidence
+    // for and that a successful dump now omits means the dump is PARTIAL — the block's channel is
+    // unknown, not "not placed".
+    //
+    // `ok` is the SINGLE gate on the memory: a FAILED read takes the `else` branch and can neither
+    // erase the evidence nor refresh its stamp. That is the whole point — `getActiveChannels()`
+    // returns an EMPTY map WITHOUT throwing on a failed dump, so a second writer (the old
+    // `#sweepTargets`) stored `{eids: []}` and re-armed the very channel-A substitution this contract
+    // exists to stop. There is no wall-clock expiry on the evidence: ageing it by time let a FAILURE
+    // STREAK convert a known-placed block into the channel-A default after PLACED_TTL_MS. Instead a
+    // successful dump that OMITS a known-placed block counts one MISS, and only PLACED_MISS_LIMIT
+    // *consecutive successful* omissions retire it — the only signal a real front-panel removal gives.
+    // A failure streak advances no miss, so staleness alone can never silence the refusal.
+    let missingPlaced: number[] = [];
+    if (ok) {
+      const now = Date.now();
+      const prev = this.#placedCache;
+      if (prev) {
+        const misses = new Map(prev.misses);
+        for (const e of prev.eids) {
+          if (map.has(e)) misses.delete(e); // enumerated again → the omission streak is broken
+          else misses.set(e, (misses.get(e) ?? 0) + 1);
+        }
+        const retired = new Set<number>();
+        for (const [e, n] of misses) if (n >= Gen3Driver.PLACED_MISS_LIMIT) retired.add(e);
+        for (const e of retired) misses.delete(e); // retired blocks are dropped, not kept at the limit
+        const eids = [...new Set([...map.keys(), ...prev.eids])].filter((e) => !retired.has(e));
+        // Only blocks STILL trusted (not retired as genuinely removed) are reported as missing.
+        missingPlaced = prev.eids.filter((e) => !map.has(e) && !retired.has(e));
+        this.#placedCache = { eids, misses, at: now };
+      } else {
+        // First good read of this edit buffer → the dump's own keys ARE the initial evidence.
+        this.#placedCache = { eids: [...map.keys()], misses: new Map(), at: now };
+      }
+    }
     return { byEffectId: map, ok, missingPlaced };
   }
 
@@ -839,17 +871,25 @@ class Gen3Driver implements DeviceDriver {
     const st = s.byEffectId.get(eid);
     if (st) return { channel: st.channel }; // the dump answered — the block's own active channel
     if (s.ok) {
-      // The read SUCCEEDED. Partial (a placed eid it should have enumerated is missing) → UNKNOWN;
-      // otherwise the block is simply not placed → the documented channel-A default (case (a)).
+      // The read SUCCEEDED. A block this dump omits but we have trusted evidence IS placed is either a
+      // torn dump or a block that is no longer placed — the two are indistinguishable from ONE read,
+      // so the reason NAMES the actual ambiguity (finding #9: calling it flatly "PARTIAL" misdescribed
+      // a removed block). Either way the channel is UNKNOWN. A block absent with NO such evidence is
+      // simply not placed → the documented channel-A default (case (a)).
       return s.missingPlaced.includes(eid)
-        ? { unknown: `the fn-0x13 status dump is PARTIAL: it omits eid ${eid}, which a recent dump enumerated as placed` }
+        ? { unknown: `the fn-0x13 status dump omitted eid ${eid}, which an earlier dump of this preset enumerated as placed — the dump is PARTIAL/torn or the block is no longer placed; its active channel is UNKNOWN` }
         : { channel: 0 };
     }
     // The read FAILED (no 0x13 frame / empty payload). That says nothing about a block we have never
     // seen placed, so the documented default stands; for a block we HAVE seen placed the channel is
     // UNKNOWN — the placeholder must not be served as if it were the block's own channel.
+    //
+    // NO wall-clock expiry here (finding #1): a failure STREAK must not convert a known-placed block
+    // into the channel-A default. The only thing that retires evidence is PLACED_MISS_LIMIT consecutive
+    // *successful* dumps omitting the block (see `#statusByEffectId`), so a link that simply cannot be
+    // read keeps refusing — the honest answer — however long it stays down.
     const prev = this.#placedCache;
-    const knownPlaced = !!prev && Date.now() - prev.at < Gen3Driver.PLACED_TTL_MS && prev.eids.includes(eid);
+    const knownPlaced = !!prev && prev.eids.includes(eid);
     return knownPlaced
       ? { unknown: `the fn-0x13 status dump was not readable (no 0x13 frame / empty payload) and eid ${eid} was placed as of the last good dump` }
       : { channel: 0 };
@@ -861,9 +901,10 @@ class Gen3Driver implements DeviceDriver {
     const status = await this.#statusByEffectId();
     const out = new Map<number, number>();
     for (const [eid, st] of status.byEffectId) out.set(eid, st.channel);
-    // W2.3: the status dump enumerates the PLACED blocks, so it is the sweep's target list —
-    // `#statusByEffectId` records it (on successful, COMPLETE reads only) as `#placedCache`, which is
-    // also the placement evidence `#activeChannelOrUnknown` consults. Nothing to do here.
+    // W2.3: the status dump enumerates the PLACED blocks, so it is the sweep's target list.
+    // `#statusByEffectId` is the SINGLE writer of `#placedCache` (the placement evidence
+    // `#activeChannelOrUnknown` consults) and advances it on successful reads only — so a FAILED read
+    // returns an empty map here yet leaves the evidence intact. Nothing to do here.
     return out;
   }
 
@@ -1889,8 +1930,18 @@ class Gen3Driver implements DeviceDriver {
   // nothing, so polling is the only mechanism; one block per tick keeps the marginal cost at a single
   // fn-0x1F read — the same read the open-block path already makes.
   #sweepCursor = 0;
-  #placedCache: { eids: number[]; at: number } | null = null;
-  static PLACED_TTL_MS = 10_000; // how long the placed-block list may be reused before a fresh status read
+  // The remembered placed set — the EVIDENCE that lets a failed/partial fn-0x13 dump be told apart from
+  // "this block is not placed". SINGLE WRITER: `#statusByEffectId`, and only on a successful read (a
+  // failed read leaves this untouched). `at` is the wall-clock of the last successful read and paces
+  // ONLY the sweep's cheap reuse (`#sweepTargets`) — it is NOT an expiry for the refusal. `misses`
+  // counts CONSECUTIVE successful dumps that omitted each still-trusted eid; a block is retired only
+  // after PLACED_MISS_LIMIT such omissions.
+  #placedCache: { eids: number[]; misses: Map<number, number>; at: number } | null = null;
+  static PLACED_TTL_MS = 10_000; // how long the placed-block list may be reused before the sweep asks for a fresh status read (perf only — never a refusal expiry)
+  // Consecutive SUCCESSFUL dumps that may omit a known-placed block before the block is retired as
+  // genuinely removed. Measured in successful reads, not seconds, so a failure streak (which advances
+  // no miss — see `#statusByEffectId`) can never retire a block we know is placed.
+  static PLACED_MISS_LIMIT = 3;
 
   /** FM3 device-edit POLL (capability deviceEditWatch — FM3 doesn't push, unlike FM9/III). The registry
    *  supervisor calls this on a timer; we re-read the open block (if any) via the fn-0x1F bulk read and
@@ -1946,17 +1997,27 @@ class Gen3Driver implements DeviceDriver {
     return res.structural;
   }
 
-  /** Placed effect ids the sweep may target, cheapest source first: the list the registry's channel watch
-   *  already produced (fn-0x13 status dump — opportunistic, no extra traffic), else one status read.
+  /** Placed effect ids the sweep may target. READ-ONLY with respect to the placement evidence: the
+   *  list comes from `#placedCache` (the SINGLE owner is `#statusByEffectId`, which advances it on
+   *  successful reads only), and when it is stale this asks for a fresh status read rather than writing
+   *  the memory itself.
+   *
+   *  FINDING #1: this method used to write `#placedCache = { eids, at: now }` from
+   *  `getActiveChannels().catch(() => new Map())`. On a FAILED dump `getActiveChannels` does NOT throw —
+   *  it returns an EMPTY map — so the sweep stored `{eids: [], at: now}`: it ERASED the placement
+   *  evidence AND stamped it fresh, which re-armed the channel-A substitution (`#activeChannelOrUnknown`
+   *  case (b)) in exactly the degraded-link case the status contract exists to refuse. The sweep now
+   *  never writes it. `at` only decides whether to ask for a fresh read (a perf window), never whether
+   *  evidence still counts.
+   *
    *  Shunts and unmapped ids are filtered out: they have no param family to diff. */
   async #sweepTargets(): Promise<number[]> {
-    let eids: number[] | null = null;
-    if (this.#placedCache && Date.now() - this.#placedCache.at < Gen3Driver.PLACED_TTL_MS) eids = this.#placedCache.eids;
-    if (!eids) {
-      const chans = await this.getActiveChannels().catch(() => new Map<number, number>());
-      eids = [...chans.keys()];
-      this.#placedCache = { eids, at: Date.now() };
+    if (!this.#placedCache || Date.now() - this.#placedCache.at >= Gen3Driver.PLACED_TTL_MS) {
+      // Refreshes the evidence on a SUCCESSFUL read; on a failure it is a no-op that leaves the last
+      // good evidence (and its refusal) intact.
+      await this.#statusByEffectId();
     }
+    const eids = this.#placedCache?.eids ?? [];
     return eids
       .filter((e) => !!(SLUG_FAMILY[(slugForEffectId(e) ?? '').toLowerCase()] ?? this.#prof.familyForEffectId(e)))
       .sort((a, b) => a - b);
@@ -2185,6 +2246,7 @@ class Gen3Driver implements DeviceDriver {
     await this.#write(this.#codec.buildClearBlock({ row, col, rows: this.#prof.rows }));
     const r = await this.#write(this.#codec.buildSetGridCell({ row, col, blockId, rows: this.#prof.rows }));
     this.#gridCache = null;
+    this.#placedCache = null; // FINDING #9: placing a block changes the placed set — clear the evidence with the grid
     this.#emit({ type: 'changed', scope: 'grid' });
     return r;
   }
@@ -2196,6 +2258,7 @@ class Gen3Driver implements DeviceDriver {
   async cable(srcRow: number, srcCol: number, destRow: number, connect: boolean) {
     const r = await this.#write(this.#codec.buildSetGridRouting({ srcRow, srcCol, destRow, rows: this.#prof.rows, op: connect ? ROUTING_OP_CONNECT : ROUTING_OP_DISCONNECT }));
     this.#gridCache = null;
+    this.#placedCache = null; // FINDING #9: clear the placement evidence wherever the grid cache is cleared
     this.#emit({ type: 'changed', scope: 'grid' });
     return r;
   }
