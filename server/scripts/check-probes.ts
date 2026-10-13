@@ -19,10 +19,11 @@
 //      diagnostic count is printed as an ADVISORY only, because ~30 scripts/ files carry pre-existing
 //      strict-mode type debt that is out of scope for this gate (a hard gate on it would be red on a
 //      clean checkout).
-//   2. PRECEDENCE. No comparison is chained onto an un-parenthesised bitwise expression (`a & b !== c`).
-//      AST-based (a `&`/`|`/`^` BinaryExpression whose RIGHT operand is a comparison), so it catches
-//      every sibling of the shape — bare `<`/`>`, any whitespace, indexed and call operands — and, unlike
-//      a regex, never mistakes a TYPE union for a value comparison. Check 6 is still the deeper catch:
+//   2. PRECEDENCE. No comparison is chained onto an un-parenthesised bitwise expression — on EITHER side
+//      (`a & b !== c` parses as `a & (b !== c)`; `a === b & c` parses as `(a === b) & c`). AST-based (a
+//      `&`/`|`/`^` BinaryExpression whose LEFT **or** RIGHT operand is a comparison), so it catches every
+//      sibling of the shape — bare `<`/`>`, any whitespace, indexed and call operands — and, unlike a
+//      regex, never mistakes a TYPE union for a value comparison. Check 6 is still the deeper catch:
 //      the AST sees the SHAPE, the type-checker sees the OPERAND TYPES.
 //   3. DEVICE-FAILURE BRANCH. A probe that opens a session (`openProbeSession`) must PRINT a
 //      device-failure branch and return exit 3 rather than throwing.
@@ -87,12 +88,15 @@ function headerBlock(src: string): string {
 
 // ── detectors (each returns a list of human-readable findings) ────────────────────────────────────
 
-// A comparison chained onto an un-parenthesised bitwise expression: `X & Y !== Z` parses as
-// `X & (Y !== Z)`, because every comparison/relational operator binds TIGHTER than `&`/`|`/`^`. The
-// detector is therefore AST-based, not lexical: it walks the parse tree for a BinaryExpression whose
-// operator is `&`/`|`/`^` AND whose RIGHT operand is itself a comparison BinaryExpression — the exact,
-// unambiguous structure of the bug. That single rule closes every sibling of the shape at once:
-//   • bare `<` / `>` as well as `<=`/`>=`/`==`/`!=`/`===`/`!==` (`a & b < c` → `a & (b < c)`);
+// A comparison chained onto an un-parenthesised bitwise expression. Every comparison/relational operator
+// binds TIGHTER than `&`/`|`/`^`, so the comparison is ABSORBED into the bitwise operand, and which side
+// it lands on is the source order:
+//   • `X & Y !== Z` parses as `X & (Y !== Z)`  → the `&` node's RIGHT operand is the comparison;
+//   • `X === Y & Z` parses as `(X === Y) & Z`  → the `&` node's LEFT operand is the comparison.
+// The detector is AST-based, not lexical: it walks the parse tree for a BinaryExpression whose operator
+// is `&`/`|`/`^` AND whose LEFT **or** RIGHT operand is itself a comparison BinaryExpression — the exact,
+// unambiguous structure of the bug. Together those two sides close every sibling of the shape:
+//   • bare `<` / `>` as well as `<=`/`>=`/`==`/`!=`/`===`/`!==` (either side);
 //   • whitespace is irrelevant (`x&0xf!==5` is the same tree as `x & 0xf !== 5`);
 //   • indexed (`a & b[i] !== c`) and call (`a & f(x) !== c`) operands fall out for free;
 //   • `<<`/`>>` and `&&`/`||` are NOT comparisons/bitwise, so they never match.
@@ -100,8 +104,8 @@ function headerBlock(src: string): string {
 // are TYPE unions that every regex spelling reads as `| null >` / `| Record <`, and an expanded regex
 // flagged 18 such type annotations across the real scripts/ tree (measured) — false positives that made
 // the gate red on a clean checkout. A type is not a BinaryExpression, so the AST has no such ambiguity.
-// The parenthesised form `(X & Y) !== Z` is naturally out of scope: there the `&` node is the
-// comparison's LEFT operand, not its right.
+// The parenthesised forms `(X & Y) !== Z` / `(X === Y) & Z` are naturally out of scope: there the
+// comparison sits inside a ParenthesizedExpression, so the `&` node's operands are not comparisons.
 const BITWISE_OP_KINDS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.AmpersandToken,
   ts.SyntaxKind.BarToken,
@@ -125,13 +129,23 @@ function checkPrecedence(displayName: string, src: string): string[] {
   const visit = (node: ts.Node): void => {
     if (ts.isBinaryExpression(node) && BITWISE_OP_KINDS.has(node.operatorToken.kind)) {
       const rhs = node.right;
-      if (ts.isBinaryExpression(rhs) && COMPARISON_OP_KINDS.has(rhs.operatorToken.kind)) {
+      const lhs = node.left;
+      const rhsIsCmp = ts.isBinaryExpression(rhs) && COMPARISON_OP_KINDS.has(rhs.operatorToken.kind);
+      // LEFT shape: `a === b & c` parses as `(a === b) & c`, so the bitwise node's LEFT is the comparison.
+      // The parenthesised `(a === b) & c` puts a ParenthesizedExpression there, so it is (correctly) not
+      // this shape.
+      const lhsIsCmp = ts.isBinaryExpression(lhs) && COMPARISON_OP_KINDS.has(lhs.operatorToken.kind);
+      if (rhsIsCmp || lhsIsCmp) {
         const bit = node.operatorToken.getText(sf);
-        const cmp = rhs.operatorToken.getText(sf);
         const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
+        const fix = lhsIsCmp
+          ? `\`(a ${lhs.operatorToken.getText(sf)} b) ${bit} c\`, not \`a ${lhs.operatorToken.getText(sf)} b ${bit} c\``
+          : `\`(a ${bit} b) ${(rhs as ts.BinaryExpression).operatorToken.getText(sf)} c\`, not \`a ${bit} b ${(rhs as ts.BinaryExpression).operatorToken.getText(sf)} c\``;
+        const where = lhsIsCmp ? 'BEFORE' : 'onto';
+        const cmp = lhsIsCmp ? lhs.operatorToken.getText(sf) : (rhs as ts.BinaryExpression).operatorToken.getText(sf);
         findings.push(
-          `${displayName}:${line + 1}: comparison '${cmp}' chained onto a bitwise expression — parenthesise: ` +
-            `\`(a ${bit} b) ${cmp} c\`, not \`a ${bit} b ${cmp} c\`\n      ${(lines[line] ?? '').trim()}`,
+          `${displayName}:${line + 1}: comparison '${cmp}' chained ${where} a bitwise expression — parenthesise: ` +
+            `${fix}\n      ${(lines[line] ?? '').trim()}`,
         );
       }
     }
@@ -295,6 +309,14 @@ const SELFTEST_FIXTURES: Array<{ name: string; file: string; bad: string; good: 
     file: 'probe-planted.ts',
     bad: 'const x = a & f(x) !== c;\n',
     good: 'const x = (a & f(x)) !== c;\n',
+  },
+  // LEFT-hand shape (`a === b & c` parses as `(a === b) & c`): the comparison is absorbed into the bitwise
+  // expression's LEFT operand. The parenthesised `(a === b) & c` must stay SILENT.
+  {
+    name: 'precedence',
+    file: 'probe-planted.ts',
+    bad: 'const a = 1, b = 2, c = 3;\nconst x = a === b & c;\n',
+    good: 'const a = 1, b = 2, c = 3;\nconst x = (a === b) & c;\nconst y = a & b & c;\n',
   },
   // The SEMANTIC gate: TS2362/TS2363 on the real precedence shape, and TS2367 on a disjoint comparison.
   {

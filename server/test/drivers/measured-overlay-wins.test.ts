@@ -69,16 +69,19 @@ function cacheWithOldBounds(): BuiltCache {
 }
 
 /**
- * A cache whose OVERLAY rows already AGREE with the corrected catalogue (`WAH/3` and `FLANGER/26` = 0..10,
- * the measured values) — the normal post-fix case, where the overlay changes nothing and must be SILENT.
+ * A cache whose overlay row `WAH/3` carries a value DIFFERENT from the fw-13.0 pre-overlay baseline
+ * (`20..200`): 5..50 — a firmware that moved the record. It must be REPORTED as genuine drift. (`WAH/1`
+ * is a NON-overlay row and must never be reported, however its value differs.)
  */
-function cacheAgreeingOnOverlayRows(): BuiltCache {
+function cacheDriftedOnOverlayRow(): BuiltCache {
   return {
     model: MODEL,
-    firmware: '13.0',
+    firmware: '14.0',
     ranges: {
-      WAH: { 3: { kind: 'float', displayMin: 0, displayMax: 10, scale: 10, step: 0, typecode: 82 } },
-      FLANGER: { 26: { kind: 'float', displayMin: 0, displayMax: 10, scale: 10, step: 0.001, typecode: 82 } },
+      WAH: {
+        1: { kind: 'float', displayMin: 111, displayMax: 222, scale: 1, step: 0, typecode: 576 },
+        3: { kind: 'float', displayMin: 5, displayMax: 50, scale: 10, step: 0, typecode: 82 },
+      },
     },
     rangeSections: {},
     enumOverrides: {},
@@ -90,10 +93,37 @@ function cacheAgreeingOnOverlayRows(): BuiltCache {
   } as unknown as BuiltCache;
 }
 
+/**
+ * A cache that CARRIES the Tempo identity row (CONTROLLERS/32) — and the unvalidated Stages row (/36) —
+ * WITHOUT `writeValidated`, exactly as a live walk's cache rows arrive (the walk records bounds, not the
+ * codec's overlay-only markers). Used by the writeValidated regression case.
+ */
+function cacheCarryingTempoRow(): BuiltCache {
+  return {
+    model: MODEL,
+    firmware: '13.0',
+    ranges: {
+      CONTROLLERS: {
+        32: { kind: 'float', displayMin: 24, displayMax: 250, scale: 1, step: 0, typecode: 0 },
+        36: { kind: 'float', displayMin: 2, displayMax: 32, scale: 1, step: 0, typecode: 0 },
+      },
+    },
+    rangeSections: {},
+    enumOverrides: {},
+    rosters: {},
+    cabIrs: {},
+    unmappedSections: [],
+    unmappedFamilies: [],
+    meta: { recordCount: 2, source: 'live', builtAt: '2026-10-12T19:50:18.387Z' },
+  } as unknown as BuiltCache;
+}
+
 /** Build the runtime profile the server would serve: static FM3 profile + the incident cache. */
 function runtimeFm3Profile() {
   return runtimeProfileFrom(cacheWithOldBounds(), PROFILES[MODEL]!);
 }
+
+const CONTROLLERS_EID = 2; // the virtual CONTROLLERS effect Tempo/Stages live on
 
 // ── the REAL driver over a mocked transport (same harness the other driver suites use) ──────────────
 const compactHex = (f: readonly number[]): string => f.map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -132,7 +162,7 @@ async function servBlock(profile: ReturnType<typeof runtimeFm3Profile>, eid: num
 }
 
 /** Assertions this suite makes when every row it names is present (the registration prints this). */
-export const MEASURED_OVERLAY_WINS_CASE_COUNT = 4;
+export const MEASURED_OVERLAY_WINS_CASE_COUNT = 5;
 
 export async function runMeasuredOverlayWinsTests(): Promise<void> {
   // ── 1. The MERGE: an overlay row corrected by the codec, but re-supplied with the OLD bounds by
@@ -200,37 +230,69 @@ export async function runMeasuredOverlayWinsTests(): Promise<void> {
     assertEqual(focus.max, 10, `case 3: FLANGER/26 served max must be the corrected 10, got ${focus.max}`);
   }
 
-  // ── 4. REVIEW FINDING #5 — the overlay's overrides are VISIBLE, not silent. Every overlay row whose
-  //        pre-overlay value DIFFERED from the static catalogue is reported with its family/pid and BOTH
-  //        value sets, so a future firmware that legitimately changes a row is SEEN rather than masked.
-  //        FAILS BEFORE: the profile carried no `overlayOverrides` field at all (masking invisible).
+  // ── 4. FINDING #6 — the report flags GENUINE DRIFT, not the normal same-firmware case. The overlay was
+  //        made visible by comparing the cache against the CORRECTED catalogue, so the incident `11_13p0`
+  //        cache — which carries exactly the fw-13.0 pre-overlay bounds a same-firmware unit's records
+  //        hold — reported its rows on EVERY connect. That is the normal case and must be SILENT. A cache
+  //        that DIFFERS from that baseline (a firmware that fixed or moved the record) IS reported.
+  //        FAILS BEFORE: the incident cache reported 2 rows (WAH/3, FLANGER/26).
   {
-    const runtime = runtimeFm3Profile();
-    const overrides = runtime.overlayOverrides ?? [];
-    assertEqual(overrides.length, 2,
-      `case 4: exactly the two overlay rows whose cache value differed (WAH/3, FLANGER/26) must be reported — got ${JSON.stringify(overrides)}`);
+    const incident = runtimeFm3Profile();
+    const silent = incident.overlayOverrides ?? [];
+    assertEqual(silent.length, 0,
+      `case 4: the incident cache carries the fw-13.0 pre-overlay bounds (WAH/3 20..200, FLANGER/26 ` +
+        `200..20000) — the NORMAL same-firmware case — so it must report NO drift; got ${JSON.stringify(silent)}`);
 
-    const wah3 = overrides.find((o) => o.family === 'WAH' && o.paramId === 3);
-    assert(wah3 !== undefined, 'case 4: WAH/3 masked a differing cache value and must be REPORTED');
-    assertEqual(wah3!.masked.min, 20, `case 4: WAH/3 masked set = the cache row (min 20) — got ${wah3!.masked.min}`);
-    assertEqual(wah3!.masked.max, 200, `case 4: WAH/3 masked set = the cache row (max 200) — got ${wah3!.masked.max}`);
-    assertEqual(wah3!.catalogue.min, 0, `case 4: WAH/3 catalogue set (min 0) — got ${wah3!.catalogue.min}`);
-    assertEqual(wah3!.catalogue.max, 10, `case 4: WAH/3 catalogue set (max 10) — got ${wah3!.catalogue.max}`);
-    assertEqual(wah3!.overlay.min, 0, `case 4: WAH/3 overlay value (min 0) — got ${wah3!.overlay.min}`);
-    assertEqual(wah3!.overlay.max, 10, `case 4: WAH/3 overlay value (max 10) — got ${wah3!.overlay.max}`);
+    // A cache that DIFFERS from the baseline on an overlay row IS genuine drift and must be reported,
+    // with family/pid and every value set (the cache's, the expected baseline, the catalogue, the overlay).
+    const drifted = runtimeProfileFrom(cacheDriftedOnOverlayRow(), PROFILES[MODEL]!);
+    const drift = drifted.overlayOverrides ?? [];
+    assertEqual(drift.length, 1,
+      `case 4: a cache carrying a DIFFERENT value for an overlay row (WAH/3 5..50 vs the 20..200 baseline) must be reported — got ${JSON.stringify(drift)}`);
+    const d = drift[0]!;
+    assert(d.family === 'WAH' && d.paramId === 3, `case 4: the drift row is WAH/3 — got ${d.family}/${d.paramId}`);
+    assertEqual(d.masked.min, 5, `case 4: masked = the cache row (min 5) — got ${d.masked.min}`);
+    assertEqual(d.masked.max, 50, `case 4: masked = the cache row (max 50) — got ${d.masked.max}`);
+    assertEqual(d.expected.min, 20, `case 4: expected = the fw-13.0 baseline (min 20) — got ${d.expected.min}`);
+    assertEqual(d.expected.max, 200, `case 4: expected = the fw-13.0 baseline (max 200) — got ${d.expected.max}`);
+    assertEqual(d.catalogue.min, 0, `case 4: catalogue (min 0) — got ${d.catalogue.min}`);
+    assertEqual(d.catalogue.max, 10, `case 4: catalogue (max 10) — got ${d.catalogue.max}`);
+    assertEqual(d.overlay.min, 0, `case 4: overlay served value (min 0) — got ${d.overlay.min}`);
+    assertEqual(d.overlay.max, 10, `case 4: overlay served value (max 10) — got ${d.overlay.max}`);
 
-    const flanger26 = overrides.find((o) => o.family === 'FLANGER' && o.paramId === 26);
-    assert(flanger26 !== undefined, 'case 4: FLANGER/26 masked 200..20000 and must be REPORTED');
-    assertEqual(flanger26!.masked.max, 20000, `case 4: FLANGER/26 masked max = the cache row (20000) — got ${flanger26!.masked.max}`);
-    assertEqual(flanger26!.catalogue.max, 10, `case 4: FLANGER/26 catalogue max (10) — got ${flanger26!.catalogue.max}`);
-
-    // A NON-overlay row is never an override, even though the cache still wins for it.
-    assert(overrides.every((o) => !(o.family === 'WAH' && o.paramId === 1)),
+    // A NON-overlay row is never reported as drift, however its cache value differs.
+    assert([...silent, ...drift].every((o) => !(o.family === 'WAH' && o.paramId === 1)),
       'case 4 (control): WAH/1 is not an overlay row and must NOT be reported');
+  }
 
-    // And a cache that AGREES with the catalogue on the overlay rows reports NOTHING — the normal case.
-    const agreeing = runtimeProfileFrom(cacheAgreeingOnOverlayRows(), PROFILES[MODEL]!);
-    assertEqual((agreeing.overlayOverrides ?? []).length, 0,
-      `case 4 (control): an agreeing cache must report no overrides — got ${JSON.stringify(agreeing.overlayOverrides)}`);
+  // ── 5. REGRESSION (commit c1f7ebd): a CACHE-BUILT profile must still carry `writeValidated` on Tempo.
+  //        gen3.ts now REFUSES a write to an identity row whose `writeValidated !== true`. A device CACHE
+  //        row carries NO `writeValidated` (the live walk records bounds, not the codec's overlay-only
+  //        markers), so if the cache row shadowed the marker the ONE validated identity write — Tempo —
+  //        would be refused: a broken knob. MECHANISM (asserted): `runtimeProfileFrom` re-applies the
+  //        codec's overlay as the LAST step, and the overlay re-stamps `writeValidated: true` for
+  //        CONTROLLERS/32, so the marker survives the cache merge. FAILS BEFORE (hypothetically): the
+  //        cache's markerless row would win and the driver would refuse the write.
+  {
+    const runtime = runtimeProfileFrom(cacheCarryingTempoRow(), PROFILES[MODEL]!);
+    const tempo = runtime.ranges['CONTROLLERS']?.[32] as { valueMap?: string; writeValidated?: boolean } | undefined;
+    const stages = runtime.ranges['CONTROLLERS']?.[36] as { writeValidated?: boolean } | undefined;
+    assert(tempo?.valueMap === 'identity', 'case 5: cache-built CONTROLLERS/32 must still be a valueMap identity row');
+    assertEqual(tempo?.writeValidated, true,
+      'case 5: a CACHE-BUILT profile must keep writeValidated:true on Tempo (overlay re-applied last) — otherwise the ONE validated identity write is refused');
+    assert(stages?.writeValidated !== true,
+      'case 5 (control): the unvalidated Stages row (CONTROLLERS/36) must stay unvalidated even after the overlay');
+
+    // End-to-end through the REAL driver over the CACHE-BUILT profile: a silent device = accept, so a
+    // Tempo write must be ACCEPTED and reach the wire (the broken-knob regression would be ok:false / 0).
+    const codec = createModernFractalCodec(runtime.model);
+    const mock = new MockTransport('serial', 'mock-measured-overlay-tempo');
+    mock.isOpen = true;
+    mock.reply = () => []; // silent = accept
+    const driver = createGen3Driver(runtime, { transport: async () => mock, emit: () => {}, getCadence: () => cadenceFor(runtime.model, 'balanced') });
+    const r = await driver.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
+    assert(r.ok === true, `case 5: a Tempo write over a CACHE-BUILT profile must be ACCEPTED, got ${JSON.stringify(r)}`);
+    assert(mock.sent.some((f) => compactHex(f) === compactHex(codec.buildSetParameter(CONTROLLERS_EID, 32, 120))),
+      `case 5: the accepted Tempo write must reach the wire as the typed-SET frame; sent ${mock.sent.map(compactHex).join(' | ')}`);
   }
 }

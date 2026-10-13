@@ -22,7 +22,7 @@ import * as store from '../../src/store.js';
 import { buildTestApp } from '../helpers/api.js';
 import { assert, assertEqual } from '../helpers/mock.js';
 
-export const CAB_LIBRARY_CASE_COUNT = 23;
+export const CAB_LIBRARY_CASE_COUNT = 24;
 
 // Real-sized payloads from an existing fixture (a 24680-byte FM3 dump) — the store is byte-agnostic,
 // so a real dump makes the round-trip and the cap exercise realistic byte volumes rather than toys.
@@ -287,9 +287,40 @@ export async function runCabLibraryTests(): Promise<void> {
       const storedRouter = cabLibrary.readCabLibraryBytes(store.defaultStore, viaRouter.id)!;
       assertEqual(parseCabIrSyx(storedRouter).name, 'Renamed', 'router: the STORED container carries the new name');
       assertEqual(Buffer.compare(Buffer.from(storedApp), Buffer.from(storedRouter)), 0, 'both surfaces store identical bytes');
+      assertEqual(viaApp.nameApplied, true, 'a rename that landed records nameApplied:true');
     } finally {
       await app.close();
       clearDefaultLibrary();
     }
+  }
+
+  // ── 10. FINDING #16 — a rename the codec CANNOT apply is RECORDED, not silently substituted. The bytes
+  //        are still stored (the upload landed), but the entry carries nameApplied:false, and a move
+  //        (findCabBySlot) refuses it, so bytes whose name could not be rewritten never reach a slot.
+  //        FAILS BEFORE: `bytesAsLanded` returned the original bytes with NO record — a silent mismatch.
+  {
+    const { store: mem } = freshStore();
+    const notAContainer = Uint8Array.from([0xf0, 0x00, 0x01, 0x74, 0x11, 0x0d, 0x01, 0x02, 0xf7]); // not a cab container
+    const e = cabLibrary.saveCabIr(mem, { bytes: notAContainer, name: 'Wanted', page: 0x10, index: 4, user: 5 });
+    assertEqual(e.nameApplied, false,
+      'case 10: bytes the codec cannot rewrite with the name must record nameApplied:false');
+    const listed = cabLibrary.listCabLibrary(mem).entries.find((x) => x.id === e.id)!;
+    assertEqual(listed.nameApplied, false, 'case 10: the flag is SERVED on the list entry, not hidden');
+    assertEqual(cabLibrary.findCabBySlot(mem, 0x10, 4), null,
+      'case 10: a move must REFUSE an entry whose name could not be written');
+
+    // Control 1: a real container renamed DOES apply, and the move accepts it.
+    const container = Uint8Array.from(
+      buildCabIrContainerFromWords(0x11, { index: 0, page: 0x10 }, 'Original', Array.from({ length: CAB_IR_SAMPLE_SLOTS }, (_, i) => i))
+    );
+    const renamed = cabLibrary.bytesAsLanded(container, 'Landed');
+    const e2 = cabLibrary.saveCabIr(mem, { bytes: renamed, name: 'Landed', page: 0x10, index: 6, user: 7 });
+    assertEqual(e2.nameApplied, true, 'case 10 (control): a rename that landed records nameApplied:true');
+    assert(cabLibrary.findCabBySlot(mem, 0x10, 6) !== null,
+      'case 10 (control): a move ACCEPTS a name-applied entry');
+
+    // Control 2: no rename requested → vacuously applied.
+    const e3 = cabLibrary.saveCabIr(mem, { bytes: notAContainer, name: '', page: 0x10, index: 8, user: 9 });
+    assertEqual(e3.nameApplied, true, 'case 10 (control): no rename requested is vacuously nameApplied');
   }
 }

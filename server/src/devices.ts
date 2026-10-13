@@ -454,19 +454,27 @@ type ParamsByFamily = Record<string, ParamDef[]>;
 type Ranges = Record<string, Record<number, RangeDef>>;
 type RangeSections = Record<string, { stride: number; recordCount: number }>;
 
-/** One row where the MEASURED FM3 range overlay (forgefx-midi `rangeOverlay.ts`) OVERRODE a value that
- *  DIFFERED from the static catalogue row — i.e. the device cache disagreed with our corrected table on
- *  an overlay row, and the overlay silently replaced the cache's value. Served (never logged-only) so a
- *  maintainer SEES the masking instead of it being invisible: a future firmware that legitimately
- *  changes one of these rows would otherwise be masked with no signal at all (review finding #5). */
+/** One row where the device cache supplied a value for a MEASURED-overlay row (forgefx-midi
+ *  `rangeOverlay.ts`) that DIFFERS from the value a SAME-FIRMWARE cache is expected to hold — i.e.
+ *  GENUINE DRIFT, not the normal case. Served (never logged-only) so a maintainer SEES the deviation.
+ *
+ *  The expected value is the GENERATED (pre-overlay) row's displayed bounds — what a cache built from
+ *  THIS firmware's device records carries. A cache that AGREES with it is the ordinary same-firmware case
+ *  and is NOT reported. (An earlier version compared the cache against the CORRECTED catalogue instead, so
+ *  every overlay row the cache carried was reported on every connect — the incident `11_13p0` cache
+ *  carried exactly the generated bounds and reported two rows per connect; review finding #6.) A row whose
+ *  cache value differs from that baseline IS reported: that is a firmware that fixed or moved the record,
+ *  which is the change this diagnostic exists to make visible. */
 export interface OverlayOverride {
   /** Family key as used in the range table (e.g. 'WAH'). */
   family: string;
   /** paramId within the family. */
   paramId: number;
-  /** What the pre-overlay merged row carried (the device cache's value, or the static table's when the
-   *  cache had no row for this param) — the value the overlay replaced. */
+  /** What the device CACHE carried for this row (the value the overlay replaced). */
   masked: { min: number; max: number };
+  /** What a SAME-FIRMWARE cache is EXPECTED to hold — the pre-overlay GENERATED row's bounds (see
+   *  {@link FM3_OVERLAY_FW13_BASELINE}); the value the cache is compared against to decide drift. */
+  expected: { min: number; max: number };
   /** The static catalogue row's bounds (already overlay-corrected: FM3_RANGES applies the same overlay). */
   catalogue: { min: number; max: number };
   /** The overlay's own measured bounds — what is actually served for this row. */
@@ -495,11 +503,12 @@ export interface DeviceProfile {
   staticRanges?: Ranges;
   /** Device-true fn=0x1F channel-block wire stride by family. Do not derive this from max(paramId); tables include special high ids. */
   rangeSections: RangeSections;
-  /** Rows where the MEASURED FM3 range overlay masked a device-cache value that DIFFERED from the static
-   *  catalogue — i.e. the cache disagreed with our corrected table on an overlay row and the overlay
-   *  replaced it. Set only on runtime profiles (see `runtimeProfileFrom`); served via /diag and
-   *  /diag/ranges so the override is VISIBLE rather than silent. Empty when the cache agreed (the
-   *  normal same-firmware case). */
+  /** GENUINE DRIFT on a MEASURED-overlay row: a device-cache row whose value DIFFERS from the value a
+   *  same-firmware cache is expected to hold (the pre-overlay generation, see FM3_OVERLAY_FW13_BASELINE).
+   *  Set only on runtime profiles (see `runtimeProfileFrom`); served via /diag and /diag/ranges so the
+   *  deviation is VISIBLE rather than silent. Empty in the normal same-firmware case — a cache that holds
+   *  the expected (pre-overlay) bounds is NOT reported, however wrong those bounds are; only a cache that
+   *  disagrees with them (a firmware that fixed or moved the record) is. */
   overlayOverrides?: OverlayOverride[];
   /** Per-family paramIds the device's OWN editor layouts draw as a continuous 'knob' (any variant), so
    *  the serve filters honour a knob the catalog tags with a non-display unit. See layoutWidgetByFamily. */
@@ -719,26 +728,66 @@ export const profileForModel = (model: number): DeviceProfile => PROFILES[model]
 export const profileForKey = (key: string): DeviceProfile | undefined => Object.values(PROFILES).find((p) => p.key === key);
 
 /**
- * Rows the MEASURED FM3 range overlay is about to override, where the value it REPLACES differs from the
- * static catalogue row. `preOverlay` is the range map immediately BEFORE `applyFm3RangeOverlay` runs (the
- * cache rows already merged over the static ones), `catalogue` is the static table (`FM3_RANGES`, itself
- * already overlay-corrected). A row is reported ONLY when the pre-overlay value (the device cache's row,
- * or the static row when the cache had none) DIFFERS from the catalogue — i.e. the cache disagrees with
- * our corrected table and the overlay is masking that disagreement. Both value sets are carried so the
- * diagnostic is actionable, and only `displayMin`/`displayMax` are compared because those are the fields
- * the overlay touches (a cache row never carries `valueMap`, so comparing it would flag every row).
+ * The fw-13.0 PRE-OVERLAY ("generated") display bounds for the overlay rows the measured correction
+ * actually MOVES — i.e. the value a same-firmware device cache is EXPECTED to hold. Transcribed from
+ * `forgefx-midi/src/gen3/fm3/ranges.generated.ts` (the table whose rows the overlay replaces), which is
+ * NOT importable here: the codec's `./gen3/fm3` export point applies the overlay and exposes only the
+ * CORRECTED table, and its `exports` map has no subpath for the pre-overlay file. Only the overlay rows
+ * whose generated bounds DIFFER from the corrected ones are listed; a row absent here is one the overlay
+ * does NOT move (its generated value already equals the corrected one — e.g. the `valueMap:'identity'`
+ * rows), and the expected value falls back to the corrected catalogue value for it.
+ *
+ * This is a fixed fw-13.0 FLOOR, not a rule: a cache that agrees with it is the normal case and is NOT
+ * reported; a cache that differs is GENUINE DRIFT. If upstream ever corrects these rows, the entries here
+ * become the fw-13.0 record and a cache carrying the corrected value is reported — the intended "a
+ * firmware change is visible" behaviour (review finding #6).
  */
-export function collectOverlayOverrides(preOverlay: Ranges, catalogue: Ranges): OverlayOverride[] {
+export const FM3_OVERLAY_FW13_BASELINE: Record<string, Record<number, { min: number; max: number }>> = {
+  CABINET: { 33: { min: 0.01, max: 10 } },
+  CHORUS: { 20: { min: 0.5, max: 500 } },
+  DELAY: { 22: { min: 0.5, max: 500 }, 58: { min: 2, max: 200 } },
+  DISTORT: { 72: { min: 0.1, max: 10 }, 90: { min: 2.5, max: 40 } },
+  FILTER: { 25: { min: 10, max: 200 }, 28: { min: 1, max: 400 } },
+  FLANGER: { 20: { min: 0.05, max: 50 }, 26: { min: 200, max: 20000 } },
+  FORMANT: { 3: { min: 40, max: 400 } },
+  FUZZ: { 6: { min: 1, max: 100 } },
+  MULTITAP: { 65: { min: 5, max: 5000 } },
+  REVERB: { 32: { min: 0.1, max: 10 } },
+  ROTARY: { 17: { min: 0.5, max: 500 } },
+  WAH: { 3: { min: 20, max: 200 }, 10: { min: 0.1, max: 10 } }
+};
+
+/**
+ * GENUINE DRIFT on the overlay rows: a device-CACHE row for a measured-overlay row whose value DIFFERS
+ * from the value a same-firmware cache is expected to hold. `cacheRanges` is the DEVICE CACHE's own rows
+ * (`BuiltCache.ranges`, before the static merge — a row present here is one the cache actually supplied);
+ * `catalogue` is the static table (`FM3_RANGES`, already overlay-corrected).
+ *
+ * A row is reported ONLY when the cache CARRIED it AND its value differs from {@link
+ * FM3_OVERLAY_FW13_BASELINE} (the pre-overlay generated value a same-firmware cache holds; the corrected
+ * catalogue value for a row the overlay does not move). So the incident `11_13p0` cache — which carries
+ * exactly the generated bounds — reports NOTHING (the normal case), and only a cache that disagrees with
+ * that baseline (a firmware that fixed or moved the record) is reported. Only `displayMin`/`displayMax`
+ * are compared because those are the fields the overlay touches (a cache row never carries `valueMap`,
+ * so comparing it would flag every row).
+ */
+export function collectOverlayOverrides(cacheRanges: Ranges, catalogue: Ranges): OverlayOverride[] {
   const out: OverlayOverride[] = [];
   for (const entry of FM3_RANGE_OVERLAY as readonly Fm3RangeOverlayEntry[]) {
-    const masked = preOverlay[entry.family]?.[entry.paramId];
+    // The cache must have SUPPLIED this row: a row the cache did not carry masks nothing (the corrected
+    // static value is served) and must never be reported.
+    const masked = cacheRanges[entry.family]?.[entry.paramId];
     const stat = catalogue[entry.family]?.[entry.paramId];
     if (!masked || !stat) continue;
-    if (masked.displayMin === stat.displayMin && masked.displayMax === stat.displayMax) continue;
+    // What a same-firmware cache is EXPECTED to hold: the generated (pre-overlay) bounds, falling back to
+    // the corrected value for a row the overlay does not move (there the generated value already equals it).
+    const expected = FM3_OVERLAY_FW13_BASELINE[entry.family]?.[entry.paramId] ?? { min: stat.displayMin, max: stat.displayMax };
+    if (masked.displayMin === expected.min && masked.displayMax === expected.max) continue; // agrees with the known-wrong baseline → normal, not reported
     out.push({
       family: entry.family,
       paramId: entry.paramId,
       masked: { min: masked.displayMin, max: masked.displayMax },
+      expected,
       catalogue: { min: stat.displayMin, max: stat.displayMax },
       overlay: { min: entry.displayMin, max: entry.displayMax }
     });
@@ -820,16 +869,22 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   //     docs (`BuiltCache.firmware` is optional and best-effort), and for a firmware that STILL carries
   //     the wrong record. We have no measurement that any later firmware fixed any of these rows, so
   //     dropping a measured correction on spec is worse than the masking it would prevent.
-  //   • The finding's actual harm is the word "silently". Making each masked row visible — with its
-  //     family/pid and BOTH value sets (the cache row the overlay replaced AND the catalogue row it
-  //     now equals) — lets a maintainer decide per row the moment a firmware diff appears, without a
-  //     firmware-version parse or a hardcode we would have to keep in sync.
+  //   • The finding's actual harm is the word "silently". REPORTING only GENUINE DRIFT — a cache row that
+  //     differs from the fw-13.0 pre-overlay baseline a same-firmware cache is expected to hold
+  //     (FM3_OVERLAY_FW13_BASELINE) — lets a maintainer see exactly the rows a firmware changed, and only
+  //     those, the moment a firmware diff appears. (Review finding #6: the first cut compared the cache
+  //     against the CORRECTED catalogue instead, so the incident cache — which carries the generated
+  //     bounds — reported its rows on EVERY connect, i.e. the remedy could not detect what it was for.)
   //   • It keeps a single, testable code path (no version parsing, no new failure mode).
   // The overrides are a SERVED diagnostic field (on the runtime profile, read by /diag and
   // /diag/ranges), never a log line alone. See OverlayOverride.
   const isFm3StaticTable = staticProfile.ranges === (FM3_RANGES as unknown as Ranges);
+  // The detector is handed the CACHE's OWN rows (not the merged map): a row the cache did not carry masks
+  // nothing and must not be reported, and the comparison is against the fw-13.0 pre-overlay baseline (the
+  // value a same-firmware cache is expected to hold) — not against the corrected catalogue, which would
+  // flag every overlay row the incident cache carries on every connect (review finding #6).
   const overlayOverrides = isFm3StaticTable
-    ? collectOverlayOverrides(mergedRanges, staticProfile.ranges)
+    ? collectOverlayOverrides((built.ranges ?? {}) as Ranges, staticProfile.ranges)
     : [];
   const finalRanges: Ranges = isFm3StaticTable
     ? (applyFm3RangeOverlay(mergedRanges as unknown as Fm3RangeTable) as unknown as Ranges)

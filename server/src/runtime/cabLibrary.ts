@@ -22,7 +22,7 @@
 // BROWSER-SAFE: type-only store import, NO node:/fastify imports — this module is in the runtime
 // router's import graph (check-browser-safe.ts enforces it). All persistence goes through the
 // injected Store, so the browser runtime's own store backs browser-direct mode identically.
-import { renameCabIrSyx } from 'forgefx-midi/devices/gen3';
+import { renameCabIrSyx, parseCabIrSyx } from 'forgefx-midi/devices/gen3';
 import type { Store } from './store.js';
 import type { Doc } from './storeBackend.js';
 
@@ -63,6 +63,15 @@ export interface CabLibraryEntry {
   length: number;
   /** sha256 of the container bytes — the content-address key. */
   sha256: string;
+  /**
+   * Whether the STORED container's own name equals the entry's `name` label. `true` when no rename was
+   * requested, or when the codec's rename landed. `false` means the container's bytes and its name
+   * DISAGREE (the codec could not parse/rewrite them): the bytes were stored as received under a name
+   * they do not carry. Such an entry is STILL stored — but flagged, so a later move/restore can refuse to
+   * act on bytes whose name could not be rewritten (see `findCabBySlot`). A silent substitution — the old
+   * `bytesAsLanded` behaviour of returning the original bytes with no record — is what this field removes.
+   */
+  nameApplied: boolean;
   /** Epoch ms the entry was stored. */
   savedAt: number;
   source: 'upload';
@@ -115,6 +124,9 @@ function asEntry(data: unknown): CabLibraryEntry | null {
     user: Number.isInteger(e.user) ? (e.user as number) : null,
     length: e.length as number,
     sha256: e.sha256,
+    // Older docs predate the field; only an explicit `false` records a failed rename, so a missing value
+    // reads as applied (a rename that was not requested is vacuously applied).
+    nameApplied: e.nameApplied !== false,
     savedAt: e.savedAt,
     source: 'upload'
   };
@@ -152,12 +164,17 @@ export function saveCabIr(
   const sha256 = store.sha256Hex(input.bytes);
   if (!store.hasBlob(blobKey(sha256))) store.putBlob(blobKey(sha256), input.bytes);
 
+  // Record whether the bytes ABOUT TO BE STORED actually carry the requested name. `bytesAsLanded` renames
+  // best-effort; this is the AUTHORITY — it re-reads the container and records the outcome, so a rename
+  // that could not be applied is visible on the entry instead of silently substituted.
+  const nameApplied = input.name === '' || containerNameIs(input.bytes, input.name);
+
   const existing = listCabLibrary(store).entries.find(
     (e) => e.sha256 === sha256 && e.page === input.page && e.index === input.index
   );
   const savedAt = Date.now();
   const entry: CabLibraryEntry = existing
-    ? { ...existing, name: input.name, user: input.user, length: input.bytes.length, savedAt }
+    ? { ...existing, name: input.name, user: input.user, length: input.bytes.length, nameApplied, savedAt }
     : {
         id: entryId(savedAt, input.page, input.index, sha256),
         name: input.name,
@@ -166,6 +183,7 @@ export function saveCabIr(
         user: input.user,
         length: input.bytes.length,
         sha256,
+        nameApplied,
         savedAt,
         source: 'upload'
       };
@@ -199,10 +217,15 @@ export function readCabLibraryBytes(store: Store, id: string): Uint8Array | null
   return store.getBlob(blobKey(e.sha256));
 }
 
-/** The newest STORED IR for a destination slot, or null. Used to prefer stored bytes for a move. */
+/**
+ * The newest USABLE stored IR for a destination slot, or null. Used to prefer stored bytes for a move.
+ * An entry whose bytes are gone (`available:false`) OR whose stored container does not carry the name it
+ * is labelled with (`nameApplied:false` — a rename that could not be rewritten) is INELIGIBLE: a move
+ * must never put bytes on a slot whose name disagrees with what the library claims.
+ */
 export function findCabBySlot(store: Store, page: number, index: number): CabLibraryEntry | null {
   const hit = listCabLibrary(store).entries.find(
-    (e) => e.page === page && e.index === index && e.available
+    (e) => e.page === page && e.index === index && e.available && e.nameApplied
   );
   return hit ?? null;
 }
@@ -213,8 +236,14 @@ export function findCabBySlot(store: Store, page: number, index: number): CabLib
  * The driver applies the rename to what it SENDS, but the route only holds the bytes it RECEIVED — so
  * storing those would file the old container name inside a library entry labelled with the new one, and a
  * later restore-to-slot would put the OLD name back on the unit. Apply the same codec rename here so the
- * stored container is the one that actually landed. A body the codec cannot parse as a cab container is
- * stored as received (the upload would have been refused before reaching this point on a real unit).
+ * stored container is the one that actually landed.
+ *
+ * BEST-EFFORT, and NOT the authority: a body the codec cannot parse/rewrite is returned UNCHANGED, and
+ * whether that happened is recorded by `saveCabIr` on the entry (`nameApplied`), which re-reads the bytes
+ * it is about to store. A rename that could not be applied therefore never becomes a silent substitution —
+ * the entry is flagged and `findCabBySlot` refuses to move it. (This function returning the original bytes
+ * on failure used to be stored with no record at all, i.e. a slot's bytes silently disagreeing with its
+ * name — review finding #16.)
  */
 export function bytesAsLanded(bytes: Uint8Array, name: string | null | undefined): Uint8Array {
   if (name == null || name === '') return bytes;
@@ -222,5 +251,14 @@ export function bytesAsLanded(bytes: Uint8Array, name: string | null | undefined
     return Uint8Array.from(renameCabIrSyx(bytes, name));
   } catch {
     return bytes;
+  }
+}
+
+/** Does the container carry `name` as its own stored name? `false` for bytes the codec cannot parse. */
+function containerNameIs(bytes: Uint8Array, name: string): boolean {
+  try {
+    return parseCabIrSyx(bytes).name === name;
+  } catch {
+    return false;
   }
 }
