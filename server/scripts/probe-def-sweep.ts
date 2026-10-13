@@ -22,10 +22,17 @@
 //
 // NOTHING IS WRITTEN: view 0x1c reads only.
 //
+// ─── REPLY MATCHING ───────────────────────────────────────────────────────────────────────────────────
+// Replies are taken through the HW-proven `adaptRequest` (../src/services/deviceCache.js) — NOT
+// `frames[frames.length - 1]`. `adaptRequest` matches the fn, the VIEW echo (f[6]), the BLOCK-HIGH echo
+// (f[9]) and BOTH param bytes (f[10]/f[11]); the device does NOT echo block-low the way an `f[8] === eid`
+// check assumes, so adaptRequest deliberately does NOT use f[8]. It returns ONE matched frame.
+//
 // USAGE  npx tsx scripts/probe-def-sweep.ts --family WAH [--block 20] [--lo 0] [--hi 28]
 // ────────────────────────────────────────────────────────────────────────────────
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
+import { adaptRequest } from '../src/services/deviceCache.js';
 import { buildDefQuery, decodeReply } from 'forgefx-midi/cache';
 import { FM3_RANGES, FM3_RANGE_SECTIONS, fm3EffectId } from 'forgefx-midi/gen3/fm3';
 
@@ -76,8 +83,13 @@ export async function main(argv: string[]): Promise<number> {
     for (let pid = lo; pid <= hi; pid += 1) {
       let row: DevRow | null = null;
       for (let attempt = 0; attempt < 3 && row == null; attempt += 1) {
-        const frames = await s.transport.request(buildDefQuery(MODEL, block, pid), { timeoutMs: 900, quietMs: 60 });
-        const dec = frames.length ? decodeReply(Uint8Array.from(frames[frames.length - 1]!)) : null;
+        // HW-PROVEN MATCHER (same as probe-def-ranges.ts), not `frames[frames.length - 1]`. `adaptRequest`
+        // matches the fn, the VIEW echo (f[6]), the BLOCK-HIGH echo (f[9]) and BOTH param bytes
+        // (f[10]/f[11]) — deliberately NOT f[8] (block-low), which the device does not echo the way an
+        // `f[8] === eid` check assumes. A bare `frames[last]` pick can latch a stale fn-0x01 frame from an
+        // earlier query (FORGEFX-32); adaptRequest returns the ONE matched frame decodeReply wants.
+        const frame = await adaptRequest(s.transport, buildDefQuery(MODEL, block, pid));
+        const dec = frame ? decodeReply(frame) : null;
         if (dec && dec.view === 'definition') {
           row = { id: dec.id, tc: dec.tc, min: dec.min, max: dec.max, scale: dec.scale, def: dec.def, step: dec.step };
         } else if (dec != null) {
@@ -111,8 +123,8 @@ export async function main(argv: string[]): Promise<number> {
     for (const { shift, same, comparable } of shifts) {
       console.log(`  shift ${String(shift).padStart(2)}: ${same}/${comparable} typecodes agree`);
     }
-    const best = [...shifts].sort((a, b) => b.same - a.same)[0];
-    const runnerUp = [...shifts].sort((a, b) => b.same - a.same)[1];
+    const best = [...shifts].sort((a, b) => b.same - a.same)[0]!;
+    const runnerUp = [...shifts].sort((a, b) => b.same - a.same)[1]!;
     console.log(
       `\nbest shift ${best.shift} (${best.same}/${best.comparable}); runner-up shift ${runnerUp.shift} (${runnerUp.same}/${runnerUp.comparable}).`
     );

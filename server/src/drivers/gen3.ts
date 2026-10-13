@@ -1701,8 +1701,11 @@ class Gen3Driver implements DeviceDriver {
   }
 
   /** Map a raw 0..65534 wire value to {value, norm, unit, min, max, log} via the device-true FM3 range.
-   * Taper: a device-true explicit `range.taper` ('log'→log10; 'linear'|'flat'|'custom'→linear) wins;
-   * absent it falls back to the typecode heuristic (middle nibble 4/5 = log10, e.g. freq cuts, else linear). */
+   * Taper: the log/linear decision is made by `rangeIsLog(range)` (bottom of this file) — a device-true
+   * explicit `range.taper` ('log'→log10; 'linear'|'flat'|'custom'→linear) wins; absent it, the
+   * typecode-nibble heuristic counts ONLY nibble 4 as log10 (nibble 5 is NOT log — corrected 2026-10-13
+   * against the instrument's own display strings; see `rangeIsLog`'s measurement note). Never restate the
+   * rule here — read `rangeIsLog` so the comment cannot drift from the code. */
   #display(family: string | undefined, paramId: number, raw: number): { value: number; norm: number; unit?: string; min?: number; max?: number; log?: boolean } {
     const norm = clamp01(raw / 65534);
     const range = family ? this.#prof.ranges[family]?.[paramId] : undefined;

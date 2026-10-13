@@ -34,6 +34,14 @@
 //
 // NOTHING IS WRITTEN: view 0x1c definition reads only.
 //
+// ─── REPLY MATCHING ───────────────────────────────────────────────────────────────────────────────────
+// Replies are taken through the HW-proven `adaptRequest` (../src/services/deviceCache.js) — NOT
+// `frames[frames.length - 1]`, whose bare last-frame pick can latch a stale fn-0x01 frame from an earlier
+// query (FORGEFX-32). `adaptRequest` matches the fn, the VIEW echo (f[6]), the BLOCK-HIGH echo (f[9]) and
+// BOTH param bytes (f[10]/f[11]); the device does NOT echo block-low the way an `f[8] === eid` check
+// assumes, so adaptRequest deliberately does NOT use f[8]. It returns ONE matched frame — exactly what
+// `decodeReply` wants.
+//
 // USAGE  npx tsx scripts/probe-def-ranges.ts [--port /dev/ttyACM0] [--controls] [--out <path.json>]
 //        (the ForgeFX server must be stopped — one serial owner)
 // ────────────────────────────────────────────────────────────────────────────────
@@ -41,6 +49,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
+import { adaptRequest } from '../src/services/deviceCache.js';
 import { buildDefQuery, decodeReply } from 'forgefx-midi/cache';
 import { FM3_RANGES, FM3_RANGE_SECTIONS, fm3EffectId } from 'forgefx-midi/gen3/fm3';
 
@@ -152,11 +161,14 @@ export async function main(argv: string[]): Promise<number> {
     for (const row of rows) {
       let def: { tc: number; min: number; max: number; scale: number; step: number } | null = null;
       for (let attempt = 0; attempt < 3 && def == null; attempt += 1) {
-        const frames = await s.transport.request(buildDefQuery(MODEL, row.block, row.pid), {
-          timeoutMs: 900,
-          quietMs: 60,
-        });
-        const dec = frames.length ? decodeReply(Uint8Array.from(frames[frames.length - 1]!)) : null;
+        // HW-PROVEN MATCHER, not `frames[frames.length - 1]`. `adaptRequest`
+        // (`../src/services/deviceCache.js`, the CaptureRig matcher the live-walk uses) matches on the fn,
+        // the VIEW echo (f[6]), the BLOCK-HIGH echo (f[9]) and BOTH param bytes (f[10]/f[11]). The device
+        // does NOT echo block-low the way an `f[8] === eid` check assumes — adaptRequest deliberately does
+        // NOT use f[8] — so a bare `frames[last]` pick can latch a stale fn-0x01 frame from an earlier
+        // query (the FORGEFX-32 wedge). adaptRequest returns ONE matched frame; decodeReply wants exactly that.
+        const frame = await adaptRequest(s.transport, buildDefQuery(MODEL, row.block, row.pid));
+        const dec = frame ? decodeReply(frame) : null;
         if (dec && dec.view === 'definition') {
           def = { tc: dec.tc, min: dec.min, max: dec.max, scale: dec.scale, step: dec.step };
         }
