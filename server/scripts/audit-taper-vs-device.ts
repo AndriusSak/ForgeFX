@@ -18,7 +18,7 @@
 // The snapshot of what the server serves must be taken BEFORE this runs (the server holds the port):
 //   GET /preset/blocks/<eid>/params  ->  ~/.hermes/cache/scratch/taper-audit/params-snapshot.json
 //
-// ── THE HARDENINGS (each taught by a run that lied, 2026-10-13) ──────────────────────────────────
+// ── THE HARDENINGS (each taught by a run that lied, 2026-10-13; broadened 2026-10-13 after a review) ──
 //
 // 1. STATE GUARD — a comparison across two different objects is not a measurement, and it must FAIL
 //    CLOSED. Identity is checked in four parts; the first three are checked ONCE at the start, the
@@ -26,39 +26,59 @@
 //
 //    (a) NAME — the unit's own preset name is read (fn=0x0D) and parsed by the codec's
 //        `parseQueryPatchNameResponse` (imported from the `forgefx-midi/gen3/axe-fx-iii` SUBPATH, not the
-//        Node-only barrel). The old code printable-filtered the whole frame body, which can absorb the
-//        preset-NUMBER bytes and produce a spurious name mismatch. Case/whitespace are normalised; a
-//        mismatch — or a name the unit will not give — makes the run VOID (exit 4) with NO per-param
-//        verdicts, and both raw strings are printed.
+//        Node-only barrel). Case/whitespace are normalised; a mismatch — or a name the unit will not give
+//        — makes the run VOID (exit 4) with NO per-param verdicts, and both raw strings are printed.
 //
 //    (b) BODY — the unit's edit-buffer BODY is hashed (sha256) through the driver's `presetBodyHex()`
-//        (reusing the existing dump machinery; no hand-rolled frame). If the snapshot records a
-//        `bodyHash`, a mismatch makes the run VOID (exit 4). If the snapshot records NO bodyHash, the
-//        body could not be identity-checked: that is printed as a WARNING and the run cannot report a
-//        clean pass (exit 6). Both the full-body hash and the hash with a 4-byte prefix removed are
-//        tried, because the server's `/preset/body` carries a 4-byte prefix the edit-buffer body lacks.
+//        (reusing the existing dump machinery; no hand-rolled frame). The comparison is presented under
+//        BOTH hash conventions and BOTH byte prefixes (see HASH CONVENTIONS below); exact equality is
+//        preferred, and a mere prefix relationship is only honoured when the recorded hash is at least
+//        MIN_HASH_MATCH_LEN (16) hex chars — a 1-char recorded hash can no longer pass by chance. If the
+//        snapshot records a `bodyHash`, a mismatch makes the run VOID (exit 4). If the snapshot records
+//        NO bodyHash, the body could not be identity-checked: that is printed as an UNPROVEN-identity
+//        WARNING and the run cannot report a clean pass (exit 6). The OBSERVED body hash is written to an
+//        artifact beside the snapshot so the NEXT run can be pointed at it as a baseline.
 //
 //    (c) SCENE / CHANNEL — the scene index (fn=0x0C) and each block's active channel (fn=0x13) are
-//        checked where BOTH the snapshot and the unit supply them. A mismatch is VOID (exit 4): the
-//        served params would describe a different scene's (or channel's) parameter values. Where the
+//        checked where BOTH the snapshot and the unit supply them. A mismatch is VOID (exit 4). Where the
 //        snapshot records no scene, or the unit cannot report a channel, a WARNING is printed instead of
-//        silently passing (exit 6).
+//        silently passing (exit 6). Channel COVERAGE is reported explicitly (how many blocks with a
+//        snapshot channel were actually checked): ZERO coverage and PARTIAL coverage are printed as
+//        DIFFERENT lines — "0 checked" and "1 of 5 checked" do not look alike.
 //
-//    (d) DRIFT — the body hash and the scene index are re-read every N=50 params AND once at the end of
-//        the run. If either MOVES during the run the run is VOID with a DISTINCT exit code (5) and NO
-//        per-param verdicts, naming the first param after which it moved. N=50 because each body dump is
-//        one heavy 0x77/0x78/0x79 round-trip against ~251 light value reads, so ≤6 dumps bound the cost
-//        at ~2% of the frames while catching a mid-run move within 50 params.
+//    (d) DRIFT — the body hash, the scene index AND the per-block channels are re-read every N=50 params
+//        AND once at the end of the run, and the channels are re-checked at the end too. If any of them
+//        MOVES during the run the run is VOID with a DISTINCT exit code (5), naming the first param after
+//        which it moved. If a guard that was readable at the start can no longer be READ mid-run (body,
+//        scene or channel) that is UNKNOWN, not "unchanged", and the run is VOID FAIL-CLOSED (exit 7).
+//        N=50 because each body dump is one heavy 0x77/0x78/0x79 round-trip against ~251 light value
+//        reads, so ≤6 dumps bound the cost at ~2% of the frames while catching a mid-run move within 50.
 //
-// 2. TOLERANCE FROM THE DISPLAY'S OWN PRECISION — the tolerance was an absolute magnitude ladder, which is
-//    a guess about how many digits the unit prints. It is now half of the last printed digit of the
-//    device's OWN string: "5.00" → 0.005 (so 5.005 vs 5.00 is a match, which is the true case that
-//    motivated this), "5000.1" → 0.05, "10000" → 0.5. A match that only passes because the display is
-//    COARSE (|diff| beyond a quarter of the half-ulp) is counted and printed separately, so a coarse
-//    display cannot silently hide a real defect.
+// 2. VERDICTS ARE BUFFERED UNTIL THE LAST GUARD HAS PASSED. Every per-param line (and the table header)
+//    is buffered and printed only AFTER the final drift/identity check has passed. A VOID run therefore
+//    prints ONLY the void reason, and the code's own claim ("no per-param verdict is reported on a VOID
+//    run") is true of the LOG, not just of the exit code — before this fix a move detected at the FINAL
+//    check exited 5 after every per-param line had already been printed.
 //
-// 3. UNREADABLE rows print the BYTES of the matched frame — a decode-null can be diagnosed from the
+// 3. TOLERANCE FROM THE DISPLAY'S OWN PRECISION — half of the last printed digit of the device's OWN
+//    string: "5.00" → 0.005 (so 5.005 vs 5.00 is a match), "5000.1" → 0.05, "10000" → 0.5. A match that
+//    only passes because the display is COARSE (|diff| beyond a quarter of the half-ulp) is counted and
+//    printed separately, so a coarse display cannot silently hide a real defect.
+//
+// 4. UNREADABLE rows print the BYTES of the matched frame — a decode-null can be diagnosed from the
 //    artifact instead of re-running against the unit. The `hex` helper is actually used for this.
+//
+// ── HASH CONVENTIONS (do not silently pick one) ──────────────────────────────────────────────────
+// The snapshot's `bodyHash` may have been produced by ANY of these, and they are NOT interchangeable:
+//   bytes        sha256 over the edit-buffer body BYTES, full.
+//   bytes-minus4 sha256 over the body bytes with the FIRST 4 BYTES dropped.
+//   hexstr       sha256 over the ASCII HEX STRING of the body (this is the Axis/e2e-hil/proof.mjs
+//                convention — `createHash('sha256').update(hexString)`).
+//   hexstr-minus4 the same, over the hex string with its first 8 characters (4 bytes) dropped.
+// Axis/e2e-hil/proof.mjs hashes the /api/preset/body HEX STRING, which carries a 4-byte prefix the
+// edit-buffer dump this tool reads does not — so a hash copied straight out of proof.json will only
+// match through the hexstr / hexstr-minus4 candidates. Every comparison prints WHICH convention and
+// which byte prefix it assumed, plus both raw hashes, so a mismatch is diagnosable rather than opaque.
 //
 // KNOWN UNRESOLVED (reported, not hidden): a few replies decode to null in the codec (a whole class of
 // valid 60-byte view-0x00 frames — see review-2026-10-13), and some device strings are parenthesised
@@ -66,11 +86,16 @@
 // UNREADABLE / UNPARSED together with the matched frame's bytes and length.
 //
 // EXIT: 0 clean · 1 MISMATCH · 2 nothing to check · 3 no device · 4 VOID (identity mismatch) ·
-//       5 VOID (body/scene moved during the run) · 6 completed with a WARNING (body/scene not identity-checked).
+//       5 VOID (body/scene/channel moved during the run) · 6 completed with a WARNING (an identity
+//       was not fully checkable) · 7 VOID (a guard readable at the start could not be RE-READ mid-run —
+//       UNKNOWN, fail closed) · 70 transport/run CRASH (a throw is never a device finding) ·
+//       78 --self-test failure.
 //
 // USAGE  npx tsx scripts/audit-taper-vs-device.ts [--all] [--block 62]
+//        npx tsx scripts/audit-taper-vs-device.ts --self-test   # offline, no hardware, no serial port
 // ────────────────────────────────────────────────────────────────────────────────
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { openProbeSession } from './probe-device.js';
@@ -99,8 +124,20 @@ async function readFormattedValue(
 
 const MODEL = 0x11;
 const SNAPSHOT = `${process.env.HOME}/.hermes/cache/scratch/taper-audit/params-snapshot.json`;
-/** Re-read the body + scene this often (see hardenings §1d). */
+/** Where the OBSERVED body hash is written so the next run can use it as a baseline. */
+const OBSERVED_BODY_ARTIFACT = `${process.env.HOME}/.hermes/cache/scratch/taper-audit/observed-body.json`;
+/** Re-read the body + scene + channels this often (see hardenings §1d). */
 const DRIFT_CHECK_EVERY = 50;
+/**
+ * Minimum length (hex chars) for a PREFIX relationship to count as a body-hash match. Exact equality is
+ * always preferred; below this floor only an exact equality passes, so a 1-char recorded hash cannot
+ * pass by chance. 16 hex chars = 64 bits — the reviewer's stated reasonable floor.
+ */
+const MIN_HASH_MATCH_LEN = 16;
+/** Exit code for a transport/run crash — never the same as "MISMATCH found" (1). */
+const EXIT_CRASH: number = 70;
+/** Exit code for a failed --self-test. */
+const EXIT_SELF_TEST_FAIL: number = 78;
 const hex = (b: readonly number[]) => b.map((x) => x.toString(16).padStart(2, '0')).join(' ');
 const CHANNEL_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as const;
 
@@ -140,19 +177,64 @@ function sha256(bytes: Uint8Array | number[]): string {
   return createHash('sha256').update(Buffer.from(bytes as Uint8Array)).digest('hex');
 }
 
+/** sha256 hex of a STRING (utf8) — the Axis/e2e-hil/proof.mjs convention for a hex body string. */
+function sha256String(s: string): string {
+  return createHash('sha256').update(s, 'utf8').digest('hex');
+}
+
+interface HashCandidate {
+  label: string;
+  value: string;
+}
+
 /**
- * Does a computed body hash match the snapshot's recorded `bodyHash`? The snapshotter may record a full
- * 64-char sha256, a truncated prefix, or a hash of the server's `/preset/body` hex — which carries a
- * 4-byte prefix the edit-buffer body lacks. So: compare the full body hash AND the hash with the first 4
- * bytes dropped, accepting an exact match or a prefix relationship in either direction.
+ * Every hash a snapshot's `bodyHash` might legitimately be, under BOTH conventions and BOTH byte
+ * prefixes. The tool never picks one silently — all four are offered to `hashMatches` and printed.
  */
-function hashMatches(computed: string[], recorded: string): boolean {
+function hashCandidatesFromBytes(bytes: Uint8Array): HashCandidate[] {
+  const buf = Buffer.from(bytes);
+  const minus4 = buf.subarray(4);
+  const hexFull = buf.toString('hex');
+  const hexMinus4 = hexFull.slice(8); // drop the first 8 hex chars = 4 bytes
+  return [
+    { label: 'bytes', value: sha256(buf) },
+    { label: 'bytes-minus4', value: sha256(minus4) },
+    { label: 'hexstr', value: sha256String(hexFull) },
+    { label: 'hexstr-minus4', value: sha256String(hexMinus4) },
+  ];
+}
+
+interface HashMatch {
+  ok: boolean;
+  how: string;
+}
+
+/**
+ * Does a computed body hash match the snapshot's recorded `bodyHash`?
+ *
+ * EXACT equality is preferred (any convention). A PREFIX relationship in either direction is only
+ * honoured when the recorded hash is at least `minLen` hex chars — with no minimum a 1-character
+ * recorded hash passed by chance. The return value names WHICH convention matched (or why none did).
+ */
+function hashMatches(candidates: HashCandidate[], recorded: string, minLen = MIN_HASH_MATCH_LEN): HashMatch {
   const r = recorded.trim().toLowerCase().replace(/^0x/, '');
-  if (!r) return false;
-  return computed.some((c) => {
-    const cLow = c.toLowerCase();
-    return cLow === r || cLow.startsWith(r) || r.startsWith(cLow);
-  });
+  if (!r) return { ok: false, how: 'recorded hash is empty' };
+  // 1. exact equality across every candidate convention.
+  for (const c of candidates) {
+    if (c.value.toLowerCase() === r) return { ok: true, how: `exact (${c.label})` };
+  }
+  // 2. prefix relationship, only with a real minimum length on the recorded side.
+  if (r.length < minLen) {
+    return { ok: false, how: `no exact match; recorded hash is ${r.length} hex char(s) < min ${minLen} — a prefix this short is not accepted` };
+  }
+  for (const c of candidates) {
+    const cLow = c.value.toLowerCase();
+    if (cLow.startsWith(r)) return { ok: true, how: `prefix — recorded ${r.length}/${cLow.length} hex of ${c.label}` };
+    if (r.startsWith(cLow) && cLow.length >= minLen) {
+      return { ok: true, how: `prefix — ${c.label} ${cLow.length} hex is a prefix of the recorded ${r.length} hex` };
+    }
+  }
+  return { ok: false, how: 'no candidate convention matches (exact or prefix)' };
 }
 
 /**
@@ -188,13 +270,36 @@ async function devicePresetName(transport: Transport): Promise<{ name: string; n
   return { name: '', number: null };
 }
 
-/** The unit's edit-buffer BODY hash, via the driver's existing dump machinery (read-only). */
-async function deviceBody(driver: DeviceDriver): Promise<{ sha: string; shaMinus4: string; len: number } | null> {
+interface ObservedBody {
+  len: number;
+  candidates: HashCandidate[];
+}
+
+/** The unit's edit-buffer BODY, via the driver's existing dump machinery (read-only). */
+async function deviceBody(driver: DeviceDriver): Promise<ObservedBody | null> {
   try {
     const b = await driver.presetBodyHex?.();
     if (!b || !b.hex) return null;
     const bytes = Buffer.from(b.hex, 'hex');
-    return { sha: sha256(bytes), shaMinus4: sha256(bytes.subarray(4)), len: bytes.length };
+    return { len: bytes.length, candidates: hashCandidatesFromBytes(bytes) };
+  } catch {
+    return null;
+  }
+}
+
+/** Write the OBSERVED body hash to an artifact beside the snapshot, so the next run has a baseline. */
+function writeObservedBody(snap: Snapshot, body: ObservedBody): string | null {
+  try {
+    mkdirSync(dirname(OBSERVED_BODY_ARTIFACT), { recursive: true });
+    const payload = {
+      at: new Date().toISOString(),
+      preset: snap.preset ?? null,
+      len: body.len,
+      candidates: Object.fromEntries(body.candidates.map((c) => [c.label, c.value])),
+      note: 'bodyHash candidates under BOTH conventions (bytes / hex string) and BOTH prefixes (full / minus4). Copy the matching one into the snapshot as `bodyHash` so the next run can identity-check the body.',
+    };
+    writeFileSync(OBSERVED_BODY_ARTIFACT, JSON.stringify(payload, null, 2) + '\n');
+    return OBSERVED_BODY_ARTIFACT;
   } catch {
     return null;
   }
@@ -220,7 +325,114 @@ async function deviceChannels(driver: DeviceDriver): Promise<Map<number, number>
   }
 }
 
+/** The exit code for a completed run, in ONE place so a crash can never read as a device finding. */
+function exitCodeFor(o: { mismatch: number; warning: boolean }): number {
+  if (o.warning) return 6;
+  return o.mismatch > 0 ? 1 : 0;
+}
+
+/**
+ * A buffer for the human-readable table. Per-param lines are PUSHED here and printed only by `flush()`.
+ * A run that returns VOID before flushing prints nothing from the table — so no per-param verdict can
+ * appear on a VOID run.
+ */
+function makeTableBuffer() {
+  const lines: string[] = [];
+  let voided = false;
+  return {
+    push(line: string) {
+      lines.push(line);
+    },
+    /** Mark the run VOID: nothing buffered may ever be printed. */
+    markVoid() {
+      voided = true;
+    },
+    get buffered(): number {
+      return lines.length;
+    },
+    flush(out: (s: string) => void) {
+      if (voided) return;
+      for (const l of lines) out(l);
+    },
+  };
+}
+
+type DriftResult = { kind: 'ok' } | { kind: 'moved' } | { kind: 'unknown'; what: string };
+
+type ChanEndResult = 'ok' | 'moved' | 'unknown';
+
+// ── OFFLINE SELF-TEST ────────────────────────────────────────────────────────────────────────────
+// Exercises the pieces whose control flow is checkable WITHOUT the serial port: the hash matcher (both
+// conventions, the minimum-length floor), the verdict buffer, and the exit-code mapping. Run with
+// `--self-test`; needs no device and does not touch /dev/ttyACM0.
+function runSelfTest(): number {
+  const results: string[] = [];
+  let failures = 0;
+  const check = (name: string, ok: boolean, detail = '') => {
+    results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
+    if (!ok) failures += 1;
+  };
+
+  const sample = Uint8Array.from({ length: 64 }, (_, i) => (i * 7 + 3) & 0xff);
+  const cands = hashCandidatesFromBytes(sample);
+  const byLabel = (l: string) => cands.find((c) => c.label === l)!.value;
+
+  // hash matcher — exact equality under each convention.
+  for (const l of ['bytes', 'bytes-minus4', 'hexstr', 'hexstr-minus4']) {
+    const m = hashMatches(cands, byLabel(l));
+    check(`hash: exact ${l}`, m.ok && m.how.startsWith('exact'), m.how);
+  }
+  // The proof.mjs convention (sha256 of the HEX STRING) must be reachable.
+  check(
+    'hash: proof.mjs hex-string convention matches',
+    hashMatches(cands, sha256String(Buffer.from(sample).toString('hex'))).ok
+  );
+  // A 1-char recorded hash must NOT pass by chance (the old code accepted it).
+  const oneChar = byLabel('bytes').slice(0, 1);
+  check('hash: 1-char recorded hash is rejected', !hashMatches(cands, oneChar).ok);
+  // A prefix shorter than the 16-char floor is rejected; at/above the floor it is accepted.
+  check('hash: 8-char prefix rejected', !hashMatches(cands, byLabel('bytes').slice(0, 8)).ok);
+  check('hash: 20-char prefix accepted', hashMatches(cands, byLabel('bytes').slice(0, 20)).ok);
+  // A wrong hash is rejected.
+  check('hash: unrelated hash rejected', !hashMatches(cands, 'deadbeef'.repeat(8)).ok);
+
+  // verdict buffer — a run that does not flush prints NOTHING; a flushed run prints every line.
+  const emitted: string[] = [];
+  const voidBuf = makeTableBuffer();
+  voidBuf.push('header');
+  voidBuf.push('row 1');
+  voidBuf.markVoid();
+  voidBuf.flush((s) => emitted.push(s));
+  check('buffer: VOID run emits no per-param lines', emitted.length === 0, `emitted ${emitted.length}`);
+
+  const cleanBuf = makeTableBuffer();
+  cleanBuf.push('header');
+  cleanBuf.push('row 1');
+  cleanBuf.flush((s) => emitted.push(s));
+  check('buffer: clean run emits header + rows in order', emitted.length === 2 && emitted[0] === 'header' && emitted[1] === 'row 1');
+
+  // Likewise, a run that simply never flushes (returns VOID before the end) prints nothing.
+  const noFlush: string[] = [];
+  const unflushed = makeTableBuffer();
+  unflushed.push('row 1');
+  check('buffer: unflushed buffer emits nothing', noFlush.length === 0 && unflushed.buffered === 1);
+
+  // exit-code mapping.
+  check('exit: clean → 0', exitCodeFor({ mismatch: 0, warning: false }) === 0);
+  check('exit: mismatch → 1', exitCodeFor({ mismatch: 3, warning: false }) === 1);
+  check('exit: warning beats mismatch → 6', exitCodeFor({ mismatch: 3, warning: true }) === 6);
+  // A crash must be distinguishable from "MISMATCH found".
+  check('exit: crash code is 70', EXIT_CRASH === 70);
+  check('exit: crash code differs from mismatch 1', EXIT_CRASH !== 1);
+
+  for (const l of results) console.log(l);
+  console.log(`\nself-test: ${results.length - failures}/${results.length} passed${failures ? ` — ${failures} FAILED` : ' — OK'}`);
+  return failures ? EXIT_SELF_TEST_FAIL : 0;
+}
+
 export async function main(argv: string[]): Promise<number> {
+  if (argv.includes('--self-test')) return runSelfTest();
+
   const all = argv.includes('--all');
   const argOf = (n: string) => {
     const i = argv.indexOf(n);
@@ -259,6 +471,8 @@ export async function main(argv: string[]): Promise<number> {
   let unreadable = 0;
   const bad: string[] = [];
   const unreadableFrames: string[] = [];
+  /** Per-param lines are buffered here and printed ONLY after the final guard passes (hardenings §2). */
+  const table = makeTableBuffer();
   try {
     // ── STATE GUARD (a)(b)(c) — identity at the START of the run ────────────────────────────────────
     // An oracle must prove both sides describe the SAME object. Nothing below is a measurement until it does.
@@ -283,31 +497,50 @@ export async function main(argv: string[]): Promise<number> {
       return 4;
     }
 
-    // (b) BODY identity — required-match when the snapshot records a hash, else a WARNING (never a pass).
+    // (b) BODY identity — required-match when the snapshot records a hash, else an UNPROVEN warning.
     const body0 = await deviceBody(s.driver);
+    if (body0) {
+      const artifact = writeObservedBody(snap, body0);
+      console.log(`identity — observed body ${body0.len} B; both hash conventions (${
+        body0.candidates.map((c) => c.label).join(', ')
+      })${artifact ? ` written to ${artifact}` : ' (artifact write failed)'}`);
+      console.log(
+        '  convention: sha256 over BOTH the raw BYTES and the ASCII HEX STRING, each full AND with the\n' +
+          '  first 4 bytes / 8 hex chars dropped — proof.mjs hashes the /preset/body HEX STRING, which\n' +
+          '  carries a 4-byte prefix the edit-buffer dump does not; the snapshot hash is assumed to be one\n' +
+          '  of these and every convention is tried (exact match preferred).'
+      );
+    }
     if (snap.bodyHash) {
       if (!body0) {
         console.log('\nVOID RUN — the snapshot records a bodyHash, but the unit\'s body could NOT be read');
         console.log('(presetBodyHex returned nothing). The two objects cannot be shown to match. (exit 4)');
         return 4;
       }
-      if (!hashMatches([body0.sha, body0.shaMinus4], snap.bodyHash)) {
+      const hm = hashMatches(body0.candidates, snap.bodyHash);
+      if (!hm.ok) {
         console.log('\nVOID RUN — the unit\'s BODY does not match the snapshot\'s bodyHash.');
         console.log(`  snapshot bodyHash ${snap.bodyHash}`);
-        console.log(`  unit body  ${body0.len} B  sha256 ${body0.sha}`);
-        console.log('The preset NAME matches but the body under it has changed (a same-name body change).');
+        console.log(`  unit body ${body0.len} B, candidates:`);
+        for (const c of body0.candidates) console.log(`    ${c.label.padEnd(13)} ${c.value}`);
+        console.log(`  match attempt: ${hm.how}`);
+        console.log('The preset NAME matches but the body under it has changed (a same-name body change),');
+        console.log('or the snapshot hash used a convention/prefix none of the four above reproduces.');
         console.log('Nothing below would have been a device finding. (exit 4)');
         return 4;
       }
-      console.log(`identity — device body ${body0.len} B  sha256 ${body0.sha}  MATCHES the snapshot bodyHash`);
+      console.log(`identity — device body ${body0.len} B  MATCHES the snapshot bodyHash (${hm.how})`);
     } else if (!body0) {
-      console.log('\nWARNING — the snapshot records NO bodyHash and the unit\'s body could not be read, so');
-      console.log('the body could NOT be identity-checked. This run is NOT a clean pass. (exit 6)');
+      console.log('\nWARNING — UNPROVEN body identity: the snapshot records NO bodyHash and the unit\'s body');
+      console.log('could not be read, so the body could NOT be identity-checked. This run is NOT a clean');
+      console.log('pass. (exit 6)');
       warning = true;
     } else {
-      console.log(`\nWARNING — the snapshot records NO bodyHash, so the unit's body could NOT be identity-`);
-      console.log(`checked (the NAME matches; the body reads ${body0.len} B sha256 ${body0.sha}).`);
-      console.log('A same-name body change before this run would be invisible here. NOT a clean pass. (exit 6)');
+      console.log('\nWARNING — UNPROVEN body identity: the snapshot records NO bodyHash, so the unit\'s body');
+      console.log(`could NOT be identity-checked (the NAME matches; the body reads ${body0.len} B,`);
+      console.log(`candidates ${body0.candidates.map((c) => `${c.label}=${c.value.slice(0, 12)}`).join(' ')}).`);
+      console.log('A same-name body change before this run would be invisible here. Point the next snapshot');
+      console.log(`at the observed artifact${writeObservedBody(snap, body0) ? '' : ' (write failed)'} as a baseline. NOT a clean pass. (exit 6)`);
       warning = true;
     }
 
@@ -335,8 +568,10 @@ export async function main(argv: string[]): Promise<number> {
       warning = true;
     }
 
-    // (c) CHANNEL identity — each block's active channel, where both sides give it.
+    // (c) CHANNEL identity — each block's active channel, where both sides give it, WITH coverage count.
     const channels0 = await deviceChannels(s.driver);
+    const chanScope = snap.blocks.filter((b) => onlyBlock === undefined || b.eid === onlyBlock);
+    const chanCandidates = chanScope.filter((b) => !!b.channel);
     if (!channels0 || channels0.size === 0) {
       console.log('identity — channel: the unit did not report per-block channels (fn=0x13 empty) → the');
       console.log('block channels could not be identity-checked. Not a clean pass. (exit 6)');
@@ -344,14 +579,16 @@ export async function main(argv: string[]): Promise<number> {
     } else {
       let checked = 0;
       const chanMismatch: string[] = [];
-      for (const b of snap.blocks) {
-        if (onlyBlock !== undefined && b.eid !== onlyBlock) continue;
+      const chanUncovered: string[] = [];
+      for (const b of chanCandidates) {
         const live = channels0.get(b.eid);
-        if (live == null || !b.channel) continue;
-        const liveLetter = CHANNEL_LETTERS[live];
-        if (!liveLetter) continue;
+        const liveLetter = live == null ? undefined : CHANNEL_LETTERS[live];
+        if (live == null || !liveLetter) {
+          chanUncovered.push(b.name ?? String(b.eid));
+          continue;
+        }
         checked += 1;
-        if (liveLetter !== b.channel.trim().toUpperCase()) {
+        if (liveLetter !== b.channel!.trim().toUpperCase()) {
           chanMismatch.push(`${b.name ?? b.eid}: snapshot channel ${b.channel} vs unit channel ${liveLetter}`);
         }
       }
@@ -361,41 +598,59 @@ export async function main(argv: string[]): Promise<number> {
         console.log('The served params describe a different channel\'s values. Nothing below is a measurement. (exit 4)');
         return 4;
       }
-      console.log(`identity — channel: ${checked}/${snap.blocks.length} block(s) checked against the unit, all match`);
+      const denom = chanCandidates.length;
+      console.log(`identity — channel coverage: ${checked}/${denom} block(s) carrying a snapshot channel were checked against the unit (of ${chanScope.length} in scope, ${snap.blocks.length} in the snapshot)`);
       if (checked === 0) {
-        console.log('  (no block carried BOTH a snapshot channel and a unit channel → channel unverified)');
+        console.log('  COVERAGE ZERO — no block carried BOTH a snapshot channel AND a unit channel → channel UNVERIFIED. Not a clean pass. (exit 6)');
+        warning = true;
+      } else if (checked < denom) {
+        console.log(`  PARTIAL COVERAGE — ${denom - checked} block(s) had no unit channel and were NOT checked: ${chanUncovered.join(', ')} → channel only partially verified. Not a clean pass. (exit 6)`);
         warning = true;
       }
     }
 
-    console.log(`\ntaper audit vs the INSTRUMENT — preset “${snap.preset ?? '?'}”, ${targets.length} params`);
-    console.log('READ-ONLY (view 0x00). “ours” = what the server serves; “device” = the unit’s own string.');
-    console.log(`body+scene drift re-checked every ${DRIFT_CHECK_EVERY} params and once at the end.\n`);
-    console.log('blk ch  pid  name                 ours           device          tol        verdict');
-    console.log('--- --  ---  -------------------  -------------  --------------  ---------  -------');
+    // ── The table (header + every per-param line) is BUFFERED, never printed here. ──────────────────
+    table.push(`\ntaper audit vs the INSTRUMENT — preset “${snap.preset ?? '?'}”, ${targets.length} params`);
+    table.push('READ-ONLY (view 0x00). “ours” = what the server serves; “device” = the unit’s own string.');
+    table.push(`body+scene+channels drift re-checked every ${DRIFT_CHECK_EVERY} params and once at the end.\n`);
+    table.push('blk ch  pid  name                 ours           device          tol        verdict');
+    table.push('--- --  ---  -------------------  -------------  --------------  ---------  -------');
 
-    /** Re-read body + scene; return a drift verdict (or a lost-guard warning). */
-    const checkDrift = async (afterParam: string): Promise<'ok' | 'moved' | 'lost'> => {
+    /**
+     * Re-read body + scene; return a drift verdict. An UNREADABLE guard that was readable at the start is
+     * UNKNOWN (fail closed), not "unchanged" — the reviewer's defect 2.
+     */
+    const checkDrift = async (afterParam: string): Promise<DriftResult> => {
       const b = await deviceBody(s.driver);
       const sc = await deviceScene(s.driver);
-      if (body0 && (!b || b.sha !== body0.sha)) {
-        if (!b) {
-          console.log(`\nWARNING — body drift guard lost: presetBodyHex returned nothing after ${afterParam}.`);
-          warning = true;
-          return 'lost';
+      if (body0 && !b) {
+        console.log(`\nVOID RUN — the body drift guard could not be RE-READ after ${afterParam}.`);
+        console.log('A guard readable at the start that reads nothing mid-run is UNKNOWN, not unchanged.');
+        console.log('Fail closed. No per-param verdict. (exit 7)');
+        return { kind: 'unknown', what: 'body' };
+      }
+      if (body0 && b) {
+        const m = bodyHashMatchesObserved(body0, b);
+        if (!m) {
+          console.log(`\nVOID RUN — the unit's BODY moved DURING the run, after ${afterParam}.`);
+          console.log(`  start body ${body0.len} B  bytes sha256 ${byLabelOf(body0, 'bytes')}`);
+          console.log(`  now   body ${b.len} B  bytes sha256 ${byLabelOf(b, 'bytes')}`);
+          console.log('A same-name body change makes every comparison below a lie. No per-param verdict. (exit 5)');
+          return { kind: 'moved' };
         }
-        console.log(`\nVOID RUN — the unit's BODY moved DURING the run, after ${afterParam}.`);
-        console.log(`  start body ${body0.len} B sha256 ${body0.sha}`);
-        console.log(`  now   body ${b.len} B sha256 ${b.sha}`);
-        console.log('A same-name body change makes every comparison below a lie. No per-param verdict. (exit 5)');
-        return 'moved';
+      }
+      if (scene0 != null && sc == null) {
+        console.log(`\nVOID RUN — the scene guard could not be RE-READ after ${afterParam} (start scene ${scene0}).`);
+        console.log('An unreadable scene mid-run is UNKNOWN, not unchanged. Fail closed. No per-param');
+        console.log('verdict is reported. (exit 7)');
+        return { kind: 'unknown', what: 'scene' };
       }
       if (scene0 != null && sc != null && sc !== scene0) {
         console.log(`\nVOID RUN — the unit's SCENE moved DURING the run (${scene0} → ${sc}), after ${afterParam}.`);
         console.log('Per-channel values differ per scene. No per-param verdict is reported. (exit 5)');
-        return 'moved';
+        return { kind: 'moved' };
       }
-      return 'ok';
+      return { kind: 'ok' };
     };
 
     for (let i = 0; i < targets.length; i += 1) {
@@ -404,7 +659,8 @@ export async function main(argv: string[]): Promise<number> {
       if (i > 0 && i % DRIFT_CHECK_EVERY === 0) {
         const prev = targets[i - 1]!;
         const d = await checkDrift(`${prev.b.name ?? prev.b.eid}/${prev.p.id} (${prev.p.name ?? ''})`);
-        if (d === 'moved') return 5;
+        if (d.kind === 'moved') return 5;
+        if (d.kind === 'unknown') return 7;
       }
       // USE THE HW-PROVEN ADAPTER, do not re-implement matching. `adaptRequest` (services/deviceCache.ts)
       // is the CaptureRig matcher the live-walk uses: it matches on the fn, the VIEW echo (f[6]), the
@@ -454,7 +710,8 @@ export async function main(argv: string[]): Promise<number> {
           );
         }
       }
-      console.log(
+      // BUFFER the line — it is printed only after the FINAL guard passes (hardenings §2).
+      table.push(
         `${String(b.eid).padStart(3)} ${String(b.channel ?? '?').padStart(2)}  ${String(p.id).padStart(3)}  ${(
           p.name ?? ''
         ).slice(0, 19).padEnd(19)}  ${String(ours).padEnd(13)}  ${String(disp ?? '—').padEnd(14)}  ${tolStr.padEnd(9)}  ${verdict}`
@@ -466,7 +723,16 @@ export async function main(argv: string[]): Promise<number> {
     const finalDrift = await checkDrift(
       `${lastTarget.b.name ?? lastTarget.b.eid}/${lastTarget.p.id} (${lastTarget.p.name ?? ''}) [end of run]`
     );
-    if (finalDrift === 'moved') return 5;
+    if (finalDrift.kind === 'moved') return 5;
+    if (finalDrift.kind === 'unknown') return 7;
+
+    // (d) CHANNEL — re-check the per-block channels at the END as well (they were never re-checked before).
+    const chEndRes = await recheckChannels();
+    if (chEndRes === 'moved') return 5;
+    if (chEndRes === 'unknown') return 7;
+
+    // ── Every guard has passed: now (and only now) emit the buffered per-param table. ────────────────
+    table.flush((line) => console.log(line));
 
     console.log(`\nsummary: ${match} match (${coarse} only within a coarse display), ${mismatch} MISMATCH, ${unreadable} unreadable`);
     if (unreadableFrames.length) {
@@ -478,15 +744,68 @@ export async function main(argv: string[]): Promise<number> {
       for (const line of bad) console.log('  ' + line);
     }
     if (warning) {
-      console.log('\nWARNING: the body and/or the scene could NOT be fully identity-checked this run —');
-      console.log('the NAME matched but the body was not comparable to a recorded hash. NOT a clean pass. (exit 6)');
+      console.log('\nWARNING: a body/scene/channel identity could NOT be fully checked this run —');
+      console.log('the NAME matched but the body was not comparable to a recorded hash, or coverage was');
+      console.log('partial. NOT a clean pass. (exit 6)');
       return 6;
     }
-    return mismatch > 0 ? 1 : 0;
+    return exitCodeFor({ mismatch, warning });
+
+    /**
+     * Re-read the per-block channels at the END and compare to the start. A channel that MOVED is VOID
+     * (5); one that was readable at the start and is not re-readable now is UNKNOWN, fail closed (7).
+     */
+    async function recheckChannels(): Promise<ChanEndResult> {
+      if (!channels0 || channels0.size === 0) return 'ok';
+      const chEnd = await deviceChannels(s.driver);
+      if (!chEnd || chEnd.size === 0) {
+        console.log('\nVOID RUN — the per-block channel guard could not be RE-READ at the end of the run.');
+        console.log('A guard readable at the start that reads nothing now is UNKNOWN. Fail closed. (exit 7)');
+        return 'unknown';
+      }
+      const moved: string[] = [];
+      let missing = 0;
+      for (const [eid, ch] of channels0) {
+        const now = chEnd.get(eid);
+        if (now == null) {
+          missing += 1;
+          continue;
+        }
+        if (now !== ch) moved.push(`${eid}: ${CHANNEL_LETTERS[ch] ?? ch} → ${CHANNEL_LETTERS[now] ?? now}`);
+      }
+      if (moved.length) {
+        console.log('\nVOID RUN — the unit\'s active CHANNEL moved DURING the run:');
+        for (const m of moved) console.log(`  ${m}`);
+        console.log('Per-channel values differ per channel. No per-param verdict is reported. (exit 5)');
+        return 'moved';
+      }
+      if (missing > 0) {
+        console.log(`\nVOID RUN — ${missing} block channel(s) readable at the start could not be RE-READ at the`);
+        console.log('end of the run. UNKNOWN is not "unchanged". Fail closed. (exit 7)');
+        return 'unknown';
+      }
+      return 'ok';
+    }
   } finally {
     await s.close();
   }
 }
 
+/** True when two body reads carry the same bytes-hash (the drift guard's baseline comparison). */
+function bodyHashMatchesObserved(a: ObservedBody, b: ObservedBody): boolean {
+  return byLabelOf(a, 'bytes') === byLabelOf(b, 'bytes');
+}
+function byLabelOf(body: ObservedBody, label: string): string {
+  return body.candidates.find((c) => c.label === label)?.value ?? '';
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
-  main(process.argv.slice(2)).then((c) => process.exit(c));
+  main(process.argv.slice(2))
+    .then((c) => process.exit(c))
+    // Defect 4: a transport/run THROW must never exit with the MISMATCH code (1). Exit 70 instead, with
+    // a one-line reason, so a crash can never be read as a device finding.
+    .catch((e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`audit-taper-vs-device: transport/run CRASH (exit ${EXIT_CRASH}) — ${msg}`);
+      process.exit(EXIT_CRASH);
+    });
