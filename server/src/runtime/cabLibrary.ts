@@ -22,6 +22,7 @@
 // BROWSER-SAFE: type-only store import, NO node:/fastify imports — this module is in the runtime
 // router's import graph (check-browser-safe.ts enforces it). All persistence goes through the
 // injected Store, so the browser runtime's own store backs browser-direct mode identically.
+import { renameCabIrSyx } from 'forgefx-midi/devices/gen3';
 import type { Store } from './store.js';
 import type { Doc } from './storeBackend.js';
 
@@ -204,4 +205,22 @@ export function findCabBySlot(store: Store, page: number, index: number): CabLib
     (e) => e.page === page && e.index === index && e.available
   );
   return hit ?? null;
+}
+
+/**
+ * The bytes to PERSIST for an upload that asked for a rename (`?name=`).
+ *
+ * The driver applies the rename to what it SENDS, but the route only holds the bytes it RECEIVED — so
+ * storing those would file the old container name inside a library entry labelled with the new one, and a
+ * later restore-to-slot would put the OLD name back on the unit. Apply the same codec rename here so the
+ * stored container is the one that actually landed. A body the codec cannot parse as a cab container is
+ * stored as received (the upload would have been refused before reaching this point on a real unit).
+ */
+export function bytesAsLanded(bytes: Uint8Array, name: string | null | undefined): Uint8Array {
+  if (name == null || name === '') return bytes;
+  try {
+    return Uint8Array.from(renameCabIrSyx(bytes, name));
+  } catch {
+    return bytes;
+  }
 }

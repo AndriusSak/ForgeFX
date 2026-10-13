@@ -17,11 +17,12 @@ import { createStore } from '../../src/runtime/store.js';
 import { createMemStoreBackend } from '../../src/runtime/memStoreBackend.js';
 import { createFsStoreBackend, nodeCodec } from '../../src/runtime/fsStoreBackend.js';
 import * as cabLibrary from '../../src/runtime/cabLibrary.js';
+import { buildCabIrContainerFromWords, parseCabIrSyx, CAB_IR_SAMPLE_SLOTS } from 'forgefx-midi/devices/gen3';
 import * as store from '../../src/store.js';
 import { buildTestApp } from '../helpers/api.js';
 import { assert, assertEqual } from '../helpers/mock.js';
 
-export const CAB_LIBRARY_CASE_COUNT = 22;
+export const CAB_LIBRARY_CASE_COUNT = 23;
 
 // Real-sized payloads from an existing fixture (a 24680-byte FM3 dump) — the store is byte-agnostic,
 // so a real dump makes the round-trip and the cap exercise realistic byte volumes rather than toys.
@@ -256,6 +257,39 @@ export async function runCabLibraryTests(): Promise<void> {
       assert(!!bytes && Buffer.compare(Buffer.from(bytes), Buffer.from(FIXTURE)) === 0, 'the bytes survive byte-identical');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // ── 9. a RENAMED upload stores the bytes that LANDED (new name inside), on BOTH surfaces ──
+  // Without this a library entry labelled "Renamed" held a container still named "Original", and a
+  // restore-to-slot put the old name back on the unit.
+  {
+    const container = Uint8Array.from(
+      buildCabIrContainerFromWords(0x11, { index: 0, page: 0x10 }, 'Original', Array.from({ length: CAB_IR_SAMPLE_SLOTS }, (_, i) => i))
+    );
+    clearDefaultLibrary();
+    const { app, registry } = await buildTestApp(0x11, makeFakeFm3WithUpload(true));
+    const router = createRouter({ registry, store: store.defaultStore });
+    try {
+      const up = await app.inject({
+        method: 'POST', url: '/cab/ir/upload?user=3&name=Renamed',
+        headers: { 'content-type': 'application/octet-stream' }, payload: Buffer.from(container)
+      });
+      assertEqual(up.statusCode, 200, 'app: POST /cab/ir/upload?name= → 200');
+      const viaApp = cabLibrary.listCabLibrary(store.defaultStore).entries[0]!;
+      const storedApp = cabLibrary.readCabLibraryBytes(store.defaultStore, viaApp.id)!;
+      assertEqual(parseCabIrSyx(storedApp).name, 'Renamed', 'app: the STORED container carries the new name');
+      assertEqual(viaApp.name, 'Renamed', 'app: and the entry label matches it');
+      clearDefaultLibrary();
+      const rr = await router.handle('POST', '/cab/ir/upload?user=3&name=Renamed', container);
+      assertEqual(rr.status, 200, 'router: POST /cab/ir/upload?name= → 200');
+      const viaRouter = cabLibrary.listCabLibrary(store.defaultStore).entries[0]!;
+      const storedRouter = cabLibrary.readCabLibraryBytes(store.defaultStore, viaRouter.id)!;
+      assertEqual(parseCabIrSyx(storedRouter).name, 'Renamed', 'router: the STORED container carries the new name');
+      assertEqual(Buffer.compare(Buffer.from(storedApp), Buffer.from(storedRouter)), 0, 'both surfaces store identical bytes');
+    } finally {
+      await app.close();
+      clearDefaultLibrary();
     }
   }
 }

@@ -391,7 +391,7 @@ export function createRouter(deps: RuntimeDeps): {
           const dest = r.dest ?? opts.dest;
           if (dest) {
             cabLibrary.saveCabIr(store, {
-              bytes,
+              bytes: cabLibrary.bytesAsLanded(bytes, opts.name),
               name: r.name || opts.name || '',
               page: dest.page,
               index: dest.index,
