@@ -2080,10 +2080,19 @@ class Gen3Driver implements DeviceDriver {
     this.#lastLocalEditAt = Date.now(); // pause the FM3 device-edit poll briefly so it doesn't echo our own write mid-drag
     // An identity row (raw IS the value) cannot take a normalised position: the continuous knob norm is
     // mapped back through the row's [min,max] to the VALUE and sent as float32(value) — the same typed-SET
-    // form the FM3-validated tempo write uses (`buildSetTempoViaParam`: eid 2 / pid 0x20 = CONTROLLERS/32).
+    // frame (fn 0x01, sub 0x09) the tempo write uses (`buildSetTempoViaParam`: eid 2 / pid 0x20 =
+    // CONTROLLERS/32). Only TEMPO's write form has been validated on the unit; Stages / Bank Size / TONETYPE
+    // share the frame but their writes have never been sent to hardware (forgefx-midi rangeOverlay.ts —
+    // `writeValidated` is present on Tempo alone).
+    //
+    // The write goes through #write, NOT #send. This is a discrete typed-SET (the same fn 0x01 frame the
+    // enum write below sends), so a device REFUSAL must be VISIBLE: #send is fire-and-forget and always
+    // reported {ok:true}, so a refused identity write looked accepted. #write watches the SAME 250 ms window
+    // for a 0x64 rejection echoing fn 0x01 and returns {ok:false} — and it sends the IDENTICAL bytes (no
+    // retry, no extra match requirement beyond the function byte every fn-0x01 op already shares).
     const idRange = continuous ? this.#identityRange(eid, paramId) : undefined;
     const idRaw = idRange ? displayToWire(idRange.displayMin + clamp01(value) * (idRange.displayMax - idRange.displayMin), { displayMin: idRange.displayMin, displayMax: idRange.displayMax, displayScale: 'identity' }) : undefined;
-    const r = idRaw !== undefined ? await this.#send(this.#codec.buildSetParameter(eid, paramId, idRaw)) : continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
+    const r = idRaw !== undefined ? await this.#write(this.#codec.buildSetParameter(eid, paramId, idRaw)) : continuous ? await this.#send(this.#codec.buildSetParameterContinuous(eid, paramId, clamp01(value))) : await this.#write(this.#codec.buildSetParameter(eid, paramId, value));
     // W1.2: the `param` event's `norm` is the 0..1 NORMALIZED value (drivers/types.ts). A discrete
     // write's `value` is the enum/model ORDINAL, so broadcasting it as a norm handed every other
     // window a value far outside 0..1 (Axis applies `p.norm = e.norm` verbatim). The event has no

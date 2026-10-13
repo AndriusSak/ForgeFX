@@ -7,10 +7,16 @@
 // raw and writes the value, not a position.
 //
 // WHAT THIS ASSERTS: values SERVED by `driver.blockParams()` over a MockTransport against the REAL static FM3
-// profile (not a re-derivation of `#display`), the served `norm` (knob position over [min,max]), and the
-// frame `setParam` SENDS for a knob write. NOT covered (named): GLOBAL/67 is exercised only if the driver
-// serves the GLOBAL body from this mock (see the explicit guard below); the WRITE of Stages/Bank/TONETYPE
-// is not hardware-verified (only Tempo's typed-SET form is FM3-validated — `buildSetTempoViaParam`).
+// profile (not a re-derivation of `#display`), the served `norm` (knob position over [min,max]), the exact
+// frame `setParam` SENDS for a knob write, that a REFUSED identity write is SURFACED to the caller, and the
+// rows' machine-readable write-validation status.
+//
+// VALIDATION STATUS — must NOT be read as "all four validated". Only TEMPO's WRITE form was exercised on the
+// unit (the typed fn-0x01 SET at eid 2 / pid 0x20 — `buildSetTempoViaParam`, forgefx-midi telemetry.ts:238).
+// The Stages / Bank Size / TONETYPE writes have NEVER been sent to hardware: their READ mapping is measured,
+// their WRITE mapping is INFERRED from the Tempo form. forgefx-midi's overlay carries that distinction
+// machine-readably as `writeValidated` (present on Tempo alone — case 8). The GLOBAL/67 read IS exercised here
+// (case 3); before this file it was not exercised by any test.
 
 import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
@@ -34,6 +40,7 @@ function blockBulkFrames(eid: number, values: readonly number[]): number[][] {
   return [sysex(0x74, [...enc14(eid), ...enc14(values.length), 0x07]), sysex(0x75, body), sysex(0x76, [])];
 }
 
+/** A driver whose bulk poll answers `values`; every other request is silent. */
 function makeDriver(eid: number, values: number[]) {
   const profile = PROFILES[MODEL]!;
   const codec = createModernFractalCodec(profile.model);
@@ -45,11 +52,25 @@ function makeDriver(eid: number, values: number[]) {
   return { profile, codec, mock, driver };
 }
 
+/** A driver whose every request is answered by the same reply script — used by the write-path cases. */
+function makeReplyDriver(eid: number, replyFn: () => number[][]) {
+  const profile = PROFILES[MODEL]!;
+  const mock = new MockTransport('serial', `mock-raw-value-${eid}`);
+  mock.isOpen = true;
+  mock.reply = replyFn;
+  const driver = createGen3Driver(profile, { transport: async () => mock, emit: () => {}, getCadence: () => cadenceFor(profile.model, 'balanced') });
+  return { profile, mock, driver };
+}
+
 /** [family, eid, pid, name, raw the unit was read at, the unit's printed value, declared min, declared max] */
 const CONTROLLERS_EID = 2;
+const GLOBAL_EID = 1; // virtual GLOBAL effect (global-bulk-read.test.ts)
 const REVERB_EID = effectRoster().find((e) => e.slug === 'reverb')!.page;
 
-export const RAW_VALUE_ROWS_CASE_COUNT = 4;
+/** The exact 23-byte typed-SET frame the identity Tempo write must put on the wire (pinned literal). */
+const TEMPO_120_FRAME = 'f000017411010900020020000000401704000000006df7';
+
+export const RAW_VALUE_ROWS_CASE_COUNT = 8;
 
 export async function runRawValueRowsTests(): Promise<void> {
   // ── 1. READ: Tempo + Stages (CONTROLLERS, eid 2) through blockParams() ───────────────────────────────
@@ -88,7 +109,25 @@ export async function runRawValueRowsTests(): Promise<void> {
     assert((tone as { value?: number | null }).value === 1, `TONETYPE at raw 1 must SERVE 1 (unit shows 1), got ${(tone as { value?: number | null }).value}`);
   }
 
-  // ── 3. WRITE: a knob norm for Tempo is sent as float32(BPM), the FM3-validated typed-SET form ────────
+  // ── 3. READ: GLOBAL/67 Bank Size (eid 1) through blockParams() — the row NO earlier test exercised ───
+  {
+    const profile = PROFILES[MODEL]!;
+    const stride = Math.max(profile.rangeSections['GLOBAL']?.stride ?? 1, 68);
+    const values = new Array(stride * 4).fill(0);
+    values[67] = 3; // Bank Size — unit "3"
+    const { driver } = makeDriver(GLOBAL_EID, values);
+    const r = await driver.blockParams(GLOBAL_EID);
+    const all = [...r.named, ...(r.enums as unknown as Array<{ id: number; value?: number | null }>)];
+    const bank = all.find((n) => n.id === 67) as { id: number; value?: number | null; norm?: number | null; min?: number; max?: number; name?: string } | undefined;
+    assert(bank !== undefined, 'GLOBAL/67 Bank Size must be served by blockParams (named or enums)');
+    assert(bank!.value === 3, `Bank Size at raw 3 must SERVE 3 (the unit shows 3), got ${bank!.value} (the defect served 1.001)`);
+    // norm = the in-range knob position (3-1)/(12-1) = 2/11.
+    assert(bank!.norm != null && Math.abs(bank!.norm - 2 / 11) < 1e-9, `Bank Size norm must be 2/11, got ${bank!.norm}`);
+    assert(bank!.min === 1 && bank!.max === 12, `Bank Size keeps its declared bounds 1..12, got ${bank!.min}..${bank!.max}`);
+  }
+
+  // ── 4. WRITE: a knob norm for Tempo is sent as float32(BPM), the typed-SET form (Tempo's is the ONE
+  //      write form validated on the unit) ──────────────────────────────────────────────────────────────
   {
     const { codec, mock, driver } = makeDriver(CONTROLLERS_EID, new Array(1).fill(0));
     await driver.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
@@ -103,11 +142,55 @@ export async function runRawValueRowsTests(): Promise<void> {
     assert(mock.sent.some((f) => compactHex(f) === compactHex(codec.buildSetParameter(CONTROLLERS_EID, 32, 24))), 'norm 0 must send 24 BPM');
   }
 
-  // ── 4. CONTROL: a normalised row's continuous write is UNCHANGED (position, sub 52) ───────────────────
+  // ── 5. FRAME PIN: a successful identity write reaches the wire with the SAME bytes the fix must not
+  //      change — the exact 23-byte frame, by literal AND by the codec's own builder ──────────────────────
+  {
+    const { mock, driver } = makeReplyDriver(CONTROLLERS_EID, () => []); // silent device = accept
+    const r = await driver.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
+    assert(r.ok === true, 'a silent (accepting) identity write stays ok:true');
+    const sent = mock.sent.map(compactHex);
+    assert(sent.includes(TEMPO_120_FRAME), `identity Tempo(120) write must send the pinned frame ${TEMPO_120_FRAME}; sent: ${sent.join(' | ')}`);
+    const codec = createModernFractalCodec(MODEL);
+    assert(sent.includes(compactHex(codec.buildSetParameter(CONTROLLERS_EID, 32, 120))), 'the identity write must equal buildSetParameter(2,32,120) exactly');
+  }
+
+  // ── 6. REFUSAL SURFACED: a device rejection (0x64 echoing fn 0x01) must reach the CALLER, not be dropped.
+  //      PRE-FIX the identity path used #send (fire-and-forget) and returned {ok:true} regardless — the
+  //      `refused.ok === false` assertion below FAILED against that code path. ─────────────────────────────
+  {
+    const rejecting = () => [sysex(0x64, [0x01, 0x0b])]; // MULTIPURPOSE_RESPONSE [echoedFn 0x01, resultCode]
+    const { mock, driver } = makeReplyDriver(CONTROLLERS_EID, rejecting);
+    const refused = await driver.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
+    assert(refused.ok === false, `a REFUSED identity write must surface ok:false to the caller, got ${JSON.stringify(refused)}`);
+    // And the frame really went out (it was not dropped before the wire).
+    assert(mock.sent.some((f) => compactHex(f) === TEMPO_120_FRAME), `the refused identity write must still have been sent (${TEMPO_120_FRAME}); sent: ${mock.sent.map(compactHex).join(' | ')}`);
+    // Control: a 0x64 echoing a DIFFERENT function is NOT our rejection — the write stays accepted.
+    const { driver: foreign } = makeReplyDriver(CONTROLLERS_EID, () => [sysex(0x64, [0x1f, 0x0b])]);
+    const notOurs = await foreign.setParam(CONTROLLERS_EID, 32, (120 - 24) / (250 - 24), true);
+    assert(notOurs.ok === true, 'a 0x64 echoing another function (0x1f) must NOT be attributed to the identity write');
+  }
+
+  // ── 7. CONTROL: a normalised row's continuous write is UNCHANGED (position, sub 52) ───────────────────
   {
     const { codec, mock, driver } = makeDriver(CONTROLLERS_EID, new Array(1).fill(0));
     await driver.setParam(CONTROLLERS_EID, 2, 0.5, true); // CONTROLLERS_LFO1DEPTH: a normal 0..100 knob
     assert(mock.sent.some((f) => compactHex(f) === compactHex(codec.buildSetParameterContinuous(CONTROLLERS_EID, 2, 0.5))), 'a non-identity row keeps the continuous-position write');
   }
-  console.log('  raw-value-rows: Tempo 120 / Stages 8 / TONETYPE 1 SERVED through blockParams(); Tempo knob write sends float32(BPM); normalised-row write unchanged');
+
+  // ── 8. VALIDATION MARKER: the four identity rows' READS are all measured, but only Tempo's WRITE is
+  //      validated — asserted off the machine-readable `writeValidated` the overlay carries, so the three
+  //      unvalidated rows cannot read as validated. ───────────────────────────────────────────────────────
+  {
+    const ranges = PROFILES[MODEL]!.ranges as unknown as Record<string, Record<number, { valueMap?: string; writeValidated?: boolean }>>;
+    const IDENTITY: Array<[string, number]> = [['CONTROLLERS', 32], ['CONTROLLERS', 36], ['GLOBAL', 67], ['REVERB', 67]];
+    for (const [fam, pid] of IDENTITY) {
+      assert(ranges[fam]?.[pid]?.valueMap === 'identity', `${fam}/${pid} must be served as a valueMap 'identity' row`);
+    }
+    assert(ranges['CONTROLLERS']?.[32]?.writeValidated === true, 'Tempo (CONTROLLERS/32) is the ONE write form validated on the unit — must carry writeValidated:true');
+    for (const [fam, pid] of [['CONTROLLERS', 36], ['GLOBAL', 67], ['REVERB', 67]] as Array<[string, number]>) {
+      assert(ranges[fam]?.[pid]?.writeValidated !== true, `${fam}/${pid}'s write is NOT hardware-validated — must not be marked writeValidated`);
+    }
+  }
+
+  console.log('  raw-value-rows: Tempo 120 / Stages 8 / Bank Size 3 / TONETYPE 1 SERVED through blockParams(); identity write pinned to the exact frame, its refusal surfaced; only Tempo marked writeValidated');
 }
