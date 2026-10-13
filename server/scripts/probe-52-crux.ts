@@ -142,6 +142,29 @@ export async function main(argv: string[]): Promise<number> {
   const out = argOf('--out');
   const eidFam = eidToFamily();
 
+  // `--all-52` derives the WHOLE class from the table instead of a hand-kept list: every row with
+  // typecode nibble 5 and no explicit taper, across every family that has a wire effect id. A class
+  // claim must be swept over the class, not over the rows that happened to be measured first.
+  const crux = [...CRUX];
+  if (argv.includes('--all-52')) {
+    for (const [fam, ids] of Object.entries(FM3_RANGES)) {
+      const eid = fm3EffectId(fam, 1);
+      if (eid == null) continue;
+      for (const [pidStr, row] of Object.entries(ids as Record<string, { typecode?: number; taper?: string }>)) {
+        // PARENTHESISE. `(tc >> 4) & 0xf !== 5` parses as `(tc >> 4) & (0xf !== 5)` = `& true` = `& 1`, which
+        // is true for almost every row: the first version of this sweep silently selected 505 of them and
+        // queried garbage addresses (only running it showed the count disagreeing with the class-size test).
+        const nib = ((row.typecode ?? 0) >> 4) & 0xf;
+        if (nib !== 5) continue;
+        if (row.taper) continue; // explicit taper: outside the heuristic's class
+        const pid = Number(pidStr);
+        if (crux.some(([e, p]) => e === eid && p === pid)) continue;
+        crux.push([eid, pid, 'swept from the table (nibble-5, no explicit taper)']);
+      }
+    }
+    console.log(`--all-52: the class is derived from FM3_RANGES — ${crux.length - CRUX.length} rows added to the crux set\n`);
+  }
+
   const opened = await openProbeSession(MODEL, port);
   if (!opened.ok) {
     console.log(`no device: [${opened.failure.cls}] ${opened.failure.detail}`);
@@ -199,7 +222,7 @@ export async function main(argv: string[]): Promise<number> {
 
     for (const [group, rows] of [
       ['controls', PROVEN],
-      ['crux', CRUX],
+      ['crux', crux],
     ] as const) {
       console.log(`\n── ${group.toUpperCase()} ────────────────────────────────────────────────────────────────────────`);
       for (const [eid, pid, why] of rows) {
