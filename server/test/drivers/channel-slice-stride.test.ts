@@ -10,33 +10,38 @@
 // returns the UNsliced body: index = channel*stride + i, i=0 holding the TYPE. Markers on A/B/C/D at
 // 2/46/90/134 pinned the device's per-channel width at exactly 44.
 //
-// ROOT CAUSE: `#channelSlice` took `stride = profile.rangeSections[family].stride` whenever that row
-// existed, and the row is WRONG for three families on this firmware. Logged from the fn=0x1F head's own
-// itemCount (the device states it; nothing here is inferred):
+// ROOT CAUSE, and the TWO fixes it took. `#channelSlice` took `stride = profile.rangeSections[family].stride`
+// whenever that row existed, and three FM3 rows declared a stride that does not describe the body they are
+// used on (logged from the fn=0x1F head's own itemCount — the device states it, nothing here is inferred):
 //
-//   FUZZ (the DRIVE block)  itemCount 176 = 4x44   table says 43   <- off by 1
-//   CHORUS                  itemCount 128 = 4x32   table says 29   <- off by 3
-//   DELAY                   itemCount 356 = 4x89   table says 88   <- off by 1
+//   FUZZ (the DRIVE block)  itemCount 176 = 4x44   table said 43   <- off by 1
+//   CHORUS                  itemCount 128 = 4x32   table said 29   <- off by 3
+//   DELAY                   itemCount 356 = 4x89   table said 88   <- off by 1
 //   DISTORT 576=4x144, REVERB 284=4x71, COMP 148=4x37, PHASER 140=4x35, CABINET 424=4x106,
 //   INPUT 40=4x10, OUTPUT 104=4x26 — every one divides evenly and was already correct.
 //
-// The fix keeps a table stride ONLY when it describes the body (`itemCount % stride === 0`) and otherwise
-// derives the stride from the body (`itemCount / 4`, the fallback the driver already used where the table
-// has no row at all). Cases 1-3 are the regression; 4-7 are the guards that keep the rule from collapsing
-// into "always itemCount/4" or "always the table".
+//   (1) `forgefx-midi` corrects those three rows in `sectionStrideOverlay.ts`, merged at the fm3 index
+//       export point. Case 8 pins that the CORRECTED rows reach this server — without it, a dropped
+//       overlay would be MASKED by the guard below and the data could silently rot back.
+//   (2) `#channelSlice` no longer trusts a stride that does not divide the body: `itemCount % stride === 0`
+//       or the stride is derived as `itemCount / 4` (the fallback the driver already used where the table
+//       has no row at all). Cases 1-6 pin THAT, against a deliberately STALE table injected here — the
+//       guard must hold for a table that is wrong for ANY reason (a future family, an import, a cache
+//       row), so this suite must not depend on the shipped data ever being broken again.
 //
 // WHY THESE CASES NEED NO DECODER: the contract is `index = channel*stride + paramId`. So a marked byte
 // changes the served reading EXACTLY WHEN the chosen window contains that index — assert a change at the
-// body-derived index and NO change at the competing table index, and the window is pinned without any
+// body-derived index and NO change at the competing index, and the window is pinned without any
 // test-local re-implementation of the range/taper tables (which a value-equality oracle would have shared
-// with the code under test, and which silently broke on the first log-taper param).
+// with the code under test, and which silently broke on the first log-taper param, Chorus Rate).
 //
-// Mocked transport + the REAL static FM3 profile: no hardware.
+// Mocked transport + the real static FM3 profile: no hardware.
 import { PROFILES } from '../../src/devices.js';
 import { createGen3Driver } from '../../src/drivers/gen3.js';
 import { cadenceFor } from '../../src/drivers/telemetryProfiles.js';
 import { effectRoster } from 'forgefx-midi/devices/gen3';
 import { createModernFractalCodec, packValue16 } from 'forgefx-midi/gen3/axe-fx-iii';
+import { FM3_RANGE_SECTIONS } from 'forgefx-midi/gen3/fm3';
 import { MockTransport, assert, assertEqual } from '../helpers/mock.js';
 
 const MODEL = 0x11; // FM3
@@ -46,18 +51,19 @@ const CAB_EID = effectRoster().find((e) => e.slug === 'cab')!.page; // 62, CABIN
 const AMP_EID = effectRoster().find((e) => e.slug === 'amp')!.page; // 58, DISTORT family
 const DELAY_EID = effectRoster().find((e) => e.slug === 'delay')!.page; // 70, DELAY family
 
-/** The table's declared strides — the numbers this suite exists to stop trusting blindly. */
-const FUZZ_TABLE = PROFILES[MODEL]!.rangeSections['FUZZ']!.stride; // 43, measured-wrong
-const CHORUS_TABLE = PROFILES[MODEL]!.rangeSections['CHORUS']!.stride; // 29, measured-wrong
+/** The PRE-overlay strides the GENERATED table declared for the two families this suite injects as stale. */
+const STALE_FUZZ = 43;
+const STALE_CHORUS = 29;
 /** The fn=0x1F itemCount the unit actually reports for each family (logged 2026-10-13). */
 const FUZZ_ITEM_COUNT = 176;
 const CHORUS_ITEM_COUNT = 128;
 const CABINET_ITEM_COUNT = 424;
 const AMP_ITEM_COUNT = 576;
+const DELAY_ITEM_COUNT = 356;
 /** A knob position used as a marker: 0.9 of full scale. Any non-zero byte moves any served float. */
 const MARK = Math.round(0.9 * 65534);
 
-/** Drive `Tone` (FUZZ) / Chorus `Depth 1` (CHORUS) / Cab `Room Level` (CABINET) — all 0..10-or-wider. */
+/** Drive `Tone` (FUZZ) / Chorus `Depth 1` (CHORUS) / Cab `Room Level` (CABINET) / Amp `Gain 1` (DISTORT). */
 const DRIVE_PID = 2;
 const CHORUS_PID = 4;
 const CAB_PID = 35;
@@ -85,6 +91,17 @@ function bulkFrames(eid: number, values: readonly number[]): number[][] {
   const body: number[] = [0x00, 0x02];
   for (const v of values) body.push(...packValue16(v));
   return [sysex(0x74, [...enc14(eid), ...enc14(values.length), 0x07]), sysex(0x75, body), sysex(0x76, [])];
+}
+
+/** A profile whose declared stride for `family` is `stride` (`null` = drop the row entirely). */
+function withStride(family: string, stride: number | null) {
+  const sections: Record<string, { stride: number; recordCount: number }> = {};
+  for (const [k, v] of Object.entries(PROFILES[MODEL]!.rangeSections)) {
+    sections[k] = { stride: v.stride, recordCount: v.recordCount };
+  }
+  if (stride === null) delete sections[family];
+  else sections[family] = { stride, recordCount: sections[family]?.recordCount ?? 0 };
+  return { ...PROFILES[MODEL]!, rangeSections: sections };
 }
 
 /**
@@ -133,55 +150,62 @@ async function assertWindow(
 }
 
 export async function runChannelSliceStrideTests(): Promise<void> {
-  // ── 1. REQUIRED (the regression): DRIVE on channel B. The table says 43; the body is 176 = 4x44. ──
-  await assertWindow(DRIVE_EID, DRIVE_PID, 1, FUZZ_ITEM_COUNT, 44, FUZZ_TABLE,
-    'the drive body\'s own 44-wide channel wins over the table\'s 43');
+  // ── 1. REQUIRED (the guard): a STALE table stride must not be used when it cannot describe the body. ──
+  await assertWindow(DRIVE_EID, DRIVE_PID, 1, FUZZ_ITEM_COUNT, 44, STALE_FUZZ,
+    'the drive body\'s own 44-wide channel wins over a stale 43',
+    withStride('FUZZ', STALE_FUZZ));
 
   // ── 2. REQUIRED: the same body on channel D — a +1 stride error is +3 by channel D. ──
-  await assertWindow(DRIVE_EID, DRIVE_PID, 3, FUZZ_ITEM_COUNT, 132, FUZZ_TABLE * 3,
-    'channel D is sliced at 3*44, not 3*43');
+  await assertWindow(DRIVE_EID, DRIVE_PID, 3, FUZZ_ITEM_COUNT, 132, STALE_FUZZ * 3,
+    'channel D is sliced at 3*44, not 3*43',
+    withStride('FUZZ', STALE_FUZZ));
 
   // ── 3. REQUIRED: CHORUS, off by THREE — proves the rule is not "subtract one, drive only". ──
-  await assertWindow(CHORUS_EID, CHORUS_PID, 1, CHORUS_ITEM_COUNT, 32, CHORUS_TABLE,
-    'the chorus body\'s 32-wide channel wins over the table\'s 29');
+  await assertWindow(CHORUS_EID, CHORUS_PID, 1, CHORUS_ITEM_COUNT, 32, STALE_CHORUS,
+    'the chorus body\'s 32-wide channel wins over a stale 29',
+    withStride('CHORUS', STALE_CHORUS));
 
   // ── 4. GUARD: a table stride that DOES describe the body is still honoured. ──
-  // A 172-record drive body is exactly 4x43, so the table row is right for it and must be used.
-  await assertWindow(DRIVE_EID, DRIVE_PID, 1, 172, FUZZ_TABLE, 44,
-    'a table stride that divides the body evenly is honoured');
+  // A 172-record drive body is exactly 4x43, so a declared 43 is right for THAT body and must be used.
+  await assertWindow(DRIVE_EID, DRIVE_PID, 1, 172, STALE_FUZZ, 44,
+    'a table stride that divides the body evenly is honoured',
+    withStride('FUZZ', STALE_FUZZ));
 
   // ── 5. GUARD: the rule is not "always itemCount/4". ──
   // CABINET with a declared stride of 212 divides a 424-record body; itemCount/4 = 106 would be wrong.
-  {
-    const patched = {
-      ...PROFILES[MODEL]!,
-      rangeSections: { ...PROFILES[MODEL]!.rangeSections, CABINET: { stride: 212, recordCount: 110 } }
-    };
-    await assertWindow(CAB_EID, CAB_PID, 1, CABINET_ITEM_COUNT, 212, 106,
-      'a dividing table stride wins over itemCount/4 (212 divides 424; /4 gives 106)', patched);
-  }
+  await assertWindow(CAB_EID, CAB_PID, 1, CABINET_ITEM_COUNT, 212, 106,
+    'a dividing table stride wins over itemCount/4 (212 divides 424; /4 gives 106)',
+    withStride('CABINET', 212));
 
   // ── 6. GUARD: a family with NO table row still falls back to the body's own shape. ──
-  {
-    const rest = Object.entries(PROFILES[MODEL]!.rangeSections).filter(([k]) => k !== 'FUZZ');
-    const patched = { ...PROFILES[MODEL]!, rangeSections: Object.fromEntries(rest) };
-    await assertWindow(DRIVE_EID, DRIVE_PID, 1, FUZZ_ITEM_COUNT, 44, FUZZ_TABLE,
-      'with no table row the body-derived stride applies (176/4)', patched);
-  }
+  await assertWindow(DRIVE_EID, DRIVE_PID, 1, FUZZ_ITEM_COUNT, 44, STALE_FUZZ,
+    'with no table row the body-derived stride applies (176/4)',
+    withStride('FUZZ', null));
 
-  // ── 7. GUARD: a family whose table stride is already correct is untouched by the fix. ──
+  // ── 7. GUARD: a family whose declared stride is already correct is untouched by the guard. ──
   // AMP/DISTORT: 576 = 4x144 and the table says 144, so the served window is the same as before.
   await assertWindow(AMP_EID, AMP_GAIN_PID, 1, AMP_ITEM_COUNT, 144, 143,
     'the amp family (table 144, body 4x144) keeps the static stride');
 
-  // ── 8. The DELAY family is the third measured-wrong row (356 = 4x89 vs table 88); assert it from the
-  //    TABLE's own numbers rather than a hard-coded guess, so the case still means something if the
-  //    table is ever corrected. ──
+  // ── 8. THE SHIPPED DATA: the three measured-bad rows are CORRECTED in the table this server consumes.
+  //    This is the case that fails if `sectionStrideOverlay` is dropped or its merge at the fm3 index
+  //    export point is unwired — the guard in cases 1-6 would otherwise mask a regression in the DATA. ──
   {
-    const table = PROFILES[MODEL]!.rangeSections['DELAY']!.stride; // 88
-    const itemCount = 356; // measured; 356 % 88 === 4, so the table cannot describe this body
-    assertEqual(itemCount % table, 4, `precondition: the DELAY table stride (${table}) does not divide the measured body (${itemCount})`);
-    await assertWindow(DELAY_EID, 16, 1, itemCount, itemCount / 4, table,
-      'the delay body\'s 89-wide channel wins over the table\'s 88');
+    const measured: ReadonlyArray<readonly [string, string, number]> = [
+      ['FUZZ', 'Drive', FUZZ_ITEM_COUNT],
+      ['CHORUS', 'Chorus', CHORUS_ITEM_COUNT],
+      ['DELAY', 'Delay', DELAY_ITEM_COUNT],
+    ];
+    for (const [family, block, itemCount] of measured) {
+      const shipped = FM3_RANGE_SECTIONS[family]?.stride;
+      assertEqual(PROFILES[MODEL]!.rangeSections[family]?.stride, shipped,
+        `${block}: the profile's ${family} stride IS the corrected table's`);
+      assertEqual(itemCount % (shipped ?? 0), 0,
+        `${block}: the shipped ${family} stride (${shipped}) divides the measured body ${itemCount}`);
+      assertEqual(itemCount / (shipped ?? 1), 4, `${block}: the measured body is 4x the shipped stride`);
+    }
+    // controls, so case 8 cannot pass by describing a hazard that no longer exists:
+    assertEqual(STALE_FUZZ, 43, 'the GENERATED FUZZ row this suite injects as stale is still 43');
+    assertEqual(FM3_RANGE_SECTIONS['FUZZ']?.stride, 44, 'the EXPORTED FM3_RANGE_SECTIONS carries the corrected 44');
   }
 }

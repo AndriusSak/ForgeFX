@@ -126,7 +126,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   { name: `drivers/device-profile-merge-guard (${DEVICE_PROFILE_MERGE_GUARD_CASE_COUNT} cases, a truncated cache enum/roster list loses to the static one; a complete cache list still wins)`, run: runDeviceProfileMergeGuardTests },
   { name: `drivers/measured-overlay-wins (${MEASURED_OVERLAY_WINS_CASE_COUNT} cases, the MEASURED range overlay beats a device-cache row built from the same wrong record; the cache still wins for a non-overlay row; the served value is the unit's own 10×norm reading)`, run: runMeasuredOverlayWinsTests },
   { name: `drivers/status-channel-unknown (${STATUS_CHANNEL_UNKNOWN_CASE_COUNT} cases, an unreadable/partial fn-0x13 dump yields an UNKNOWN active channel, never a substituted channel A)`, run: runStatusChannelUnknownTests },
-  { name: `drivers/channel-slice-stride (${CHANNEL_SLICE_STRIDE_CASE_COUNT} cases, the fn=0x1F channel-block stride must describe the BODY: FUZZ 176/44 vs table 43, CHORUS 128/32 vs 29; a dividing table stride survives)`, run: runChannelSliceStrideTests }
+  { name: `drivers/channel-slice-stride (${CHANNEL_SLICE_STRIDE_CASE_COUNT} cases, the fn=0x1F channel-block stride must describe the BODY: a stale/absent table row is overridden by itemCount/4, a dividing row survives, and the three corrected rows really ship)`, run: runChannelSliceStrideTests }
 ];
 
 let failures = 0;
