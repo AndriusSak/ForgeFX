@@ -112,6 +112,29 @@ interface DecodedDump {
   modifiers: Gen3Modifier[];
 }
 
+/** One block's live state from the fn-0x13 status dump. */
+type BlockStatus = { bypassed: boolean; channel: number };
+
+/**
+ * Outcome of ONE fn-0x13 status-dump read, kept SEPARATE from the parsed map so a caller can tell the
+ * two situations that an empty-or-partial map makes look identical — the "silent channel-A
+ * substitution" defect. The dump enumerates the PLACED blocks only, so:
+ *   • `ok` is false when the read FAILED (no 0x13 frame / timeout, or a frame that carried no block
+ *     triple at all). An empty map from a failed read is NOT "nothing is placed".
+ *   • `missingPlaced` lists eids this driver has independent evidence are placed (a recent dump
+ *     enumerated them — see `#placedCache`) that an OTHERWISE SUCCESSFUL dump now omits: the dump is
+ *     PARTIAL, so those blocks' channels are UNKNOWN even though the read reported success.
+ * A block absent from a dump that is neither failed nor partial is genuinely NOT PLACED, and keeps the
+ * documented channel-A default (case (a) in `#activeChannelOrUnknown`).
+ */
+type StatusRead = {
+  byEffectId: Map<number, BlockStatus>;
+  /** A 0x13 frame arrived AND carried at least one (eid, dd) triple. */
+  ok: boolean;
+  /** Placed eids (per a recent successful dump) that this successful dump omits — the dump is partial. */
+  missingPlaced: number[];
+};
+
 /** Keep only the dump frames (0x77 header / 0x78 chunks / 0x79 footer) and flatten to the byte
  *  stream the package parser takes. The live request window can interleave unrelated frames
  *  (beacons, other replies) that the strict frame-walking parser would reject; the old decoder
@@ -747,15 +770,29 @@ class Gen3Driver implements DeviceDriver {
     return { len: body.length, hex: Buffer.from(body).toString('hex') };
   }
 
-  async #statusByEffectId(): Promise<Map<number, { bypassed: boolean; channel: number }>> {
+  /**
+   * One fn-0x13 status-dump read. Returns the parsed map PLUS the outcome (`ok`, `missingPlaced`) so a
+   * caller can tell "the read succeeded and this block is simply not placed" from "the read FAILED or
+   * came back PARTIAL" — the two situations the old signature collapsed into one empty/partial map,
+   * which every caller then resolved to channel A (the "silent channel-A substitution" defect: on a
+   * unit sitting on channel B the editor served channel A's values behind a comment claiming the
+   * opposite). The try/catch is still here — a status read is optional for the CALLER's sake — but the
+   * failure is now REPORTED in `ok` instead of being turned into a plausible-looking empty map.
+   *
+   * This method OWNS `#placedCache`: the set is advanced only by a read that succeeded AND was
+   * complete, so a partial/failed read can never overwrite the evidence that a block IS placed.
+   */
+  async #statusByEffectId(): Promise<StatusRead> {
     const dev = await this.#conn();
-    const map = new Map<number, { bypassed: boolean; channel: number }>();
+    const map = new Map<number, BlockStatus>();
+    let frameArrived = false;
     try {
       // fractal-midi's isStatusDumpResponse is locked to model 0x10 (III), so match the
       // 0x13 frame ourselves (any model) and parse the id-id-dd triples inline.
       const frames = await dev.request(this.#codec.buildStatusDump(), { timeoutMs: 1500, match: (fs) => fs.some((f) => f[5] === 0x13) });
       const f = frames.find((x) => x[5] === 0x13);
       if (f) {
+        frameArrived = true;
         const payload = f.slice(6, f.length - 2);
         for (let i = 0; i + 2 < payload.length; i += 3) {
           const effectId = (payload[i]! & 0x7f) | ((payload[i + 1]! & 0x7f) << 7);
@@ -764,9 +801,58 @@ class Gen3Driver implements DeviceDriver {
         }
       }
     } catch {
-      /* status optional */
+      /* the dump timed out / the link dropped — `frameArrived` stays false and `ok` reports it */
     }
-    return map;
+    // A frame that carries ZERO triples is the empty-payload / torn case, not a usable read: a real
+    // preset always enumerates at least its Output block(s) (see sceneState's own note).
+    const ok = frameArrived && map.size > 0;
+    // COMPLETENESS. The dump enumerates the PLACED blocks, and this driver remembers the set a recent
+    // successful dump enumerated (`#placedCache`, refreshed by the registry's channel watch every Nth
+    // meter tick). A block we have that evidence for and that a successful dump now omits means the
+    // dump is PARTIAL — the block's channel is unknown, not "not placed".
+    const prev = this.#placedCache;
+    const recent = !!prev && Date.now() - prev.at < Gen3Driver.PLACED_TTL_MS;
+    const missingPlaced = ok && recent ? prev!.eids.filter((e) => !map.has(e)) : [];
+    // Only a COMPLETE read advances the memory (and refreshes its stamp); a partial read leaves the
+    // previous set in place (and does NOT refresh `at`, so a persistently partial dump ages out after
+    // PLACED_TTL_MS and the driver stops asserting placement — it cannot tell "forever torn" from
+    // "the block was genuinely removed", and after that window the current view is accepted as truth).
+    if (ok && missingPlaced.length === 0) this.#placedCache = { eids: [...map.keys()], at: Date.now() };
+    return { byEffectId: map, ok, missingPlaced };
+  }
+
+  /**
+   * The ACTIVE channel (0-3) of `eid` from a status read, or an explicit UNKNOWN.
+   *
+   * Cases:
+   *   (a) the dump SUCCEEDED, is not partial, and simply does not list `eid` → the block is NOT PLACED
+   *       and channel A is the documented default. With no evidence that `eid` should be in the dump,
+   *       a missing entry carries no information about the channel, so the old default stands.
+   *   (b) the dump FAILED, or came back PARTIAL for `eid` while this driver has evidence it IS placed
+   *       → the channel is UNKNOWN. Callers must NOT substitute A ("a control that cannot be served is
+   *       reported, never faked").
+   *
+   * The evidence in (b) is the remembered placed set: without it a failed read is indistinguishable
+   * from "the driver has never looked", and the documented default applies.
+   */
+  #activeChannelOrUnknown(s: StatusRead, eid: number): { channel: number } | { unknown: string } {
+    const st = s.byEffectId.get(eid);
+    if (st) return { channel: st.channel }; // the dump answered — the block's own active channel
+    if (s.ok) {
+      // The read SUCCEEDED. Partial (a placed eid it should have enumerated is missing) → UNKNOWN;
+      // otherwise the block is simply not placed → the documented channel-A default (case (a)).
+      return s.missingPlaced.includes(eid)
+        ? { unknown: `the fn-0x13 status dump is PARTIAL: it omits eid ${eid}, which a recent dump enumerated as placed` }
+        : { channel: 0 };
+    }
+    // The read FAILED (no 0x13 frame / empty payload). That says nothing about a block we have never
+    // seen placed, so the documented default stands; for a block we HAVE seen placed the channel is
+    // UNKNOWN — the placeholder must not be served as if it were the block's own channel.
+    const prev = this.#placedCache;
+    const knownPlaced = !!prev && Date.now() - prev.at < Gen3Driver.PLACED_TTL_MS && prev.eids.includes(eid);
+    return knownPlaced
+      ? { unknown: `the fn-0x13 status dump was not readable (no 0x13 frame / empty payload) and eid ${eid} was placed as of the last good dump` }
+      : { channel: 0 };
   }
 
   /** Live active-channel per placed block (effectId → channel 0-3), from the fn 0x13 status dump.
@@ -774,10 +860,10 @@ class Gen3Driver implements DeviceDriver {
   async getActiveChannels(): Promise<Map<number, number>> {
     const status = await this.#statusByEffectId();
     const out = new Map<number, number>();
-    for (const [eid, st] of status) out.set(eid, st.channel);
-    // W2.3: the status dump enumerates the PLACED blocks, so record it as the sweep's target list — the
-    // registry's channel watch calls this every Nth meter tick, which makes the sweep's enumeration free.
-    if (out.size > 0) this.#placedCache = { eids: [...out.keys()], at: Date.now() };
+    for (const [eid, st] of status.byEffectId) out.set(eid, st.channel);
+    // W2.3: the status dump enumerates the PLACED blocks, so it is the sweep's target list —
+    // `#statusByEffectId` records it (on successful, COMPLETE reads only) as `#placedCache`, which is
+    // also the placement evidence `#activeChannelOrUnknown` consults. Nothing to do here.
     return out;
   }
 
@@ -789,7 +875,7 @@ class Gen3Driver implements DeviceDriver {
     for (const c of g.cells) {
       if (c.isShunt) continue;
       const slug = slugForEffectId(c.effectId) ?? '';
-      const st = status.get(c.effectId);
+      const st = status.byEffectId.get(c.effectId);
       out.push({
         slug,
         name: c.name,
@@ -811,12 +897,13 @@ class Gen3Driver implements DeviceDriver {
    *  crash-prone dump path (a full dump right after a scene switch hits the device mid-rebuild). */
   async sceneState(): Promise<{ effectId: number; bypassed: boolean; channel: string | null }[]> {
     const status = await this.#statusByEffectId();
-    // W2.2: an EMPTY status map means the fn-0x13 read failed/timed out (#statusByEffectId swallows the
-    // error). A real preset always has ≥ Output blocks, so `[]` can never be a legitimate scene state —
-    // returning it made the route answer 200 `[]` and Axis kept the previous scene's bypass/channel
-    // forever. Throw so the route maps it to 503 and Axis's `.catch(() => null) → load()` fallback fires.
-    if (status.size === 0) throw new Error('scene-state read failed (no status dump from the device)');
-    return [...status].map(([effectId, s]) => ({ effectId, bypassed: s.bypassed, channel: CH_LETTERS[s.channel] ?? null }));
+    // W2.2: an EMPTY status map means the fn-0x13 read failed/timed out (#statusByEffectId reports that
+    // in `ok` instead of throwing). A real preset always has ≥ Output blocks, so `[]` can never be a
+    // legitimate scene state — returning it made the route answer 200 `[]` and Axis kept the previous
+    // scene's bypass/channel forever. Throw so the route maps it to 503 and Axis's
+    // `.catch(() => null) → load()` fallback fires.
+    if (!status.ok) throw new Error('scene-state read failed (no status dump from the device)');
+    return [...status.byEffectId].map(([effectId, s]) => ({ effectId, bypassed: s.bypassed, channel: CH_LETTERS[s.channel] ?? null }));
   }
 
   // ── catalog ──
@@ -923,8 +1010,18 @@ class Gen3Driver implements DeviceDriver {
       try {
         // Read the block's CURRENT channel (A-D) so a channel switch actually reloads that channel's
         // params/type: the fn-0x1F body is channel-blocked and holds ALL channels, so we must slice the
-        // active one, not always channel A. Costs one status round-trip per open — worth it for correctness.
-        const activeCh = (await this.#statusByEffectId()).get(eid)?.channel ?? 0;
+        // active one, not always channel A. Costs one status round-trip per open.
+        //
+        // Case (a): the dump succeeded and simply does not list `eid` — the block is NOT PLACED → channel
+        // A is the documented default. Case (b): the dump FAILED or is PARTIAL for a block we have
+        // evidence IS placed → the channel is UNKNOWN, and slicing channel A would silently serve
+        // another channel's params (the old `?? 0` did exactly that). Refuse the slice with a named
+        // reason; blockParamsH maps the throw to 404, the same failure shape as a torn bulk read.
+        const chRes = this.#activeChannelOrUnknown(await this.#statusByEffectId(), eid);
+        if ('unknown' in chRes) {
+          throw new Error(`block ${eid} active channel UNKNOWN: ${chRes.unknown} — refusing to serve the fn-0x1F body from a substituted channel`);
+        }
+        const activeCh = chRes.channel;
         this.#watchedChannel = activeCh; // keep the device-edit-burst diff on the same channel (see decodeEditBurst)
         const frames = await dev.request(this.#codec.buildBlockBulkReadPoll(eid), { timeoutMs: dev.slow ? 8000 : 2500, quietMs: dev.slow ? 600 : 120, match: (fs) => fs.some((f) => f[5] === 0x76) });
         const bulk = this.#codec.assembleGen3BlockBulkRead(frames);
@@ -1461,8 +1558,14 @@ class Gen3Driver implements DeviceDriver {
         throw new Error(`torn cab bulk read for eid ${eid}: got ${bulk.values.length} of ${bulk.itemCount} values`);
       }
       values = bulk.values;
-      const activeCh = (await this.#statusByEffectId()).get(eid)?.channel ?? 0;
-      base = this.#channelSlice(family, bulk, activeCh).base;
+      // Case (a): the dump succeeded and does not list `eid` (not placed) → channel A, the documented
+      // default. Case (b): the dump FAILED or is PARTIAL for a block we have evidence IS placed → the
+      // channel is UNKNOWN; slicing channel A here would serve another channel's cab (the old `?? 0`).
+      // Throw, exactly as the torn-read guard above does — cabStateH has no catch of its own, so the
+      // route answers non-200 rather than a fabricated cab state.
+      const chRes = this.#activeChannelOrUnknown(await this.#statusByEffectId(), eid);
+      if ('unknown' in chRes) throw new Error(`cabState eid ${eid} active channel UNKNOWN: ${chRes.unknown}`);
+      base = this.#channelSlice(family, bulk, chRes.channel).base;
     }
     // discrete params store the ordinal; if it looks 16-bit-scaled, unscale against the known max
     // (base = this channel's slice of the bulk read — cab mode/bank/IR/dyna are per-channel, like everything else on the block)
@@ -1517,7 +1620,7 @@ class Gen3Driver implements DeviceDriver {
     const g = await this.grid();
     const out: { effectId: number; slug: string; defaultId: number; defaultName: string; typeName: string; vals: Record<number, MeterVal> }[] = [];
     const dev = await this.#conn();
-    const status = await this.#statusByEffectId().catch(() => new Map<number, { bypassed: boolean; channel: number }>());
+    const status = await this.#statusByEffectId(); // `ok`/`missingPlaced` carry the outcome — not a bare map
     for (const c of g.cells) {
       if (c.isShunt) continue;
       const slug = slugForEffectId(c.effectId);
@@ -1544,8 +1647,14 @@ class Gen3Driver implements DeviceDriver {
         if (bulk.values.length < bulk.itemCount) {
           throw new Error(`torn meter bulk read for eid ${c.effectId}: got ${bulk.values.length} of ${bulk.itemCount} values`);
         }
-        const activeCh = status.get(c.effectId)?.channel ?? 0;
-        const { base } = this.#channelSlice(family, bulk, activeCh);
+        // Case (a): the dump succeeded and this cell's eid is simply not in it (not placed) → channel A,
+        // the documented default. Case (b): the dump FAILED or is PARTIAL for a block we have evidence
+        // IS placed → the channel is UNKNOWN, and slicing channel A would report ANOTHER channel's
+        // level as this block's meter (the old `?? 0`). Reject so the catch below leaves this block's
+        // vals EMPTY — an honest "no reading" — exactly as the torn-read guard above does.
+        const chRes = this.#activeChannelOrUnknown(status, c.effectId);
+        if ('unknown' in chRes) throw new Error(`meter channel UNKNOWN for eid ${c.effectId}: ${chRes.unknown}`);
+        const { base } = this.#channelSlice(family, bulk, chRes.channel);
         for (const id of wantIds) {
           // No record at that ordinal (e.g. a client-requested id past the body) is UNKNOWN, never 0.
           const raw = bulk.values[base + id];
@@ -2092,6 +2201,7 @@ class Gen3Driver implements DeviceDriver {
   }
   async selectPreset(n: number) {
     this.#gridCache = null;
+    this.#placedCache = null; // a different preset has a different placed set — the old one is not evidence
     const r = await this.#write(this.#codec.buildSwitchPresetSysEx(n));
     this.#emit({ type: 'changed', scope: 'preset' });
     return r;
@@ -2123,6 +2233,7 @@ class Gen3Driver implements DeviceDriver {
     if (dev.sendPaced) await dev.sendPaced(bytes);
     else await dev.sendQueued(bytes);
     this.#gridCache = null; // edit buffer changed → next grid/blocks read reflects it
+    this.#placedCache = null; // the placed set is a property of the (new) edit buffer, not of the old one
     return { ok: true };
   }
 
