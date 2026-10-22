@@ -57,17 +57,73 @@ const isMidiIface = (p: FractalPortInfo): boolean =>
   /if0?3\b/i.test(p.pnpId ?? '') || /MI_0?3/i.test(p.pnpId ?? '') || /if0?3\b/i.test(p.path);
 
 export type SerialPortInfo = FractalPortInfo & { fractal: boolean };
-/** Every serial port on the system (for the manual picker), with Fractal nodes flagged. */
-export async function listAllPorts(): Promise<SerialPortInfo[]> {
+
+/** Every other usbmodem callout on disk — open() retries these when the resolved node refuses. */
+function altDarwinCallouts(path: string): string[] {
+  if (process.platform !== 'darwin') return [];
   try {
-    const ports = await SerialPort.list();
-    return ports.map((p) => {
-      const info: FractalPortInfo = { path: p.path, model: FRACTAL_PIDS[(p.productId ?? '').toLowerCase()], manufacturer: p.manufacturer, vendorId: p.vendorId, productId: p.productId, pnpId: p.pnpId, friendlyName: (p as { friendlyName?: string }).friendlyName };
-      return { ...info, fractal: looksFractal(info) };
-    });
+    return readdirSync('/dev')
+      .filter((n) => n.startsWith('cu.usbmodem'))
+      .map((n) => `/dev/${n}`)
+      .filter((p) => p !== path);
   } catch {
     return [];
   }
+}
+
+/** darwin: `SerialPort.list()` reports the DIALIN node (`/dev/tty.*` — bindings-cpp's darwin_list.cpp
+ *  reads kIODialinDeviceKey), but the CALLOUT twin (`/dev/cu.*`) is the node to open: tty.* waits for
+ *  DCD and can hang a CDC link. The two numbers do not always pair for a composite device — observed
+ *  on an FM3 as dialin `tty.usbmodem104` vs callout `cu.usbmodem1104` — so when the exact twin is
+ *  missing fall back to the single usbmodem callout on disk. With more than one, leave the path alone
+ *  rather than guess at someone else's device. */
+function darwinCallout(path: string, usbmodemCallouts: readonly string[]): string {
+  if (process.platform !== 'darwin' || !path.startsWith('/dev/tty.')) return path;
+  const twin = `/dev/cu.${path.slice('/dev/tty.'.length)}`;
+  if (existsSync(twin)) return twin;
+  if (usbmodemCallouts.length === 1) return `/dev/${usbmodemCallouts[0]}`;
+  return path;
+}
+
+/** Every serial port on the system (for the manual picker), with Fractal nodes flagged. */
+export async function listAllPorts(): Promise<SerialPortInfo[]> {
+  let usbmodemCallouts: string[] = [];
+  let devNodes: string[] = [];
+  if (process.platform === 'darwin') {
+    try {
+      devNodes = readdirSync('/dev').filter((n) => n.startsWith('cu.'));
+      usbmodemCallouts = devNodes.filter((n) => n.startsWith('cu.usbmodem'));
+    } catch {
+      /* /dev unreadable — keep the listed paths as-is */
+    }
+  }
+  let ports: Awaited<ReturnType<typeof SerialPort.list>> = [];
+  try {
+    ports = await SerialPort.list();
+  } catch (e) {
+    // Never swallow this: an enumeration failure is why a picker can say "No ports found" while the
+    // app is connected. The /dev fallback below still produces a usable list on macOS.
+    console.warn(`[forgefx] SerialPort.list failed: ${(e as Error).message}`);
+  }
+  const out: SerialPortInfo[] = ports.map((p) => {
+    const info: FractalPortInfo = { path: darwinCallout(p.path, usbmodemCallouts), model: FRACTAL_PIDS[(p.productId ?? '').toLowerCase()], manufacturer: p.manufacturer, vendorId: p.vendorId, productId: p.productId, pnpId: p.pnpId, friendlyName: (p as { friendlyName?: string }).friendlyName };
+    return { ...info, fractal: looksFractal(info) };
+  });
+  // macOS: IOKit enumeration can omit (or fail on) a node that is already open by this process. The
+  // callout nodes on disk are still openable, so add any that enumeration missed — a path-only row the
+  // user can pick beats an empty dialog on a machine that is plainly talking to the unit.
+  if (process.platform === 'darwin') {
+    const seen = new Set(out.map((p) => p.path));
+    for (const n of devNodes) {
+      if (/^cu\.(Bluetooth|debug-console)/i.test(n)) continue;
+      const path = `/dev/${n}`;
+      if (seen.has(path)) continue;
+      // NOT flagged fractal: this is a filesystem-only guess (any usbmodem could be another device),
+      // and auto-detect keys on the flag — the user picks this explicitly if they need it.
+      out.push({ path, friendlyName: n.replace(/^cu\./, ''), fractal: false });
+    }
+  }
+  return out;
 }
 /** Just the Fractal serial nodes (USB VID 2466), Windows COM / macOS cu.usbmodem / Linux ttyACM. */
 export async function listFractalPorts(): Promise<FractalPortInfo[]> {
@@ -108,15 +164,20 @@ export class FractalSerial implements Transport {
   #frameHandlers = new Set<(frame: number[]) => void>();
   readonly kind = 'serial' as const;
   readonly slow = false; // USB CDC serial is a fast link
-  readonly path: string;
-  get label(): string {
-    return this.path;
+  #path: string;
+  get path(): string {
+    return this.#path;
   }
+  get label(): string {
+    return this.#path;
+  }
+  /** Messages already logged by the port error handler (log each kind once, not per frame). */
+  #reportedErrors = new Set<string>();
 
   constructor(opts: TransportOpts = {}) {
     const path = opts.path ?? autoDetectPath();
     if (!path) throw new Error('No FM3 serial port found (looked for by-id Fractal if03, then /dev/ttyACM0)');
-    this.path = path;
+    this.#path = path;
     this.#baud = opts.baudRate ?? 115200;
   }
   #baud: number;
@@ -134,12 +195,44 @@ export class FractalSerial implements Transport {
     }
   }
 
+  /** Open the resolved path; on darwin, if that node is gone or refused, try the other usbmodem callouts
+   *  before giving up. USB re-enumeration renumbers the interface suffix (`cu.usbmodem104` ↔
+   *  `cu.usbmodem1104`), so a path resolved a moment ago can already be stale — retrying costs one open
+   *  and turns a silent "device offline" into a working link. */
   async open(): Promise<void> {
     if (this.#port?.isOpen) return;
-    await new Promise<void>((resolve, reject) => {
-      const port = new SerialPort({ path: this.path, baudRate: this.#baud }, (err) => (err ? reject(err) : resolve()));
+    const candidates = [this.#path, ...altDarwinCallouts(this.#path)];
+    let lastErr: Error | null = null;
+    for (const path of candidates) {
+      try {
+        await this.#openOne(path);
+        if (path !== this.#path) {
+          console.warn(`[forgefx] serial: opened ${path} instead of ${this.#path} (the resolved node did not open)`);
+          this.#path = path;
+        }
+        return;
+      } catch (e) {
+        lastErr = e as Error;
+        // Never swallow: this single line is what tells a "Device offline" report whether the node is
+        // missing, busy, or refused.
+        console.error(`[forgefx] serial open failed ${path}: ${lastErr.message}`);
+        this.#port = null; // a failed SerialPort never opened; drop it so isOpen() stays honest
+      }
+    }
+    throw new Error(`could not open ${this.#path}${candidates.length > 1 ? ` (also tried ${candidates.slice(1).join(', ')})` : ''} — ${lastErr?.message ?? 'unknown error'}`);
+  }
+
+  #openOne(path: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const port = new SerialPort({ path, baudRate: this.#baud }, (err) => (err ? reject(err) : resolve()));
       port.on('data', (buf: Buffer) => this.#ingest(buf));
-      port.on('error', () => {});
+      // Runtime errors used to be dropped on the floor (`() => {}`); report the first of each kind once so
+      // a dying link shows up in the debug log without spamming per frame.
+      port.on('error', (err: Error) => {
+        if (this.#reportedErrors.has(err.message)) return;
+        this.#reportedErrors.add(err.message);
+        console.error(`[forgefx] serial error ${path}: ${err.message}`);
+      });
       this.#port = port;
     });
   }
