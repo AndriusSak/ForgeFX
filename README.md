@@ -1,6 +1,5 @@
 # ForgeFX
 
-[![ci](https://github.com/sKuhLight/ForgeFX/actions/workflows/ci.yml/badge.svg)](https://github.com/sKuhLight/ForgeFX/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-72a4f2?logo=ko-fi&logoColor=white)](https://ko-fi.com/R5R6223HMO)
 
@@ -13,8 +12,9 @@ The headline feature: ForgeFX decodes the **full preset live from the device** �
 routing grid, block placement, and cabling — not just a flat list of effects.
 
 > **Status:** community **beta**. The gen-3 preset/grid codec, device client, and HTTP API run
-> on **Node 20** (Fastify + the [`fractal-midi`](#credits--thanks) codec) and are hardware-verified
-> on **FM3 firmware 12.0**. Looking for field testers — see [DISCLAIMER.md](./DISCLAIMER.md).
+> on **Node 20** (Fastify + the [`forgefx-midi`](#credits--thanks) codec) and are hardware-verified
+> on **FM3 firmware 13.0**, including a serial write round-trip on a live preset. Looking for field
+> testers — see [DISCLAIMER.md](./DISCLAIMER.md).
 
 > ⚠️ **Independent, third-party project — not affiliated with or endorsed by Fractal Audio
 > Systems. Use at your own risk.** Always back up your presets. See [DISCLAIMER.md](./DISCLAIMER.md).
@@ -72,6 +72,8 @@ Resource-oriented and named. The shape:
 |------|----------|-------------|
 | System | `GET /healthz` · `GET /device` | health · model + firmware |
 | System | `GET /device/detect` | **auto-detect** the connected unit (FM3/FM9/Axe-Fx/…) |
+| System | `GET /diag` | ports, resolved transport, traffic counters, `openError` — why an open failed |
+| Definitions | `GET /device/cache` · `…/sources` · `POST …/build` · `…/cancel` · `…/import` | firmware-true block/type tables (below) |
 | Catalog | `GET /blocks` · `GET /blocks/{slug}/params` · `…/types` | block families, params, model lists |
 | Preset | `GET /preset` · `GET /preset/grid` | preset info · **decoded routing grid** |
 | Preset | `GET /preset/blocks` · `POST /preset/select` | placed blocks (pos/routing/bypass/channel) · switch preset |
@@ -107,6 +109,29 @@ curl -X PUT localhost:5056/preset/blocks/1/params/4 \   # set a GLOBAL param (sa
 Layouts and the virtual-effect map are per device (FM3/FM9/Axe-Fx III each via their `DeviceProfile`);
 the gen-3 units share the virtual effect ids. Full detail in [docs/LAYOUTS.md](docs/LAYOUTS.md).
 
+## Device definitions: firmware-true type lists
+
+Fractal's own editor writes a definitions cache when it connects
+(`effectDefinitions_11_13p0.cache` under `~/Library/Application Support/Fractal Audio/FM3-Edit/` on
+macOS). ForgeFX reads that file — or walks the unit itself — and overlays the result on the shipped
+catalog, so the type and sub-type dropdowns match the firmware instead of the wiki (which mixes III
+and FM3 lists):
+
+- `GET /device/cache` — whether a profile exists, its firmware, and the walk's progress
+- `GET /device/cache/sources` — caches the editor has already written, so one can be imported
+- `POST /device/cache/build` `{ mode?: "read-only" | "full", force?: true }` — walk the unit;
+  `full` adds the knob-taper sweep, `force` re-runs an existing profile
+- `POST /device/cache/cancel` · `DELETE /device/cache` · `POST /device/cache/import { path }`
+
+The walk streams `cacheBuild` events (phase, done/total, and queries / no-replies / mean reply time),
+so a link that is up but not answering is visible immediately rather than looking like a slow walk;
+40 consecutive unanswered queries abort it.
+
+On firmware 13.0 the FM3 moved amp 331→336, drive 86→87, chorus 18→27, renamed three reverbs at the
+same count, and grew `DISTORT_TUBETYPE` to 26 and the fuzz diode lists to 22. Those tables are
+generated into `forgefx-midi` (`FM3_TYPE_TABLES_FW13`, `FM3_ENUM_ROWS_FW13`) by
+`server/scripts/gen-fw13-types.ts`, which takes the editor cache as its input.
+
 ## Architecture
 
 | Path | What |
@@ -114,8 +139,9 @@ the gen-3 units share the virtual effect ids. Full detail in [docs/LAYOUTS.md](d
 | `server/` | Node (Fastify) HTTP API + device client. `src/index.ts` is the entry; `src/app.ts` defines the routes; per-device drivers live under `src/drivers/`. |
 | `../forgefx-midi` | the [`forgefx-midi`](#credits--thanks) codec (SysEx framing, value codecs, gen-3 preset → grid decoder) — a sibling checkout linked via `file:` and pinned in `stack.lock.json` for tag builds. |
 | `definitions/` | committed JSON data packs (block families → params, rosters, enum labels, cab IR names), loaded at runtime. |
+| `server/scripts/` | maintenance scripts: `gen-fw13-types.ts` regenerates the FM3 tables from an editor cache, `probe-fw13-cache.ts` / `what-else-differs.ts` / `diff-type-tables.ts` / `fc-enum-diff.ts` audit what a cache would change. |
 
-A web frontend, **[Axis](https://github.com/sKuhLight/Axis)**, lives in a separate repo and
+A web frontend, **[Axis](https://github.com/AndriusSak/Axis)**, lives in a separate repo and
 consumes this API — and ships a desktop app that bundles ForgeFX into one installer.
 
 ## Documentation
@@ -151,3 +177,6 @@ ForgeFX is free and open source. If it's useful to you, you can support developm
 MIT — see [`LICENSE`](./LICENSE). ForgeFX is an independent project and is **not affiliated with
 or endorsed by Fractal Audio Systems**. "Axe-Fx", "FM3", and "FM9" are trademarks of Fractal
 Audio Systems, used for identification only. See [DISCLAIMER.md](./DISCLAIMER.md).
+
+This repository is a fork of [sKuhLight/ForgeFX](https://github.com/sKuhLight/ForgeFX); upstream
+remains the origin of the project.
