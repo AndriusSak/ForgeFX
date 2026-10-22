@@ -109,6 +109,29 @@ curl -X PUT localhost:5056/preset/blocks/1/params/4 \   # set a GLOBAL param (sa
 Layouts and the virtual-effect map are per device (FM3/FM9/Axe-Fx III each via their `DeviceProfile`);
 the gen-3 units share the virtual effect ids. Full detail in [docs/LAYOUTS.md](docs/LAYOUTS.md).
 
+## Device support
+
+The handshake (`F0 00 01 74 7F 00 cs F7`) identifies a model byte; a live codec decides whether
+anything happens after that. `VERIFIED` = driven against real hardware. `SHARED` = same gen-3 codec
+and capability set as the FM3, but never plugged into this engine. `EARLY` = partial code, no
+verification. `—` = identified, then reported unsupported.
+
+| Device | Model | Codec | Grid | Status & capability notes |
+|---|---|---|---|---|
+| **FM3** | `0x11` | `fm3` | 4×12 | **VERIFIED** (fw 13.0). Per-block preset-body decode, live FC switch state (the unit never pushes panel edits, so the registry polls), self-describe walk, full taper capture, writes. |
+| **FM9** | `0x12` | `fm9` | 6×14 | SHARED. Dump, convert, self-describe walk, full capture, panel edits pushed by the unit. No per-block body decode, no live FC read — those are FM3-only. |
+| **Axe-Fx III** | `0x10` | `axe3` | 6×14 | SHARED, as FM9. Also the one unit that commonly arrives over USB-MIDI rather than a serial node. |
+| **VP4** | `0x14` | `vp4` | 4 slots | EARLY. Gen-3 codec on a linear 4-slot surface: reads work, writes gated beta. |
+| **AM4** | `0x15` | `am4` | 4 slots | PARTIAL. Own codec. Never walked for definitions (import only); FC/gen-3 profiles do not apply. |
+| **Axe-Fx II XL+** | `0x07` | `axe2` | 4×12 | EARLY. Gen-2 codec (own writes, Q8.02 values); unverified. |
+| Axe-Fx Standard / Ultra | `0x00` / `0x01` | — | — | Not supported. |
+| Axe-Fx II / II XL, FX8, FX8 II, AX8 | `0x03` / `0x06` / `0x05` / `0x0a` / `0x08` | — | — | Not supported. |
+
+Capability flags are per driver, not per model guess: `blockParamDecode`, `fullCapture`,
+`deviceEditPush`/`deviceEditWatch`, `fcLiveRead`, `selfDescribe`, `cacheImport` — see
+`Gen3Driver`'s constructor in `server/src/drivers/gen3.ts`. Family background and how to add a
+device: [docs/devices.md](docs/devices.md).
+
 ## Device definitions: firmware-true type lists
 
 Fractal's own editor writes a definitions cache when it connects
