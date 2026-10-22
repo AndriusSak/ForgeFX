@@ -35,7 +35,7 @@ import {
   reencodeRawPatch, reencodeDumpFromRawPatch,
   type DecodedBlock, type Gen3Modifier, type PerformPage, type PerPresetSwitches
 } from 'forgefx-midi/devices/gen3';
-import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
+import { SLUG_FAMILY, resolvePseudoParamControls, KNOB_UNITS, typeSelectorFor, type ServedParamRef, type DeviceProfile, type TypeModel, type DeviceLayout, type SelectorValues } from '../devices.js';
 import { ENV } from './env.js';
 import type {
   DeviceDriver, DriverCapabilities, DriverCtx,
@@ -2010,9 +2010,17 @@ class Gen3Driver implements DeviceDriver {
       // IR page, 1=DynaCab page) and RESONATOR (Manual/Chordal). Without MODE the loose /TYPE$/ match
       // below fell through to CABINET_PRETYPE, so the cab's page (and the DynaCab mic graph) flipped
       // with the unrelated PREAMP type, and the Preamp Type dropdown was hidden from the client.
-      return (defs.find((p) => p.name === `${family}_MODEL`)
-        ?? defs.find((p) => p.name === `${family}_TYPE`)
-        ?? defs.find((p) => p.name === `${family}_MODE`)
+      // MODEL / PRESETS / TYPE / BASETYPE, and the LONGEST enum wins — the same rule (and the same
+      // evidence) as `typeSelectorFor` in devices.ts, which builds the roster this ordinal indexes.
+      // Without it PLEX resolved through the /TYPE$/ fallback to `PLEX_BASETYPE` pid 0 (5 legacy
+      // algorithms) while the block's real type list is `PLEX_PRESETS` pid 90 (45) — so the served
+      // roster and the read/written param disagreed. MULTITAP is the other measured case (39 vs 6).
+      const sel = typeSelectorFor(this.#prof.params, (f, pid) => this.#prof.enumLabelsFor(f, pid))(family);
+      if (sel) return sel.paramId;
+      // MODE covers families whose layout switches on a page flag rather than a model — CABINET
+      // (0=Legacy IR page, 1=DynaCab page) and RESONATOR (Manual/Chordal); neither has a *_MODEL/
+      // *_PRESETS/*_TYPE row, so they fall through to here.
+      return (defs.find((p) => p.name === `${family}_MODE`)
         ?? defs.find((p) => p.unit === 'enum' && /TYPE$/i.test(p.name)))?.paramId;
     }
     return defs.find((p) => p.displayLabel === name || p.name === name)?.paramId;

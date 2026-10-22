@@ -55,8 +55,9 @@ const UNMOUNT_ALLOWLIST: Record<string, string> = {
   'GLOBAL/104': 'excluded as the block type/variant selector (GLOBAL_CC_BYPASS_TYPE, driver typeId)',
   'INPUT/7': 'excluded as the block type/variant selector (INPUT_TYPE, the gate-type variant)',
   'MIXER/14': 'excluded as the block type/variant selector (MIXER_MODE, the mono/stereo variant)',
-  'MULTITAP/0': 'excluded as the block type/variant selector (MULTITAP_BASETYPE, driver typeId)',
-  'PLEX/82': 'excluded as the block type/variant selector (PLEX_FILTERTYPE, driver typeId)',
+  // MULTITAP/0 and PLEX/82 were allowlisted as "the block type/variant selector". They are not: the type
+  // selector is MULTITAP_PRESETS (114) / PLEX_PRESETS (90) — the long list — so BASETYPE and FILTERTYPE are
+  // ordinary served params now.
   // — no device-true range row / degenerate row: nothing the serve layer could show without inventing a range.
   'GLOBAL/14871': 'no fn=0x1F range row in the FM3 catalog (metronome/linked global); nothing to serve',
   'GLOBAL/96': 'no fn=0x1F range row in the FM3 catalog',

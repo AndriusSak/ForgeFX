@@ -7,6 +7,8 @@ import {
   FM3_PARAMS_BY_FAMILY,
   FM3_ROSTERS,
   FM3_ENUM_OVERRIDES,
+  FM3_TYPE_TABLES_FW13,
+  FM3_ENUM_ROWS_FW13,
   FM3_CAB_IRS,
   FM3_FAMILY_BY_EFFECT_ID,
   FM3_LAYOUTS,
@@ -441,7 +443,10 @@ export const SLUG_FAMILY: Record<string, string> = {
   mixer: 'MIXER', volume: 'VOLUME', input: 'INPUT', output: 'OUTPUT', gate: 'GATE',
   synth: 'SYNTH', ringmod: 'RINGMOD', looper: 'LOOPER', resonator: 'RESONATOR',
   megatap: 'MEGATAP', tentap: 'TENTAP', plex: 'PLEX', send: 'FDBKSEND', return: 'FDBKRET',
-  multiplexer: 'MULTIPLEXER'
+  multiplexer: 'MULTIPLEXER',
+  // Display-name spellings: `/blocks/<slug>/types` is reachable by hand and by the convert flow, and
+  // the block is called "Plex Delay" everywhere the user sees it.
+  plexdelay: 'PLEX', 'plex delay': 'PLEX', multitapdelay: 'MULTITAP'
 };
 
 type ParamDef = { paramId: number; name: string; displayLabel?: string; unit?: string };
@@ -553,23 +558,44 @@ const recToLabels = (r: Record<number, string>): string[] => {
   for (const [k, name] of Object.entries(r)) out[Number(k)] = name;
   return out;
 };
-/** The family's user-facing model selector: `<FAM>_MODEL` where it exists
- *  (DELAY — `DELAY_TYPE` is the 8-value MONO/STEREO routing enum, the real
- *  model list lives on `DELAY_MODEL`; cache-confirmed FM3/FM9/III), else the
- *  `<FAM>_TYPE` param. */
-const modelSelectorPid = (params: ParamsByFamily, fam: string): number | undefined => {
+/** Selector suffixes a family may use for its type list, longest list wins (ties go to the earlier one).
+ *  Length is the discriminator because a family can carry several plausible names, and the SHORT one is
+ *  usually a legacy subset:
+ *    • PLEX — `PLEX_PRESETS` pid 90 = the 45 types (matched name-for-name against the Fractal wiki's
+ *      "Plex Delay types" list), while `PLEX_BASETYPE` pid 0 holds only the 5 legacy algorithms.
+ *    • MULTITAP — `MULTITAP_PRESETS` pid 114 = 39; `MULTITAP_BASETYPE` pid 0 = 6.
+ *    • DELAY — `DELAY_MODEL` pid 6 = 27 real models; `DELAY_TYPE` pid 7 = the 8 MONO/STEREO routing modes.
+ *    • FM9 REVERB — `REVERB_TYPE` pid 10 = 79; `REVERB_BASETYPE` pid 49 = no enum at all. */
+const TYPE_SELECTOR_SUFFIXES = ['MODEL', 'PRESETS', 'TYPE', 'BASETYPE'] as const;
+
+/** The family's type selector: `{ paramId, labels }` for the candidate with the most labels. Exported so
+ *  the driver's `#paramId(family,'type')` resolves the SAME param the roster came from — a roster of 45
+ *  read/written through a 5-value param would mislabel every type. */
+export const typeSelectorFor = (
+  params: ParamsByFamily,
+  labelsFor: (fam: string, paramId: number) => string[] | undefined
+) => (fam: string): { paramId: number; labels: string[] } | null => {
   const defs = params[fam] ?? [];
-  return (defs.find((p) => p.name === `${fam}_MODEL`) ?? defs.find((p) => p.name === `${fam}_TYPE`))?.paramId;
+  let best: { paramId: number; labels: string[] } | null = null;
+  for (const suffix of TYPE_SELECTOR_SUFFIXES) {
+    const def = defs.find((p) => p.name === `${fam}_${suffix}`);
+    if (!def) continue;
+    const labels = labelsFor(fam, def.paramId);
+    if (!labels || labels.length <= 1) continue;
+    if (!best || labels.length > best.labels.length) best = { paramId: def.paramId, labels };
+  }
+  return best;
 };
 /** FM3-style roster/labels over a family-shaped enum-override table. */
-const familyShapedRosterFor = (params: ParamsByFamily, enums: Record<string, Record<string, string[]>>) =>
-  (slug: string): TypeModel[] => {
+const familyShapedRosterFor = (params: ParamsByFamily, enums: Record<string, Record<string, string[]>>) => {
+  const selector = typeSelectorFor(params, (fam, pid) => enums[fam]?.[String(pid)]);
+  return (slug: string): TypeModel[] => {
     const fam = SLUG_FAMILY[slug.toLowerCase()];
     if (!fam) return [];
-    const pid = modelSelectorPid(params, fam);
-    const labels = pid != null ? enums[fam]?.[String(pid)] : undefined;
-    return labels ? labels.map((name, value) => ({ value, name, manufacturer: null, basedOn: null })) : [];
+    const sel = selector(fam);
+    return sel ? sel.labels.map((name, value) => ({ value, name, manufacturer: null, basedOn: null })) : [];
   };
+};
 const familyShapedEnumLabels = (enums: Record<string, Record<string, string[]>>) =>
   (family: string, paramId: number): string[] | undefined => enums[family]?.[String(paramId)];
 
@@ -582,17 +608,71 @@ const fm9EnumLabels = familyShapedEnumLabels(fm9Enums);
 // list (already the {value,name,manufacturer,basedOn} shape, so no synthesis), FM3_ENUM_OVERRIDES =
 // family → paramId → labels[], FM3_CAB_IRS = bank → IR names. ForgeFX is now a thin consumer.
 const fm3Rosters = FM3_ROSTERS as unknown as Record<string, Fm3TypeModel[]>;
-const fm3Enums = FM3_ENUM_OVERRIDES as unknown as Record<string, Record<string, string[]>>;
+/** The 12.0-era enum tables overlaid with the fw-13.0 tables harvested from the official editor cache
+ *  (see `forgefx-midi/gen3/fm3/typeTables.fw13.generated.ts`): type selectors AND the sub-type rows they
+ *  gate (tube type, drive P/N diodes). The cache's other surfaces (ranges, IR banks, PRESET/FC rows) are
+ *  NOT overlaid — they would change decode/eeprom behaviour, not just option lists. */
+const fm3Enums: Record<string, Record<string, string[]>> = (() => {
+  const base = FM3_ENUM_OVERRIDES as unknown as Record<string, Record<string, string[]>>;
+  const merged: Record<string, Record<string, string[]>> = { ...base };
+  for (const [fam, t] of Object.entries(FM3_TYPE_TABLES_FW13)) {
+    merged[fam] = { ...(base[fam] ?? {}), [String(t.paramId)]: [...t.labels] };
+  }
+  // Sub-type rows (tube type, drive P/N diodes, …) — same provenance, merged the same way. Without them
+  // a block's page offers 12.0's option list while the firmware answers with 13.0's ordinals.
+  for (const [fam, pids] of Object.entries(FM3_ENUM_ROWS_FW13)) {
+    merged[fam] = { ...(merged[fam] ?? {}) };
+    for (const [pid, labels] of Object.entries(pids)) merged[fam]![pid] = [...labels];
+  }
+  return merged;
+})();
+/** FM3_RANGES with the fw-13 enum extents applied for the rows we overlay. A type list that grew must
+ *  also widen `enumCount`/`displayMax`, because the served dropdown is bounded by the RANGE row (gen3
+ *  `#enumOptions` walks min..min+enumCount-1) while the roster is bounded by the labels: without this the
+ *  /types list showed 27 chorus types and the block's own picker still stopped at ordinal 17. Only grows. */
+const fm3Ranges: Ranges = (() => {
+  type Row = { kind?: string; displayMin: number; displayMax: number; scale?: number; enumCount?: number };
+  const src = FM3_RANGES as unknown as Record<string, Record<string, Row>>;
+  const out: Record<string, Record<string, Row>> = {};
+  for (const [fam, byPid] of Object.entries(src)) out[fam] = { ...byPid };
+  const grow = (fam: string, pid: number, n: number) => {
+    const r = out[fam]?.[String(pid)];
+    if (!r || (r.enumCount ?? 0) >= n) return; // absent row, or already wide enough — never shrink
+    // Only ENUM rows. The cache also labels a couple of continuous/bypass rows (OUTPUT_BYPASSMODE is a
+    // float row with a degenerate 0..0 span); widening those would invent slider bounds that the record
+    // never had. Their labels stay available for name lookup, their extents stay untouched.
+    if (r.kind !== 'enum') return;
+    const scale = r.scale && r.scale > 0 ? r.scale : 1;
+    out[fam]![String(pid)] = { ...r, enumCount: n, displayMax: r.displayMin + scale * (n - 1) };
+  };
+  for (const [fam, t] of Object.entries(FM3_TYPE_TABLES_FW13)) grow(fam, t.paramId, t.labels.length);
+  for (const [fam, pids] of Object.entries(FM3_ENUM_ROWS_FW13)) {
+    for (const [pid, labels] of Object.entries(pids)) grow(fam, Number(pid), labels.length);
+  }
+  return out as unknown as Ranges;
+})();
 const fm3CabIrs = FM3_CAB_IRS as unknown as Record<string, string[]>;
 const fm3Params = FM3_PARAMS_BY_FAMILY as unknown as ParamsByFamily;
 const fm3EnumRosterFor = familyShapedRosterFor(fm3Params, fm3Enums);
 function fm3RosterFor(slug: string): TypeModel[] {
   const explicit = fm3Rosters[slug.toLowerCase()] as TypeModel[] | undefined;
-  if (explicit?.length) return explicit;
-  // Fallback (mirrors fm9RosterFor/axe3RosterFor): families without a pre-baked roster still ship their
-  // sub-model list as the enum-override on the model-selector param (<FAM>_MODEL where it exists, else
-  // <FAM>_TYPE) — chorus/phaser/tremolo/filter/flanger…
-  return fm3EnumRosterFor(slug);
+  const fromEnum = fm3EnumRosterFor(slug);
+  if (!explicit?.length) {
+    // Families without a pre-baked roster ship their sub-model list as the enum override on the model
+    // selector (chorus, phaser, tremolo, filter, flanger, plex, multitap…).
+    return fromEnum;
+  }
+  // The pre-baked roster wins only while it is at least as LONG as the firmware's own list. A longer
+  // device list means the block gained types since that roster was baked (fw 13.0: amps 331 -> 336,
+  // drive 86 -> 87, chorus 18 -> 27), and serving the short one leaves the picker incomplete AND
+  // decodes the tail ordinals against the wrong length. Lineage (manufacturer/basedOn) is carried over
+  // by value, so the extra entries arrive with names only.
+  // Equal length still prefers the firmware list: fw 13.0 RENAMED three reverbs without changing the
+  // count (Asylum Hall -> Asylum, Vibrato-King -> Vibra-King), and a strict "<" test silently served the
+  // old names. Only a SHORTER enum list loses (that is the truncated-walk case the guard exists for).
+  if (fromEnum.length < explicit.length) return explicit;
+  const byValue = new Map(explicit.map((t) => [t.value, t]));
+  return fromEnum.map((t) => ({ ...t, manufacturer: byValue.get(t.value)?.manufacturer ?? null, basedOn: byValue.get(t.value)?.basedOn ?? null }));
 }
 function fm3EnumLabels(family: string, paramId: number): string[] | undefined {
   return fm3Enums[family]?.[String(paramId)];
@@ -689,7 +769,7 @@ export const PROFILES: Record<number, DeviceProfile> = {
     defaultInstances: 1,
     instanceLimits: { input: 2, output: 2, drive: 2, comp: 2, geq: 2, peq: 2, filter: 4, volume: 2, gate: 2, mixer: 4, multiplexer: 2, chorus: 2, flanger: 2, phaser: 2, rotary: 2, tremolo: 2, wah: 2, formant: 2, enhancer: 2, resonator: 2, delay: 2, multitap: 2, send: 2, return: 2 },
     params: FM3_PARAMS_BY_FAMILY as unknown as ParamsByFamily,
-    ranges: FM3_RANGES as unknown as Ranges,
+    ranges: fm3Ranges,
     rangeSections: FM3_RANGE_SECTIONS as unknown as RangeSections,
     rosterFor: fm3RosterFor, // device-true names + manufacturer + basedOn (from fractal-midi FM3_ROSTERS)
     enumLabelsFor: fm3EnumLabels,
@@ -878,7 +958,7 @@ export function runtimeProfileFrom(built: BuiltCache, staticProfile: DeviceProfi
   //   • It keeps a single, testable code path (no version parsing, no new failure mode).
   // The overrides are a SERVED diagnostic field (on the runtime profile, read by /diag and
   // /diag/ranges), never a log line alone. See OverlayOverride.
-  const isFm3StaticTable = staticProfile.ranges === (FM3_RANGES as unknown as Ranges);
+  const isFm3StaticTable = staticProfile.ranges === fm3Ranges;
   // The detector is handed the CACHE's OWN rows (not the merged map): a row the cache did not carry masks
   // nothing and must not be reported, and the comparison is against the fw-13.0 pre-overlay baseline (the
   // value a same-firmware cache is expected to hold) — not against the corrected catalogue, which would
