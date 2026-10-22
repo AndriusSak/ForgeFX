@@ -111,7 +111,11 @@ export type DeviceEvent =
    *  → 'done' (persisted) | 'cancelled' | 'error'; 'already-built' is emitted when a build was asked
    *  for but a cache already existed. `done`/`total` are the block-sweep counters; `key`/`model`/
    *  `firmware` identify the cache; `error` carries the failure message on 'error'. */
-  | { type: 'cacheBuild'; phase: 'walking' | 'building' | 'done' | 'error' | 'cancelled' | 'already-built'; done: number; total: number; key?: string; model?: number; firmware?: string; error?: string }
+  | { type: 'cacheBuild'; phase: 'walking' | 'building' | 'done' | 'error' | 'cancelled' | 'already-built'; done: number; total: number; key?: string; model?: number; firmware?: string; error?: string;
+      /** Walk liveness counters: queries issued so far, how many got NO reply (each costs the full
+       *  1 s request timeout) and the mean round-trip in ms. A healthy walk answers in single-digit
+       *  ms; a mean near 1000 means the device is not answering and the build cannot finish. */
+      queries?: number; noReply?: number; avgReplyMs?: number }
   /** A shared Axis config doc (layouts / swipe-quick-actions / tags / surface …) was written by one UI —
    *  streamed to the others so layouts/quick-actions/arrange stay in sync live, both directions. `origin` is
    *  the writer's client id so it can ignore its own echo (and not reload while it's mid-edit). */

@@ -121,17 +121,53 @@ export function adaptRequest(transport: Transport, query: Uint8Array): Promise<U
 async function runBuild(store: Store, registry: DeviceRegistry, job: CacheJob, walkImpl: WalkImpl): Promise<void> {
   const { key, model, firmware, mode, controller } = job;
   const full = mode === 'full';
+  /** FULL-mode write hooks; hoisted so the catch can still restore the preset after an abort. */
+  let write: LiveWalkWriteHooks | undefined;
   const resume = registry.pauseTelemetry(); // synchronous — telemetry is off before the first await
   registry.emitEvent({ type: 'cacheBuild', phase: 'walking', done: 0, total: 0, key, model, firmware });
   try {
     const transport = await registry.transport();
-    const adapter: LiveTransport = { request: (q) => adaptRequest(transport, q) };
+    // Liveness instrumentation. Every query costs up to the full request timeout (1 s) when the device
+    // does not answer, and the walk's absent-run guard alone is 256 queries per block over 161 blocks —
+    // so an unresponsive link parses as "taking forever" (hours) rather than as a failure. Count and
+    // report replies, and refuse to grind: 40 consecutive unanswered queries means the link is up but
+    // the self-describe traffic is not coming back.
+    const stats = { queries: 0, noReply: 0, replyMs: 0, lastEmit: 0 };
+    const emitProgress = (phase: 'walking' | 'building') => {
+      registry.emitEvent({
+        type: 'cacheBuild', phase, done: job.progress.done, total: job.progress.total,
+        key, model, firmware, queries: stats.queries, noReply: stats.noReply,
+        avgReplyMs: stats.queries > 0 ? Math.round(stats.replyMs / stats.queries) : 0
+      });
+    };
+    const adapter: LiveTransport = {
+      request: async (q) => {
+        const t0 = Date.now();
+        const reply = await adaptRequest(transport, q);
+        stats.replyMs += Date.now() - t0;
+        stats.queries += 1;
+        if (!reply) stats.noReply += 1;
+        if (stats.queries === 40 && stats.noReply === stats.queries) {
+          throw new Error(
+            'The device detected but is not answering definition queries — 40 queries sent, no replies. ' +
+            'The link is up, so this is the self-describe traffic, not the port. Try the plain read first.'
+          );
+        }
+        // Heartbeat at most 1/s: a single empty block can scan hundreds of params, and a frozen
+        // progress line is indistinguishable from a hang.
+        const now = Date.now();
+        if (now - stats.lastEmit >= 1000) {
+          stats.lastEmit = now;
+          emitProgress('walking');
+        }
+        return reply;
+      }
+    };
     // FULL mode writes: the codec BUILDS the continuous-SET frame and hands us finished bytes → we just
     // put them on the wire via the transport's serialized raw send (the same sendQueued gen-3 writes use,
     // so a SET never injects mid-read). reloadPreset re-selects the CURRENT preset through the gen-3
     // driver (fullCapture gates full mode to gen-3, so reloadPreset is present). Telemetry is already
     // paused around the whole build, so these writes are the only device traffic besides the walk queries.
-    let write: LiveWalkWriteHooks | undefined;
     if (full) {
       const driver = await registry.driver();
       write = {
@@ -148,12 +184,15 @@ async function runBuild(store: Store, registry: DeviceRegistry, job: CacheJob, w
       signal: controller.signal,
       onProgress: (p) => {
         if (controller.signal.aborted) return;
+        // Every emission carries the liveness counters so the UI can show "1/161 · 4,210 queries ·
+        // 980 ms avg" — a mean near the 1 s timeout is the honest explanation for a build that looks
+        // stuck, and it distinguishes "slow device" from "no replies at all".
         if (p.phase === 'done') {
           job.progress = { done: p.blockCount, total: p.blockCount, phase: 'building' };
-          registry.emitEvent({ type: 'cacheBuild', phase: 'building', done: p.blockCount, total: p.blockCount, key, model, firmware });
+          emitProgress('building');
         } else {
           job.progress = { done: p.blockIndex, total: p.blockCount, phase: 'walking' };
-          registry.emitEvent({ type: 'cacheBuild', phase: 'walking', done: p.blockIndex, total: p.blockCount, key, model, firmware });
+          emitProgress('walking');
         }
       }
     };
@@ -169,6 +208,16 @@ async function runBuild(store: Store, registry: DeviceRegistry, job: CacheJob, w
     const total = job.progress.total;
     registry.emitEvent({ type: 'cacheBuild', phase: 'done', done: total, total, key, model, firmware });
   } catch (e) {
+    // A full-mode walk WRITES test values into the current preset. The codec restores each swept
+    // value inline and reloads the preset at every block boundary — but an abort or a failure lands
+    // mid-block, so without this the unit is left holding swept values in an unsaved buffer.
+    if (full && write) {
+      try {
+        await write.reloadPreset();
+      } catch {
+        /* best-effort: the report below still fires */
+      }
+    }
     const phase = controller.signal.aborted ? 'cancelled' : 'error';
     registry.emitEvent({ type: 'cacheBuild', phase, done: job.progress.done, total: job.progress.total, key, model, firmware, ...(phase === 'error' ? { error: (e as Error).message } : {}) });
   } finally {
