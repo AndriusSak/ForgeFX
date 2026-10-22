@@ -171,6 +171,9 @@ export class DeviceRegistry {
   }
 
   #transport: Transport | null = null;
+  /** Why the last detect() failed (open error), or null. Served in /diag so a "Device offline" report
+   *  carries the reason instead of an empty screen: detect() used to swallow the error entirely. */
+  #lastOpenError: string | null = null;
   // Dry-run capture (docs/write-protocol.md): while a capture is active the shared transport is
   // replaced by a recording no-op, so the active driver's frames are collected instead of sent. A
   // single slot + a lock serialize captures — there is ONE exclusive device transport, so two dry runs
@@ -428,7 +431,8 @@ export class DeviceRegistry {
       // event's counters); telemetryMode surfaces the active cadence mode + its currently-active loops.
       telemetryMode: this.#telemetryMode,
       traffic: { ...this.#traffic, since: this.#trafficSince, loops: this.#activeLoops() },
-      listError
+      listError,
+      openError: this.#lastOpenError
     };
   }
 
@@ -577,8 +581,18 @@ export class DeviceRegistry {
     // FM9). The old guard used the serial-only `this.port`, which is null for a MIDI-only unit, so the
     // handshake was skipped and the profile stayed on the default model byte — the Windows Axe-Fx III
     // "device offline" bug (macOS worked only because the III also exposes a serial node there).
-    const conn = await this.#deps.resolveConn();
-    if (!conn) return { connected: false, modelId: -1, name: 'No device', short: '—', gen: 0, supported: false, capabilities: null, port: null };
+    let conn = await this.#deps.resolveConn();
+    // Startup race: IOKit/USB enumeration can come back empty for the first seconds after launch (the
+    // engine binds its port before the CDC node shows up). One shot at the wrong moment meant a single
+    // "No device" that nothing ever retried — the app sat offline until relaunched. Retry briefly.
+    for (let i = 0; i < 5 && !conn; i++) {
+      await new Promise((r) => setTimeout(r, 400));
+      conn = await this.#deps.resolveConn();
+    }
+    if (!conn) {
+      console.warn('[forgefx] detect: no connection resolved — no Fractal serial or MIDI port listed');
+      return { connected: false, modelId: -1, name: 'No device', short: '—', gen: 0, supported: false, capabilities: null, port: null };
+    }
     // Forced profile (Axis "Connection & Device" override): trust the chosen model, skip the handshake.
     // This is the MIDI-DIN→USB-adapter case — a generic MIDI interface into an FM3 won't answer the 0x7F
     // broadcast or carry a Fractal port name, so auto-detect can't ID it. We still open the transport (so a
@@ -609,6 +623,7 @@ export class DeviceRegistry {
     }
     try {
       const dev = await this.transport();
+      this.#lastOpenError = null;
       const port = this.#transport?.label ?? conn.id;
       const frames = await dev.request(buildIdentifyBroadcast(), { timeoutMs: 1500, quietMs: 60, match: (fs) => fs.some((f) => isFractalHeaderFrame(f)) });
       const f = frames.find((x) => isFractalHeaderFrame(x));
@@ -651,7 +666,10 @@ export class DeviceRegistry {
         capabilities: this.#capabilitiesDto(modelId),
         port
       };
-    } catch {
+    } catch (e) {
+      // A silent catch here produced "Device offline" with no explanation anywhere in the debug log.
+      this.#lastOpenError = (e as Error)?.message ?? String(e);
+      console.error(`[forgefx] detect failed (${conn.transport} ${conn.id}): ${this.#lastOpenError}`);
       return { connected: false, modelId: -1, name: 'No device', short: '—', gen: 0, supported: false, capabilities: null, port: this.#transport?.label ?? conn.id };
     }
   }
