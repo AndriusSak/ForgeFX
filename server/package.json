@@ -2,7 +2,7 @@
   "name": "forgefx-server",
   "version": "1.0.2",
   "private": true,
-  "description": "ForgeFX — open HTTP API for Fractal devices. Node backend powered by fractal-midi.",
+  "description": "ForgeFX \u2014 open HTTP API for Fractal devices. Node backend powered by fractal-midi.",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -49,5 +49,9 @@
   "allowScripts": {
     "@serialport/bindings-cpp@12.0.1": true,
     "esbuild@0.28.1": true
+  },
+  "overrides": {
+    "fast-uri": "^3.1.9",
+    "find-my-way": "^9.10.0"
   }
 }
