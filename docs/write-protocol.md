@@ -81,8 +81,10 @@ verdict is `{ok:true}` unconditionally — a `GLOBAL_FS_BRIGHTNESS` write sent w
   `POST /preset/store` to slot 408 drew the unit's own echo `F0 00 01 74 11 01 26 ...` **1,402 ms**
   after the request, and the edit-buffer body read back unchanged. The acknowledgement is slow — a
   fixed 250 ms window misses it, so the driver now waits for the echo and only reports a rejection on
-  a real `0x64`. Persistence across a power cycle is still unmeasured. ForgeFX never auto-saves during
-  navigation.
+  a real `0x64`. **Persistence:** after the unit was power-cycled, slot 408 read back byte-identical
+  (`sha 02433d44…`, 13,562 B), so the write reached flash and survived. Note what that does NOT prove:
+  the stored buffer was identical to the slot's previous content, so a *changed* value round-tripping
+  through flash is still unmeasured. ForgeFX never auto-saves during navigation.
 
 ## Confidence
 
