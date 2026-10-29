@@ -1,3 +1,6 @@
+// probe-fw13-cache — READ-ONLY (offline: reads a cache file given in argv, opens no port, writes nothing
+// to the device; it only rebuilds an in-memory cache and prints the comparison).
+//
 // Throwaway probe: build a BuiltCache from the editor's effectDefinitions cache and diff the type
 // selectors it reports against the shipped FM3 enum tables.
 import { readFileSync } from 'node:fs';
