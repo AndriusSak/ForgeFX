@@ -17,7 +17,7 @@ this file is the at-a-glance view. Each item links to its tracking issue.
 
 ## 🎚 Editing core
 
-- [ ] Save/store to flash + safe-edit gate — *(param/bypass/channel/grid/switch live-verified; **store live-verified on FM3 2026-10-29**: slot 408 acked fn 0x01 sub 0x26 after 1,402 ms, buffer unchanged; slot read back byte-identical after a power cycle; safe-edit gate still pending)* — [#4](https://github.com/sKuhLight/ForgeFX/issues/4)
+- [ ] Save/store to flash + safe-edit gate — *(param/bypass/channel/grid/switch live-verified; **store live-verified on FM3 2026-10-29**: slot 408 acked fn 0x01 sub 0x26 after 1,402 ms, buffer unchanged; changed-value round-trip (Bass 3.5→4.0) survived a power cycle and restored byte-identically; safe-edit gate still pending)* — [#4](https://github.com/sKuhLight/ForgeFX/issues/4)
 - [ ] Block channels A–D: full per-channel editing — *(channel switch live-verified)* — [#5](https://github.com/sKuhLight/ForgeFX/issues/5)
 - [ ] Scenes & scene leveling — [#6](https://github.com/sKuhLight/ForgeFX/issues/6)
 - [ ] Modifiers & controllers — [#7](https://github.com/sKuhLight/ForgeFX/issues/7)

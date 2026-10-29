@@ -82,9 +82,9 @@ verdict is `{ok:true}` unconditionally — a `GLOBAL_FS_BRIGHTNESS` write sent w
   after the request, and the edit-buffer body read back unchanged. The acknowledgement is slow — a
   fixed 250 ms window misses it, so the driver now waits for the echo and only reports a rejection on
   a real `0x64`. **Persistence:** after the unit was power-cycled, slot 408 read back byte-identical
-  (`sha 02433d44…`, 13,562 B), so the write reached flash and survived. Note what that does NOT prove:
-  the stored buffer was identical to the slot's previous content, so a *changed* value round-tripping
-  through flash is still unmeasured. ForgeFX never auto-saves during navigation.
+  (`sha 02433d44…`, 13,562 B). **Changed-value round-trip verified** the same day: Amp 1 → Bass 1 set
+  3.5 → 4.0 (buffer sha `fa2334f1…`), stored to 408, unit power-cycled, Bass 1 read back **4.0**;
+  setting it back to 3.5 and storing returned the slot body to the original `sha 02433d44…`. ForgeFX never auto-saves during navigation.
 
 ## Confidence
 
