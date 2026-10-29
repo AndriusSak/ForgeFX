@@ -77,9 +77,12 @@ verdict is `{ok:true}` unconditionally — a `GLOBAL_FS_BRIGHTNESS` write sent w
 - **`?dryRun=true`** on any write endpoint returns the exact frame hex **without sending** —
   use it to preview/verify before touching the device.
 - **`--writes false`** starts the server read-only; every write endpoint then returns `403`.
-- **Store is beta.** Save *persistence* is not hardware-verified on the FM3, so `POST
-  /preset/store` is flagged beta and should be confirmed on the device. ForgeFX never
-  auto-saves during navigation.
+- **Store is live-verified on the FM3 (2026-10-29) but stays beta.** Measured on an FM3:
+  `POST /preset/store` to slot 408 drew the unit's own echo `F0 00 01 74 11 01 26 ...` **1,402 ms**
+  after the request, and the edit-buffer body read back unchanged. The acknowledgement is slow — a
+  fixed 250 ms window misses it, so the driver now waits for the echo and only reports a rejection on
+  a real `0x64`. Persistence across a power cycle is still unmeasured. ForgeFX never auto-saves during
+  navigation.
 
 ## Confidence
 
