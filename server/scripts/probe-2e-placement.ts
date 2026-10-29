@@ -87,7 +87,10 @@ export async function main(argv: string[]): Promise<number> {
   const arg = (n: string): string | undefined => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
   const go = argv.includes('--go');
   const reads = Math.max(4, Number(arg('--reads') ?? 6));
-  const outdir = (arg('--outdir') ?? '/home/insn/repos/stack/review-2026-10-12').replace('~', process.env.HOME ?? '');
+  // Default to TODAY's review dir. This used to hard-code review-2026-10-12, so a later run's tap stages
+  // were filed under another day's folder and any "date the artifact" comparison would have been misled.
+  const today = new Date().toISOString().slice(0, 10);
+  const outdir = (arg('--outdir') ?? `/home/insn/repos/stack/review-${today}`).replace('~', process.env.HOME ?? '');
   if (arg('--tap')) process.env.FORGEFX_TAP = arg('--tap')!;
 
   const opened = await openProbeSession(MODEL, arg('--port'));
