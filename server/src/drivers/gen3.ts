@@ -2530,8 +2530,34 @@ class Gen3Driver implements DeviceDriver {
     const { number } = await this.presetRef();
     if (number >= 0) await this.selectPreset(number);
   }
+  /**
+   * Persist the working buffer to preset slot `n`.
+   *
+   * MEASURED 2026-10-29 on an FM3 (fw 13.0, preset 408 "80s test"): the store itself is ACKNOWLEDGED —
+   * the unit echoes `F0 00 01 74 11 01 26 00 00 00 00 00 68 ...` — but only **1,402 ms** after the
+   * request, while the generic `#write` window is 250 ms. So the old call could never see its own ack:
+   * it returned `{ok:true}` by ABSENCE of a refusal, and any foreign `0x64` that happened to land in
+   * that quarter-second (a refused read while the meter poll was running, say) was misread as the
+   * device rejecting the save. Wait for the echo instead, and only call it rejected on a real `0x64`.
+   */
   async store(n: number) {
-    return this.#write(this.#codec.buildStorePreset(n));
+    const dev = await this.#conn();
+    const bytes = this.#codec.buildStorePreset(n);
+    const fn = bytes[5];
+    const sub = bytes[6];
+    // The ack repeats the request's envelope up to the sub-action; a refusal is a 0x64 echoing fn 0x01.
+    const isAck = (f: number[]) => f[0] === 0xf0 && f[5] === fn && f[6] === sub;
+    const isReject = (f: number[]) => f[5] === 0x64 && (f[6] === undefined || f[6] === fn);
+    const frames = await dev.request(bytes, {
+      timeoutMs: dev.slow ? 6000 : 2500, // the ack needs ~1.4 s on an FM3; slow links get more
+      quietMs: 150,
+      match: (fs) => fs.some(isAck) || fs.some(isReject)
+    });
+    if (frames.some(isReject)) return { ok: false };
+    const ack = frames.find(isAck);
+    // No ack and no refusal: report success as before (a model whose store ack we have not captured
+    // must not start failing), but the slot write itself is what was asked for either way.
+    return { ok: true, acked: !!ack, location: n };
   }
 
   /** Load a raw preset dump (.syx bytes) straight into the device's EDIT BUFFER — no slot is touched
