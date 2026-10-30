@@ -132,3 +132,26 @@ plain taps. If so, a **Standard** IR export should decode as plain samples under
 above and our writer may already be correct for that subformat. That is a cheap, decisive check: export
 the same cab as `Standard` and compare entropy — a plain standard payload must show far lower entropy and
 a visible decay envelope.
+
+## 1e. The vendor pack settles it: the payload is an opaque compressed blob
+
+The owner supplied everything shipped with the cab (a working commercial IR):
+
+| file | size | what it is |
+|---|---|---|
+| `LT_TV_Mix_7.syx` | 10 345 B | vendor SysEx, model byte **0x10** (Axe-Fx II generation — not the FM3's `0x11`) |
+| `LT_TV_Mix_7.ir` | 33 460 B | Cab-Lab `.ir`: 176-byte header (name + `Copyright 2014 Fractal Audio Systems, LLC`), **32 768 bytes of payload**, then 516 bytes of zero padding |
+| `LT_TV_Mix_7.wav` ×2 | 145 KB / 1.58 MB | demo renders (0.49 s stereo, 10.9 s mono, 48 kHz/24-bit) — audio, not the IR |
+
+The `.ir` payload is **7.99 bits/byte entropy, 0.4 % zeros, byte autocorrelation −0.004** — i.e. maximal
+entropy. Raw audio of any layout (float32, int16, int24, either endianness) cannot look like that: a
+float32 cab IR has its sign/exponent bytes clustered, giving 3–4 bits/byte. So both the `.ir` master and
+the `.syx` payload are **compressed or encrypted**, and none of zlib / raw-deflate / lzma / lzma-alone /
+bzip2 decodes them at any byte offset 0–7.
+
+The FM3 export's 2 040-word payload is a different byte stream from the vendor file's (the vendor file is
+gen-2), so the two cannot be cross-fitted either.
+
+**Verdict: `LR`'s own files cannot be written by this stack.** The IR payload is a proprietary packed
+format with no public specification; it is not a `wav` conversion, not a bit-packed PCM variant, and not
+any standard container. Axis therefore cannot produce a playable IR, and says so in the UI.
