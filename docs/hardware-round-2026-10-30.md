@@ -58,3 +58,25 @@ string).
   that is documented but not wired on this build.
 - `GET /cab/slots?page=16&from=0&to=127` sweeps a full 128-slot user bank in **2.1 s** (117 free, 11
   occupied in bank 0x10), so slot inventory needs no special tool.
+
+## 1b. The encoding experiment's RESULT: both candidates are silent
+
+Auditioned in the Cab block against a control (user 1, "LT TV Mix 7", which plays normally):
+
+| slot | content | audition |
+|------|---------|----------|
+| 17 | decaying burst, float32 | **silence** |
+| 18 | same burst, int32 Q31 | **silence** |
+| 19 | impulse (1.0 at sample 0), float32 | **silence** |
+| 20 | same impulse, Q31 | **silence** |
+| 21 | comb (full-scale taps 0/220/440…), float32 | **silence** |
+| 22 | same comb, Q31 | **silence** |
+
+Every container was accepted (`closeCode 0x00`, 8/8 data acks, slot POPULATED, name read back). So
+acceptance proves arrival only — as documented — and the behavioural fact is stronger than "A1 is
+unproven": **plain samples at word 8 are not what the unit plays**, under either float32 or Q31. A comb
+IR at full scale cannot be inaudible if its words were read as samples; it is.
+
+What this rules out: the sample region is a bare run of 2040 floats (or 2040 Q31 ints) starting
+immediately after the 32-char name. What it does NOT tell us: what the region actually is — header,
+tap length, format flags, or a different packing. Only a real container settles it.
