@@ -152,6 +152,10 @@ bzip2 decodes them at any byte offset 0–7.
 The FM3 export's 2 040-word payload is a different byte stream from the vendor file's (the vendor file is
 gen-2), so the two cannot be cross-fitted either.
 
-**Verdict: `LR`'s own files cannot be written by this stack.** The IR payload is a proprietary packed
+The `.ir` header also carries `0x2000` = 8 192 at offset 0x40, matching 32 768 payload bytes / 4 — so the
+master is 8 192 32-bit words, and **every bit of it is statistically random** (ones-density 0.499, uniform
+across all 32 KiB, so not bit-plane packed either).
+
+**Verdict: the vendor's own files cannot be produced by this stack.** The IR payload is a proprietary packed
 format with no public specification; it is not a `wav` conversion, not a bit-packed PCM variant, and not
 any standard container. Axis therefore cannot produce a playable IR, and says so in the UI.
