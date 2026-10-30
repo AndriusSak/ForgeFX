@@ -234,3 +234,21 @@ Two single-sample inputs (1.0 at sample 0, and 1.0 at sample 1) were imported wi
 
 Status unchanged: UltraRes writing is not implementable from the oracle yet, and no further export will fix
 that on its own — the packing has to come out of the binary.
+
+## 1i. GLOBAL Performance page — located, written, read back (same day, later in the round)
+
+The ten *Global Performance Controls* are not in a preset: they sit in the eid-1 GLOBAL body that the
+fn-0x1F bulk poll already returns. On this unit the page is at body offset **8305** — ten effect ids,
+ten param ids, then two blocks of 16 sixteen-bit-character labels (8325 effect, 8485 param). The ids and
+the names come from separate regions that agree (five `58`s on five `"AMP"`s; pids 8/9/10/22/26 on
+Bass/Mid/Treble/Depth/Presence), which is what makes the decode a measurement rather than a fit.
+
+Write path: **ordinary pid-addressed SETs on eid 1 with pid = body index**, the same path as brightness
+(pid 7115), including the 16-bit character codes of the labels. Measured sequence: a free slot was set to
+`58/11 "AMP" "Master Vol"`, the body read back that value, and clearing it read back `0/0` with the page
+identical to how it was found. Verdicts come from re-reading the body, never from the absence of a refusal.
+
+Codec: `forgefx-midi/src/devices/gen3/globalPerform.ts` (+ a test whose fixture is a verbatim slice of the
+unit's body). Server: `GET /global/perform`, `PUT /global/perform/:slot` (gated as a device write).
+Limits: labels are 16 characters; the write is live-only (not stored to flash); the unit's own Perform
+screen was not photographed — the body is what was verified.
