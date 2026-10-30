@@ -110,3 +110,25 @@ payload is compressed or otherwise transformed, and none of the candidate raw en
 play — every arm was accepted and every arm was silent. Writing IRs needs the payload codec, which one
 specimen cannot give. The next useful artefact is a **matched pair**: the same cab exported as `.wav`
 and `.syx`, so the known audio can be fitted against the compressed bytes.
+
+## 1d. What the payload is NOT — and the strongest remaining hypothesis
+
+Exhaustive offline tests on the real export's 2 040 sample words (`/tmp/real-ir.syx`):
+
+| test | result |
+|---|---|
+| lag-1 autocorrelation (a real IR must be smooth) | 0.02 for int32, 0.01 int16-pairs, −0.01 float32, ≤0.04 for every 7-bit bitstream width 8/12/16/20/24 |
+| early-energy share (first 15 % of taps) | 9–16 % everywhere — no envelope |
+| high byte of each 32-bit word | **256 distinct values, entropy 7.91 of 8** — uniform |
+| complex-pair magnitude spectrum (1 020 re/im pairs) | magnitudes flat 0.06–1.37, correlation with index ≈ 0 |
+| deflate / raw-deflate / lzma / bzip2 on the 8 960-byte 7-bit bitstream | all fail |
+| public spec | none — Fractal's IR transport is explicitly *proprietary SysEx*, with "Standard" and "UltraRes" subformats |
+
+So the payload is compressed or otherwise transformed, and one specimen cannot give the transform.
+
+**Hypothesis worth one more export:** this slot is an **UltraRes** IR — the file's 32nd name slot carries `0xA0`
+where ours carries `0x20`, i.e. a flag bit, and UltraRes is the subformat known to store more than 2 040
+plain taps. If so, a **Standard** IR export should decode as plain samples under one of the encodings
+above and our writer may already be correct for that subformat. That is a cheap, decisive check: export
+the same cab as `Standard` and compare entropy — a plain standard payload must show far lower entropy and
+a visible decay envelope.
