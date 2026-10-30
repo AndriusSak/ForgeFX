@@ -216,3 +216,21 @@ built here is auditioned on the unit, exactly as Standard was.
 
 **Recommendation:** ship Standard writing + verbatim UltraRes passthrough (import an UltraRes `.syx` and
 re-upload it unchanged), and keep UltraRes *writing* as a separate, honest follow-up.
+
+## 1h. Impulse oracle round — what it did and did not settle
+
+Two single-sample inputs (1.0 at sample 0, and 1.0 at sample 1) were imported with UltraRes and exported.
+
+- The two exports differ in **exactly 8 bytes — words 0 and 1**. Every other word is identical, including
+  the whole 8 160-byte payload body.
+- Words 2–3 are `0xCC6765AD 0x1FA62A0E` in both, and also in both ruler exports → the payload begins with a
+  **4-word header**, of which words 0–1 vary per file and words 2–3 are constant for editor-made IRs.
+- Two IRs whose content genuinely differs cannot encode to the same body. The explanation is **Auto Trim**:
+  with it on, "impulse at 0" and "impulse at 1" both trim to one and the same IR, so only a trim/offset field
+  in the header changes. The impulse round therefore says nothing about the transform, and every future
+  positional experiment needs **Auto Trim = OFF, Min Phase = None**.
+- Ruler vs ruler-B (one sample changed, 0.75 → 0.70) differ in 1 061 bytes spread over the whole body, not in
+  one 4-byte word → the encoding is **global**, not per-sample or per-block.
+
+Status unchanged: UltraRes writing is not implementable from the oracle yet, and no further export will fix
+that on its own — the packing has to come out of the binary.
