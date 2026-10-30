@@ -81,6 +81,10 @@ Resource-oriented and named. The shape:
 | Parameters | `PUT /preset/blocks/{eid}/params/{paramId}` | set a parameter |
 | Parameters | `POST /preset/blocks/{eid}/bypass` · `…/channel` · `…/type` | bypass · channel A–D · model |
 | Cab | `GET /cab/irs` · `GET /preset/blocks/{eid}/cab` | IR names per bank · live cab state (picker) |
+| Cab | `GET /cab/slots` · `POST /cab/ir/upload` · `POST /cab/slots/clear` | per-slot state · IR upload · clear a slot |
+| Cab | `GET /cab/library` · `GET /cab/library/{id}/bytes` | IRs Axis uploaded (the only cab bytes the server holds) |
+| Performance | `GET /preset/perform` · `PUT /preset/perform/{slot}` | the preset's ten Performance controls |
+| Performance | `GET /global/perform` · `PUT /global/perform/{slot}` | the **GLOBAL** Performance page — stored in the unit's global settings, so it follows every preset; writes answer with a read-back of the eid-1 body |
 | Telemetry | `POST /tuner` · `GET\|POST /tempo` · `GET\|POST /scene` | tuner page · tempo · scene |
 | Stream | `GET /events` | live tuner/tempo/scene/state pushes (SSE) |
 | Backup | `GET /presets/{n}/backup` · `POST /presets/restore` | `.syx` download / upload |
