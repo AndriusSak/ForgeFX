@@ -80,3 +80,33 @@ IR at full scale cannot be inaudible if its words were read as samples; it is.
 What this rules out: the sample region is a bare run of 2040 floats (or 2040 Q31 ints) starting
 immediately after the 32-char name. What it does NOT tell us: what the region actually is — header,
 tap length, format flags, or a different packing. Only a real container settles it.
+
+## 1c. A real export settles the shape — and shows the payload is COMPRESSED
+
+The owner exported a working user cab from FM3-Edit: `U1.001_LT_TV_Mix_7.syx`, 10 345 bytes — the same
+size as every container this stack builds. Field by field:
+
+- model `0x11`, 10 frames, 8 data frames of 1 290 bytes, payload 10 240 bytes = 2 048 five-septet chunks;
+- **words 0..7 decode to exactly the 32-character name** `LT TV Mix 7` (the one difference from ours:
+  the 32nd slot carries `0xA0` here, `0x20` when we write it — the flag bit documented as unverified);
+- start payload `7F 7F 00 10` = the "no explicit destination" sentinel.
+
+So the container geometry, the name packing and the frame structure we build are **right**. The sample
+region is where we diverge — and it is **not raw samples**:
+
+| decoding of the 2 040 words | result |
+|---|---|
+| IEEE-754 float32 | wildly out of range (10³³–10³⁸), RMS flat across deciles |
+| int32 / 2³¹ | RMS ≈ 0.57 flat across all ten deciles — no envelope |
+| int16 pairs (LE) | RMS ≈ 0.57 flat |
+| 7-bit bitstream → 16-bit | RMS ≈ 0.57 flat, 4 480 samples |
+| 7-bit bitstream → 24-bit | RMS ≈ 0.57 flat, 2 986 samples |
+
+And the byte statistics say the same thing: **entropy 6.83 of a possible 7 bits/byte**, 1.9 % zero bytes,
+and **no silent tail** — a real 2 040-tap IR decays into zeros, a compressed stream does not. So the
+payload is compressed or otherwise transformed, and none of the candidate raw encodings can be right.
+
+**Consequence:** `convertWavToCabIr` writes a structurally valid container whose audio the unit cannot
+play — every arm was accepted and every arm was silent. Writing IRs needs the payload codec, which one
+specimen cannot give. The next useful artefact is a **matched pair**: the same cab exported as `.wav`
+and `.syx`, so the known audio can be fitted against the compressed bytes.
