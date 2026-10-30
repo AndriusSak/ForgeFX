@@ -313,6 +313,9 @@ export function createRouter(deps: RuntimeDeps): {
   });
   // Per-preset Performance Page of the CURRENT edit buffer (§2.2) — READ-ONLY (see app.ts).
   on('GET', '/preset/perform', (c) => h.performPageH(c.reply));
+  on('GET', '/global/perform', (c) => h.globalPerformH(c.reply));
+  on('PUT', '/global/perform/:slot', (c) =>
+    h.globalPerformSlotH(c.reply, Number(c.params.slot), c.body as { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } | undefined));
   // Write ONE slot of the performance page (§2.2) — the WRITE side (mirrors app.ts). Device write.
   on('PUT', '/preset/perform/:slot', (c) =>
     h.performSlotH(c.reply, Number(c.params.slot), c.body as { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } | undefined));

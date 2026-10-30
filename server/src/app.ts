@@ -80,7 +80,7 @@ export async function buildApp(
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes, performPageH, performSlotH, perPresetSwitchesH, perPresetSwitchH
+    decodeH, decodeBytes, performPageH, performSlotH, globalPerformH, globalPerformSlotH, perPresetSwitchesH, perPresetSwitchH
   } = createUnifiedHandlers(registry);
 
   // ── write-safety gates (docs/write-protocol.md:37-39 is the authority; Axis/docs/ROADMAP.md is
@@ -265,6 +265,12 @@ export async function buildApp(
   // controls (effectId/paramId + their labels) decoded from one preset dump. 501 when the device
   // can't; a slot with effectId 0 is UNASSIGNED and its label text is stale (see the codec).
   app.get('/preset/perform', (_req, reply) => performPageH(reply));
+  // GLOBAL Performance page (stored in GLOBAL settings, not the preset): read + one-slot write.
+  app.get('/global/perform', (_req, reply) => globalPerformH(reply));
+  app.put<{ Params: { slot: string }; Body: { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string } }>(
+    '/global/perform/:slot',
+    async (req, reply) => globalPerformSlotH(reply, Number(req.params.slot), req.body)
+  );
   // Write ONE slot of the same page (§2.2) — the page's WRITE side. Patches the slot's ids AND labels
   // together and sends the recompressed dump to the EDIT BUFFER (transient; nothing is saved). A device
   // write: gated by --writes/read-only and honouring ?dryRun=true. `ok` is the driver's READ-BACK

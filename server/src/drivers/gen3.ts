@@ -19,6 +19,14 @@ import {
   buildLooperControl,
   type ModernFractalCodec
 } from 'forgefx-midi/gen3/axe-fx-iii';
+import {
+  findGlobalPerformPage,
+  globalPerformSlotRecords,
+  encodeLabel16,
+  GLOBAL_PERFORM_LABEL_CHARS,
+  type GlobalPerformPage,
+  type GlobalPerformSlot
+} from 'forgefx-midi/devices/gen3';
 import { displayToWire, wireToDisplay } from 'forgefx-midi/shared';
 import {
   parsePresetDump, decodeRawPatch, decodeGen3Body,
@@ -83,6 +91,7 @@ const BLOCK_META: Record<string, { name: string; page: number }> = (() => {
 })();
 
 const EDIT_BUFFER = 0x3fff; // preset number sentinel = current edit buffer
+const GLOBAL_EID = 1; // the GLOBAL settings block (§GLOBAL perform page, brightness/pid 7115)
 
 // ── preset-dump decode (forgefx-midi devices/gen3 pipeline) ──
 // Adapter producing the exact DTO the pre-Phase-4 server-local codec (fm3PresetGrid.ts
@@ -644,6 +653,79 @@ class Gen3Driver implements DeviceDriver {
     const parsed = parsePresetDump(dumpBytesFromFrames(frames), 0, this.#prof.model);
     const { body } = decodeRawPatch(parsed.chunkPayloads);
     return parsePerformPage(body);
+  }
+
+  /** GLOBAL PERFORMANCE PAGE — the ten controls stored in the GLOBAL settings rather than the preset.
+   *  MEASURED 2026-10-30: the page lives inside the eid-1 fn-0x1F bulk body and decodes at its label
+   *  anchor (see forgefx-midi globalPerform.ts). READ-ONLY: one bulk poll, no writes. */
+  async globalPerform(): Promise<GlobalPerformPage | undefined> {
+    return findGlobalPerformPage(await this.#globalBody());
+  }
+
+  /** The eid-1 GLOBAL body (14 880 16-bit records on the FM3) — one bulk poll, no writes. */
+  async #globalBody(): Promise<number[]> {
+    const dev = await this.#conn();
+    const frames = await dev.request(this.#codec.buildBlockBulkReadPoll(GLOBAL_EID), {
+      timeoutMs: 2500,
+      quietMs: 120,
+      match: (fs) => fs.some((f) => f[5] === 0x76)
+    });
+    return this.#codec.assembleGen3BlockBulkRead(frames).values;
+  }
+
+  /** Write ONE slot of the GLOBAL PERFORMANCE PAGE. MEASURED ON HARDWARE 2026-10-30: the id records and
+   *  the 16-bit-character label records are ordinary pid-addressed SETs on eid 1 (pid = body index), so a
+   *  slot is written as up to 2 id writes + up to 32 character writes. `ok` is a READ-BACK verdict against
+   *  the body that was just written — never the absence of a refusal. Nothing is stored to flash. */
+  async setGlobalPerformSlot(
+    slot: number,
+    patch: { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string }
+  ): Promise<{ ok: boolean; slot: number; reason?: string; readback?: GlobalPerformSlot }> {
+    const body = await this.#globalBody();
+    const page = findGlobalPerformPage(body);
+    if (!page) return { ok: false, slot, reason: 'no-page' };
+    const rec = globalPerformSlotRecords(page, slot);
+    if (!rec) return { ok: false, slot, reason: 'slot-out-of-range' };
+    const cur = page.slots[slot]!;
+    const want = {
+      effectId: patch.effectId ?? cur.effectId,
+      paramId: patch.paramId ?? cur.paramId,
+      effectLabel: patch.effectLabel ?? cur.effectLabel,
+      paramLabel: patch.paramLabel ?? cur.paramLabel
+    };
+    const writes: Array<[number, number]> = [];
+    if (body[rec.effectId] !== want.effectId) writes.push([rec.effectId, want.effectId]);
+    if (body[rec.paramId] !== want.paramId) writes.push([rec.paramId, want.paramId]);
+    const chars = [
+      ...encodeLabel16(want.effectLabel).map((c, i) => [rec.effectLabel + i, c] as [number, number]),
+      ...encodeLabel16(want.paramLabel).map((c, i) => [rec.paramLabel + i, c] as [number, number])
+    ];
+    for (const [idx, val] of chars) if (body[idx] !== val) writes.push([idx, val]);
+
+    for (const [idx, val] of writes) {
+      const r = await this.setParam(GLOBAL_EID, idx, val, false);
+      if (!r.ok) return { ok: false, slot, reason: `refused-at-${idx}` };
+    }
+    // READ-BACK: the body is an independent path from the write, so this is a real verdict.
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await this.#globalBody();
+    const idsOk = after[rec.effectId] === want.effectId && after[rec.paramId] === want.paramId;
+    const labelsOk =
+      encodeLabel16(want.effectLabel).every((c, i) => after[rec.effectLabel + i] === c) &&
+      encodeLabel16(want.paramLabel).every((c, i) => after[rec.paramLabel + i] === c);
+    if (!idsOk || !labelsOk) {
+      return { ok: false, slot, reason: idsOk ? 'label-readback-mismatch' : 'id-readback-mismatch' };
+    }
+    return {
+      ok: true,
+      slot,
+      readback: {
+        effectId: after[rec.effectId]!,
+        paramId: after[rec.paramId]!,
+        effectLabel: want.effectLabel,
+        paramLabel: want.paramLabel
+      }
+    };
   }
 
   /** The shared read-modify-write spine of the preset-body writers (§2.2's perform page, §3.8's switch

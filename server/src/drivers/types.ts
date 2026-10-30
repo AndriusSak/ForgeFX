@@ -6,6 +6,7 @@ import type { DecodedBlock, PerformPage, PerformSlot, PerPresetSwitch, PerPreset
 import type { TypeModel, DeviceLayout, DeviceProfile } from '../devices.js';
 import type { Transport } from '../transport/types.js';
 import type { TelemetryMode, CadenceProfile } from './telemetryProfiles.js';
+import type { GlobalPerformPage, GlobalPerformSlot } from 'forgefx-midi/devices/gen3';
 
 /** One decoded modifier assignment from a gen-3 preset body: a modulation SOURCE routed onto a
  *  target block parameter. `targetEffectId` is resolved from the preset's placed grid (null when the
@@ -431,6 +432,13 @@ export interface DeviceDriver {
    *  Patches the slot's ids AND its labels together (labels alone go stale) and sends the recompressed
    *  dump to the EDIT BUFFER (0x3FFF): transient, never a saved slot. Gen-3 only. */
   setPerformSlot?(slot: number, patch: PerformSlotPatch): Promise<PerformSlotWriteResult>;
+  /** GLOBAL PERFORMANCE PAGE (seen at GET /global/perform). READ-ONLY: one eid-1 bulk poll. */
+  globalPerform?(): Promise<GlobalPerformPage | undefined>;
+  /** Write ONE slot of the GLOBAL page. `ok` is a READ-BACK verdict against the body. */
+  setGlobalPerformSlot?(
+    slot: number,
+    patch: { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string }
+  ): Promise<{ ok: boolean; slot: number; reason?: string; readback?: GlobalPerformSlot }>;
   /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — one row per switch with its action
    *  code and target index; `undefined` when the body has no block (never a synthesised one). Gen-3 only.
    *  NOTE: rows are reported per OBSERVED offset — PP#1 has both, PP#2 its action code only, and the rest

@@ -39,6 +39,8 @@ const DEVICE_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['POST', '/preset/restore'],
   // per-preset Performance Page write (§2.2) — mutates the unit's EDIT BUFFER (transient, but a write)
   ['PUT', '/preset/perform/:slot'],
+  // global Performance page write — pid-addressed SETs on eid 1 (MEASURED 2026-10-30), a device write
+  ['PUT', '/global/perform/:slot'],
   // per-preset switch write (§3.8) — same edit-buffer target
   ['PUT', '/preset/switches/:index'],
   // user-cab IR upload writes to the unit's cab storage (§2.5) — a device write, so a read-only

@@ -609,6 +609,42 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
   };
 
+  /** GLOBAL PERFORMANCE PAGE (stored in the GLOBAL settings, not the preset) — READ-ONLY, one eid-1 bulk
+   *  poll. `undefined` (no page) is coerced to null so both surfaces answer parseable JSON. */
+  const globalPerformH = async (reply: StatusSink) => {
+    const d = await driver();
+    if (!d.globalPerform) return unsupported(reply, 'globalPerform');
+    try { return (await d.globalPerform()) ?? null; }
+    catch (e) { reply.code(503); return { error: (e as Error).message }; }
+  };
+
+  /** Write ONE slot of the GLOBAL page — the WRITE side. Slot is 0..9 (the page's ten controls, 0-based as
+   *  the body stores them); at least one patch field is required. `ok` is the driver's READ-BACK verdict, so
+   *  an ignored write answers {ok:false, reason} rather than a false 200. */
+  const globalPerformSlotH = async (
+    reply: StatusSink,
+    slot: number,
+    b?: { effectId?: number; paramId?: number; effectLabel?: string; paramLabel?: string }
+  ) => {
+    if (!Number.isInteger(slot) || slot < 0 || slot > 9) {
+      reply.code(400); return { ok: false, error: 'slot must be an integer 0..9' };
+    }
+    const p = b ?? {};
+    if (p.effectId === undefined && p.paramId === undefined && p.effectLabel === undefined && p.paramLabel === undefined) {
+      reply.code(400); return { ok: false, error: 'at least one of effectId, paramId, effectLabel, paramLabel is required' };
+    }
+    if ((p.effectId !== undefined && !isEid(p.effectId)) || (p.paramId !== undefined && !isEid(p.paramId))) {
+      reply.code(400); return { ok: false, error: 'effectId/paramId must be integers 0..16383' };
+    }
+    if ((p.effectLabel !== undefined && typeof p.effectLabel !== 'string') || (p.paramLabel !== undefined && typeof p.paramLabel !== 'string')) {
+      reply.code(400); return { ok: false, error: 'effectLabel/paramLabel must be strings' };
+    }
+    const d = await driver();
+    if (!d.setGlobalPerformSlot) return unsupported(reply, 'setGlobalPerformSlot');
+    try { return await d.setGlobalPerformSlot(slot, p); }
+    catch (e) { reply.code(503); return { ok: false, error: (e as Error).message }; }
+  };
+
   /** Per-preset SWITCH definitions of the CURRENT edit buffer (§3.8) — READ-ONLY, one preset dump.
    *  `undefined` (no block in the body) is coerced to null so both surfaces answer a JSON body. */
   const perPresetSwitchesH = async (reply: StatusSink) => {
@@ -674,6 +710,6 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
     backupH, restoreH, fwValidateH, deviceParamH, modModelH,
     telemetryConfigH, telemetrySetH,
     channelH, typeH, gridCellH, gridCableH, gridSelectH, tempoH, sceneNameH, presetRenameH, modBindH,
-    decodeH, decodeBytes, performPageH, performSlotH, perPresetSwitchesH, perPresetSwitchH
+    decodeH, decodeBytes, performPageH, performSlotH, globalPerformH, globalPerformSlotH, perPresetSwitchesH, perPresetSwitchH
   };
 }
