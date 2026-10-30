@@ -187,3 +187,32 @@ the bytes (the close check only XORs content) and played nothing.
 
 Code: `forgefx-midi` `9d38724` (builder emits the NUL terminator, encoding marked measured, status text
 rewritten, parser trims the terminator). Slots 13–22 were cleared afterwards.
+
+## 1g. UltraRes writing — reverse-engineering status (open)
+
+Goal: produce the UltraRes payload ourselves so Axis can write UltraRes, not just Standard.
+
+**Oracle facts already in hand** (from the same ruler experiment):
+- deterministic (two exports of one input: 0 differing bytes), so the encoder is a pure function;
+- fixed size: 2040 words, always 8 160 bytes, even for a 90 %-silent input → no compression gain;
+- entropy 7.98 bits/byte, 256 distinct byte values, no 1 KiB block deviates;
+- a one-sample input change moves **13 % of bytes**, in runs at byte offsets 0, 256, 512, 1024, 1536 and a
+  562-byte run in the middle — diffusion without avalanche, i.e. a transform, not a block cipher;
+- UltraRes payload vs the Standard float32 payload of the same input: not a byte permutation and not a
+  fixed XOR mask (multisets differ; XOR is 99.7 % non-zero and full-range).
+
+**Static analysis done** (Ghidra 12.2 headless, JDK 25, both installed under `~/re/ghidra-tools`, project
+`~/re/ghidra-tools/proj/FM3` with `FM3-Edit.exe` imported, full auto-analysis, 244 s):
+- the editor is a 19.3 MB native x64 Qt build, no symbols, no PDB — RTTI is present but names are stripped;
+- geometry-constant scan over 1 388 203 instructions: 195 functions touch 2040/8160/8192/2048;
+  `FUN_140222c60` (2040 ×8) sits in a worker-thread dispatcher, `FUN_140321670` uses 1020/1024/8192 with a
+  892-double stack array — the shape of an FFT/transform stage, which matches the measured diffusion;
+- `"UltraRes: "` has one code reference (`FUN_14018e790`); the `cabir_import` / `TERROR_UNCOMPRESSION_FAILED`
+  strings are QString literals with no resolved xref, so they need QString-constructor tracing, not string xrefs.
+
+**What is left:** identify the packing of the transform output (how 2040 numbers become 8160 uniform bytes),
+then reimplement. That is the hard half and it is not done — do not claim UltraRes support until a container
+built here is auditioned on the unit, exactly as Standard was.
+
+**Recommendation:** ship Standard writing + verbatim UltraRes passthrough (import an UltraRes `.syx` and
+re-upload it unchanged), and keep UltraRes *writing* as a separate, honest follow-up.
