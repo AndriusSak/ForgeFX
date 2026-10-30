@@ -272,6 +272,28 @@ async function noSelfDescribe(): Promise<void> {
   }
 }
 
+// ── 5c. nothing answers → 503 "no device detected", never the 501 capability shape ──
+// The distinction matters to the operator: 501 says "this unit can't do it", 503 says "nothing is
+// talking to me". A silent link reported as a capability gap sends them looking for the wrong fault.
+async function silentLink(): Promise<void> {
+  const mock = new MockTransport('serial', 'mock-silent');
+  mock.reply = () => [];
+  const registry = __createRegistryForTest({
+    resolveConn: async () => ({ transport: 'serial', id: mock.label }),
+    openConn: () => mock
+  });
+  await registry.detect().catch(() => null);
+  const app = await buildApp(registry);
+  try {
+    const r = await deviceCache.startCacheBuild(store.defaultStore, registry);
+    assertEqual(r.code, 503, 'no driver → 503');
+    assertEqual((r.body as { error?: string }).error, 'no device detected', '503 says nothing answered');
+    assertEqual((r.body as { capability?: string }).capability, 'device', '503 names the missing thing: the device');
+  } finally {
+    await app.close();
+  }
+}
+
 // ── 6. FULL-mode build (WP3b) — a seeded gen-3-style fake so we can vary fullCapture and spy the
 //    reloadPreset re-select without scripting the real preset-name / preset-switch wire protocol. ──
 function gen3FakeCaps(over: Partial<DriverCapabilities>): DriverCapabilities {
@@ -397,6 +419,7 @@ export async function runDeviceCacheTests(): Promise<void> {
   await cacheHitAndRuntimeProfile();
   await concurrentBuild();
   await noSelfDescribe();
+  await silentLink();
   await fullBuildWithHooks();
   await fullWithoutCapability();
   await replyMatcher();

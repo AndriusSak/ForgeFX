@@ -284,6 +284,7 @@ const EXPECTED_DEVICE_WRITES: Array<[string, string]> = [
   ['POST', '/preset/load'],
   ['POST', '/preset/restore'],
   ['PUT', '/preset/perform/:slot'],
+  ['PUT', '/global/perform/:slot'],       // the GLOBAL page: stored in the unit's settings, follows every preset
   ['PUT', '/preset/switches/:index'],
   ['POST', '/cab/ir/upload'],
   ['POST', '/cab/slots/clear'],

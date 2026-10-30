@@ -85,6 +85,7 @@ const DEVICE_WRITES: Record<string, Spec> = {
   'POST /preset/restore': { url: '/preset/restore', body: { bytes: [0xf0, 0x11, 0xf7] }, preview: false },
   // ── read-modify-write writes: NOT_DRY_RUNNABLE — must be the exact 400 unsupported ──
   'PUT /preset/perform/:slot': { url: '/preset/perform/1', body: { effectId: 62 }, preview: false },
+  'PUT /global/perform/:slot': { url: '/global/perform/1', body: { effectId: 62 }, preview: false },
   'PUT /preset/switches/:index': { url: '/preset/switches/1', body: { actionCode: 1 }, preview: false },
   // ── cab writes ──
   // The IR upload is ACK-backed; the capture transport answers no ACKs, so only the PARSE refusal is

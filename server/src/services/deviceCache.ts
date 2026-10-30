@@ -276,9 +276,13 @@ export async function cacheStatus(store: Store, registry: DeviceRegistry): Promi
  *  immediately; the build runs detached. `mode` (default 'read-only') selects the HW-proven read-only
  *  sweep or the fullCapture-gated write-sweep. `walkImpl` is a test seam (defaults to the codec's liveWalk). */
 export async function startCacheBuild(store: Store, registry: DeviceRegistry, opts?: { force?: boolean; mode?: BuildMode; walkImpl?: WalkImpl }): Promise<StartResult> {
-  await registry.driver(); // ensure detection ran
+  // Ensure detection ran. A driver that fails to materialise is NOT the same answer as a device that
+  // materialised and cannot self-describe: the first means nothing is answering on the link, and
+  // reporting it as "unsupported" sends the operator looking for a capability that was never the issue.
+  await registry.driver().catch(() => null);
   const caps = registry.activeCapabilities();
-  if (!caps?.selfDescribe) return { code: 501, body: { error: 'unsupported', capability: 'selfDescribe' } };
+  if (!caps) return { code: 503, body: { error: 'no device detected', capability: 'device' } };
+  if (!caps.selfDescribe) return { code: 501, body: { error: 'unsupported', capability: 'selfDescribe' } };
   const mode: BuildMode = opts?.mode === 'full' ? 'full' : 'read-only';
   // FULL-mode write-sweep is gated on the CaptureRig-proven fullCapture cap (gen-3 trio only). Mirror the
   // selfDescribe 501 shape so Axis handles both gates identically.
