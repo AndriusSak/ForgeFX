@@ -159,3 +159,31 @@ across all 32 KiB, so not bit-plane packed either).
 **Verdict: the vendor's own files cannot be produced by this stack.** The IR payload is a proprietary packed
 format with no public specification; it is not a `wav` conversion, not a bit-packed PCM variant, and not
 any standard container. Axis therefore cannot produce a playable IR, and says so in the UI.
+
+## 1f. RESOLVED — the codec is plain float32, and the format bit was the bug
+
+The owner ran a controlled experiment: a ruler WAV (impulses of +1.0/−0.5/+0.25/−0.125/+0.0625/−1.0/+0.5/−0.25/
++0.125 at samples 0/64/128/256/384/512/768/1024/1536, a 1 kHz 3-cycle burst at 1800–1943, and +0.75 at 2000,
+exact zeros elsewhere) imported through FM3-Edit and exported in four variants.
+
+| export | result |
+|---|---|
+| slot 13 (UltraRes) vs slot 14 (same input) | **0 differing bytes** — the encoder is deterministic; no per-file IV |
+| slot 15 (Standard) | 92.7 % zeros, entropy 0.74 → **2040 little-endian IEEE-754 float32 samples**, every impulse back at its exact position and sign, uniformly scaled by 0.363457 (the editor's import normalisation) |
+| slot 16 (one sample changed, 0.75 → 0.70) | 13 % of bytes differ, not an avalanche — the UltraRes path transforms; nothing like a block cipher |
+| UltraRes payload | still 7.98 bits/byte on a 90 %-silent input → opaque, **not writable** |
+
+So `float32` was right all along. What broke every earlier container was **the format bit in the 32nd name
+slot**: a Standard IR carries `0x80` (NUL + flag), an UltraRes IR carries `0xA0` (space + flag). Ours wrote
+`0xA0` while carrying raw samples, i.e. it declared UltraRes and shipped Standard data — the unit accepted
+the bytes (the close check only XORs content) and played nothing.
+
+**Verification, both directions:**
+- rebuilding a container from export 15's own words with `buildCabIrContainerFromWords` reproduces that file
+  **byte-for-byte**, except the `0x7A` destination field (the export writes the `7F 7F` sentinel);
+- a container built here from the ruler WAV (`user 17`, name `LYKOS OURS`) uploaded with `closeCode 0x00`
+  and all 8 data acks, then **auditioned on the unit: it plays**, slightly louder than the editor's own
+  copy because the editor normalises on import and we do not.
+
+Code: `forgefx-midi` `9d38724` (builder emits the NUL terminator, encoding marked measured, status text
+rewritten, parser trims the terminator). Slots 13–22 were cleared afterwards.
