@@ -15,8 +15,8 @@
 // WHAT IT DOES NOT CLAIM: that the upload "worked" beyond the unit's own acks and the slot-state flag.
 // The only oracle for encoding is a person listening through the Cab block.
 //
-//   npx tsx scripts/probe-ir-encoding.ts ~/.hermes/cache/scratch/lykos-test-ir.wav 17 18        # dry run
-//   npx tsx scripts/probe-ir-encoding.ts ~/.hermes/cache/scratch/lykos-test-ir.wav 17 18 --go
+//   npx tsx scripts/probe-ir-encoding.ts /tmp/test-ir.wav 17 18        # dry run
+//   npx tsx scripts/probe-ir-encoding.ts /tmp/test-ir.wav 17 18 --go
 // ────────────────────────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'node:fs';
 import { convertWavToCabIr, ASSUMED_FLOAT32_ENCODING, parseCabIrSyx, type CabIrSampleEncoding } from 'forgefx-midi/devices/gen3/cabIrConvert';
