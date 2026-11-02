@@ -103,9 +103,15 @@ a faithful editor without hardcoding labels or screens.
   ride the same `(effectId, paramId)` path as audio blocks, so they're read/written through the
   same endpoints — addressed by a reserved effect id: **GLOBAL/Setup = `1`, Controllers = `2`,
   Modifier = `3`, FC = `199`.** "Setup" is just the block editor pointed at effect id `1`.
+- 🎚 **Read-only GLOBAL read.** `GET /global/params` returns the GLOBAL block (eid 1) **without moving
+  the device-edit watch**. Reading a block through `blockParams(eid)` makes it the target the unit's
+  front-panel poll re-reads, so a client that needs a global value while a *different* block is open
+  (the metronome lives in GLOBAL but is drawn on the Controllers screen) would otherwise steal the
+  poll. The opt-in is `blockParams(eid, { watch: false })`; the default is unchanged.
 
 ```sh
 curl localhost:5056/preset/blocks/1/params              # Setup (GLOBAL) params + the Setup pages
+curl localhost:5056/global/params                       # GLOBAL params, read-only (watch untouched)
 curl -X PUT localhost:5056/preset/blocks/1/params/4 \   # set a GLOBAL param (same write path)
   -H 'content-type: application/json' -d '{ "value": 0.5, "continuous": true }'
 ```

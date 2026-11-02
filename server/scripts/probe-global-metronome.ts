@@ -2,11 +2,15 @@
 // body through the REAL driver's blockParams(1) and print what the server would serve for the metronome
 // pids. Nothing is sent to a unit; the transport is a mock.
 //
-//   npx tsx scripts/probe-global-metronome.ts /tmp/global-body.json [--json /tmp/global-params.json]
+//   npx tsx scripts/probe-global-metronome.ts [capture.json] [--json out.json]
+//
+// The default capture is the committed fixture (test/fixtures/global-body/fm3-eid1-2026-10-30.json,
+// 14 880 records off the unit), so this runs with no arguments and no device.
 //
 // `--json` writes the WHOLE served BlockParams payload, which is what the Axis UI check feeds to
 // GET /global/params so the Controllers → Metronome section can be exercised without a unit.
 import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { PROFILES } from '../src/devices.js';
 import { createGen3Driver } from '../src/drivers/gen3.js';
 import { cadenceFor } from '../src/drivers/telemetryProfiles.js';
@@ -31,7 +35,10 @@ function blockBulkFrames(eid: number, values: readonly number[]): number[][] {
 }
 
 async function main(): Promise<number> {
-  const path = process.argv[2] ?? '/tmp/global-body.json';
+  const argPath = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : null;
+  const path =
+    argPath ??
+    fileURLToPath(new URL('../test/fixtures/global-body/fm3-eid1-2026-10-30.json', import.meta.url));
   const cap = JSON.parse(readFileSync(path, 'utf8')) as { itemCount: number; values: number[] };
   const profile = PROFILES[MODEL]!;
   const codec = createModernFractalCodec(profile.model);

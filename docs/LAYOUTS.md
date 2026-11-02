@@ -105,6 +105,25 @@ curl -X PUT localhost:5056/preset/blocks/1/params/4 \
 
 Discrete (enum) writes send the ordinal with `"continuous": false`, exactly as for audio blocks.
 
+### Reading GLOBAL without stealing the device-edit watch
+
+`blockParams(eid)` does two things: it reads the block, and it records that block as the one the
+**device-edit poll** re-reads. That second half is what makes front-panel edits show up in the client —
+and it is also a trap for a read-only consumer. A client that needs a GLOBAL value while a *different*
+block is open (the metronome lives in GLOBAL/eid 1 but is drawn on the Controllers screen, eid 2) would
+move the poll off the block the user is editing.
+
+`GET /global/params` is that read without the side effect:
+
+```sh
+curl localhost:5056/global/params     # GLOBAL params, read-only — the watch is untouched
+```
+
+It is the same eid-1 bulk poll and the same decode as `GET /preset/blocks/1/params`; the only
+difference is `blockParams(1, { watch: false })`. The option is opt-in: omitted or `true` keeps the
+historical behaviour, so no existing caller changes. Use it for any read-only consumer of a block the
+user does not have open.
+
 ## Multi-device
 
 Layouts and the virtual-effect map are per device, supplied by the `DeviceProfile`:
