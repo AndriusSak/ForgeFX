@@ -1139,8 +1139,11 @@ class Gen3Driver implements DeviceDriver {
    * (knob position); `value`/`unit` are the device-true DISPLAY reading via this.#prof.ranges
    * (e.g. 1.2k Hz, -12 dB) where the cache has a range, else the 0..10 position.
    */
-  async blockParams(eid: number): Promise<{ block: string; slug: string; page: number; named: NamedParam[]; enums: EnumParam[]; type: { value: number; name: string } | null; layout?: DeviceLayout }> {
-    this.#watchedEid = eid; // this is the block the user has open → the target the FM3 device-edit poll re-reads
+  async blockParams(eid: number, opts?: { watch?: boolean }): Promise<{ block: string; slug: string; page: number; named: NamedParam[]; enums: EnumParam[]; type: { value: number; name: string } | null; layout?: DeviceLayout }> {
+    // this is the block the user has open → the target the FM3 device-edit poll re-reads. A read-only
+    // consumer (the Controllers screen's metronome section reads GLOBAL/eid 1 while Controllers/eid 2
+    // is open) passes `watch: false` so it does not move the front-panel poll off the open block.
+    if (opts?.watch !== false) this.#watchedEid = eid;
     const codecSlug = slugForEffectId(eid) ?? ''; // audio blocks resolve via the codec
     // virtual effects (GLOBAL=1, Controllers=2, Modifier=3, FC=199) resolve via the profile's effectId map
     const family = SLUG_FAMILY[codecSlug.toLowerCase()] ?? this.#prof.familyForEffectId(eid);

@@ -35,8 +35,11 @@ const GLOBAL_STRIDE = PROFILES[MODEL]!.rangeSections['GLOBAL']!.stride; // 186 (
 const DEVICE_BODY_LEN = 14880;
 /** Panel-oracle records (raw 16-bit, 65534 = 100%): the values the device returned for three controls. */
 const ORACLE = { bright7115: 45874, contrast7116: 32767, ring110: 65534 };
+/** The METRONOME records, verbatim from a real captured eid-1 body (2026-10-30, 14 880 records):
+ *  Output 1 = -5.0 dB, Output 2 = 0.0 dB, USB/Digital = 0.0 dB, Metronome OFF, Metronome CC = NONE. */
+const METRONOME = { metlevel1: 38228, metlevel2: 43689, metlevel3: 43689, metronome: 0, metronomeCc: 128 };
 
-export const GLOBAL_BULK_READ_CASE_COUNT = 7;
+export const GLOBAL_BULK_READ_CASE_COUNT = 9;
 
 const compactHex = (f: readonly number[]) => f.map((b) => b.toString(16).padStart(2, '0')).join('');
 const enc14 = (v: number): [number, number] => [v & 0x7f, (v >> 7) & 0x7f];
@@ -53,6 +56,12 @@ function body(values: readonly number[]): number[] {
   return sysex(0x75, b);
 }
 const end = () => sysex(0x76, []);
+/** The eid a fn-0x1F block-bulk-read POLL addresses (payload bytes 0-1), or null for any other frame.
+ *  Measured frame shape: f0 00 01 74 <model> 1f <eidLo> <eidHi> <cs> f7. */
+function polledEid(f: readonly number[]): number | null {
+  if (f[0] !== 0xf0 || f[5] !== 0x1f) return null;
+  return (f[6] ?? 0) | ((f[7] ?? 0) << 7);
+}
 /** A complete burst: head advertising `values.length`, one full body, end. */
 function burst(effectId: number, values: readonly number[]): number[][] {
   return [head(effectId, values.length), body(values), end()];
@@ -64,6 +73,11 @@ function globalDeviceBody(): number[] {
   v[7115] = ORACLE.bright7115; // Mini Display / Ring Brightness @ 70%
   v[7116] = ORACLE.contrast7116; // Mini Display Contrast @ 50%
   v[110] = ORACLE.ring110; // Ring Intensity Bright @ 100%
+  v[119] = METRONOME.metlevel1; // GLOBAL_METLEVEL1 (Output 1) = -5.0 dB
+  v[120] = METRONOME.metlevel2; // GLOBAL_METLEVEL2 (Output 2) = 0.0 dB
+  v[121] = METRONOME.metlevel3; // GLOBAL_METLEVEL3 (USB / Digital) = 0.0 dB
+  v[14878] = METRONOME.metronome; // GLOBAL_METRONOME = OFF
+  v[14879] = METRONOME.metronomeCc; // GLOBAL_METRONOME_CC = 128 (NONE)
   return v;
 }
 
@@ -175,4 +189,61 @@ export async function runGlobalBulkReadTests(): Promise<void> {
     'case 7: the route surfaces GLOBAL_FS_BRIGHTNESS as the resolved number');
   assertEqual(JSON.parse(JSON.stringify(handled)).value, handled!.value,
     'case 7: the resolved value survives the JSON boundary unchanged');
+
+  // 8. THE METRONOME CONTROLS ARE SERVED FROM THE GLOBAL BODY. FM3-Edit's Controllers → Tempo/Pitch
+  //    page draws them as `crossBlock` refs into family GLOBAL (fm3/layouts.generated.ts:1880-1888), so
+  //    they are eid-1 pids like any other GLOBAL param. The records below are verbatim from a real
+  //    captured body (2026-10-30): the toggle reads OFF, Output 1 reads -5.0 dB, Outputs 2 and
+  //    USB/Digital read 0.0 dB, and the CC selector reads 128 = NONE. Axis's Controllers screen renders
+  //    exactly this set (GET /global/params → metronome.ts), so a regression here empties that section.
+  const met = find(globalParams, 14878) as EnumParam | undefined;
+  assert(!!met, 'case 8: GLOBAL_METRONOME (14878) is served as a discrete control');
+  assertEqual(met!.value, 0, 'case 8: the captured body reads the metronome OFF');
+  assertEqual(met!.options.map((o) => o.label).join('/'), 'OFF/ON', 'case 8: the toggle carries the device OFF/ON labels');
+  const lvl1 = find(globalParams, 119) as NamedParam | undefined;
+  assert(!!lvl1 && typeof lvl1.value === 'number' && lvl1.unresolved === undefined,
+    'case 8: GLOBAL_METLEVEL1 (119) resolves to a number');
+  assert(Math.abs((lvl1!.value as number) - -5) < 0.05,
+    `case 8: 38228 reads as the captured -5.0 dB (range -40..20), got ${lvl1!.value}`);
+  assertEqual(lvl1!.min, -40, 'case 8: the metronome level carries its device-true -40 dB floor');
+  assertEqual(lvl1!.max, 20, 'case 8: the metronome level carries its device-true +20 dB ceiling');
+  for (const pid of [120, 121]) {
+    const lvl = find(globalParams, pid) as NamedParam | undefined;
+    assert(!!lvl && Math.abs((lvl.value as number) - 0) < 0.05,
+      `case 8: GLOBAL_METLEVEL pid ${pid} reads the captured 0.0 dB, got ${lvl?.value}`);
+  }
+  const cc = find(globalParams, 14879) as EnumParam | undefined;
+  assert(!!cc, 'case 8: GLOBAL_METRONOME_CC (14879) is served as a discrete control');
+  assertEqual(cc!.value, 128, 'case 8: the captured body reads the metronome CC as 128');
+  assertEqual(cc!.options.find((o) => o.value === 128)?.label, 'NONE',
+    'case 8: CC 128 is the device\'s NONE entry, not a fabricated label');
+
+  // 9. A READ-ONLY GLOBAL READ MUST NOT STEAL THE DEVICE-EDIT WATCH. The Controllers screen's metronome
+  //    section reads eid 1 while Controllers (eid 2) is the block the user has open; if that read moved
+  //    the FM3 front-panel poll to eid 1, front-panel edits to the open block would stop reflecting.
+  //    `watch: false` is what prevents it — the poll must still target the block opened last.
+  const polls: number[] = [];
+  const profile = PROFILES[MODEL]!;
+  const codec = createModernFractalCodec(profile.model);
+  const watchMock = new MockTransport('serial', 'mock-global-watch');
+  watchMock.isOpen = true;
+  watchMock.reply = (req) => {
+    const eid = polledEid(req);
+    if (eid == null) return [];
+    polls.push(eid);
+    return burst(eid, new Array(eid === GLOBAL_EID ? DEVICE_BODY_LEN : AMP_STRIDE * 4).fill(0));
+  };
+  const watchDriver = createGen3Driver(profile, {
+    transport: async () => watchMock,
+    emit: () => {},
+    getCadence: () => cadenceFor(profile.model, 'balanced'),
+  });
+  await watchDriver.blockParams(AMP_EID); // the user opens a block → that block is the poll target
+  polls.length = 0;
+  await watchDriver.blockParams(GLOBAL_EID, { watch: false }); // the metronome section reads GLOBAL
+  assert(polls.includes(GLOBAL_EID), 'case 9: the read-only GLOBAL read did poll eid 1 (the read happened)');
+  polls.length = 0;
+  await watchDriver.readDeviceEditState();
+  assertEqual(polls[0], AMP_EID,
+    'case 9: after a watch:false GLOBAL read the front-panel poll still targets the block the user has open');
 }

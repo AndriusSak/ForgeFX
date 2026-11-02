@@ -548,6 +548,10 @@ export async function buildApp(
   // ── live block params (addressed by the placed block's canonical address `addr`: gen-3 = the
   //    effect id, AM4 = the block's pidLow — exactly what each device's grid/blocks report) ──
   app.get<{ Params: { eid: string } }>('/preset/blocks/:eid/params', async (req, reply) => blockParamsH(reply, Number(req.params.eid)));
+  // The GLOBAL (eid 1) settings block, read WITHOUT taking the device-edit watch. The Controllers
+  // screen's metronome section reads it while the user is on Controllers (eid 2); a plain
+  // blockParams(1) would move the FM3 front-panel poll off the block the user has open.
+  app.get('/global/params', async (_req, reply) => blockParamsH(reply, 1, { watch: false }));
   app.put<{ Params: { eid: string; paramId: string }; Body: { value: number; continuous?: boolean } }>(
     '/preset/blocks/:eid/params/:paramId',
     async (req, reply) => setParamH(reply, Number(req.params.eid), Number(req.params.paramId), req.body.value, req.body.continuous)

@@ -460,7 +460,11 @@ export interface DeviceDriver {
   blockTypes?(slug: string): TypeModel[];
 
   // ── live block params ──
-  blockParams?(eid: number): Promise<{ block: string; slug: string; page: number; named: NamedParam[]; enums: EnumParam[]; type: { value: number; name: string } | null; layout?: DeviceLayout }>;
+  /** Read a block's live params. `opts.watch: false` reads WITHOUT making this block the device-edit
+   *  poll target — for a read-only consumer that must not steal the watch from the block the user has
+   *  open (the Controllers screen's metronome section reads GLOBAL/eid 1 while Controllers/eid 2 is
+   *  open). Omitted/true keeps the historical behaviour. */
+  blockParams?(eid: number, opts?: { watch?: boolean }): Promise<{ block: string; slug: string; page: number; named: NamedParam[]; enums: EnumParam[]; type: { value: number; name: string } | null; layout?: DeviceLayout }>;
   readParams?(eid: number, pids: number[]): Promise<Record<number, number>>;
   /** Per-pid read returning NORMALIZED 0..1 values (the device's own wire fraction), keyed by pid.
    *  Unreadable pids are omitted, never fabricated. Distinct from the fn=0x1F bulk read, which is

@@ -121,12 +121,12 @@ export function createUnifiedHandlers(registry: DeviceRegistry) {
       return await d.sceneState();
     } catch (e) { return decodeFail(reply, 'scene-state', e); }
   };
-  const blockParamsH = async (reply: StatusSink, addr: number) => {
+  const blockParamsH = async (reply: StatusSink, addr: number, opts?: { watch?: boolean }) => {
     if (!isEid(addr)) { reply.code(400); return { error: 'eid must be an integer 0..16383' }; }
     try {
       const d = await driver();
       if (!d.blockParams) return unsupported(reply, 'blockParams');
-      return await d.blockParams(addr);
+      return await d.blockParams(addr, opts);
     } catch (e) { reply.code(404); return { error: (e as Error).message }; }
   };
   // ── read-input seam guards (shared by BOTH surfaces) ─────────────────────────────────────────

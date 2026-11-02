@@ -501,6 +501,8 @@ export function createRouter(deps: RuntimeDeps): {
 
   // ── live block params (addressed by the placed block's canonical address `addr`) ──
   on('GET', '/preset/blocks/:eid/params', (c) => h.blockParamsH(c.reply, Number(c.params.eid)));
+  // GLOBAL (eid 1) read that does NOT take the device-edit watch — see app.ts for why.
+  on('GET', '/global/params', (c) => h.blockParamsH(c.reply, 1, { watch: false }));
   on('PUT', '/preset/blocks/:eid/params/:paramId', (c) => {
     const b = c.body as { value: number; continuous?: boolean };
     return h.setParamH(c.reply, Number(c.params.eid), Number(c.params.paramId), b.value, b.continuous);
